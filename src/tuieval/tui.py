@@ -112,6 +112,14 @@ def verdict_rank(rows):
     return -statuses.count("PASS"), statuses.count("FAIL")
 
 
+def short_note(note, width=60):
+    """A job note for the queue table: a server that never started says so briefly (the notice has the
+    detail), and long notes end in … rather than mid-word."""
+    if " while loading" in note and note.startswith("server exited"):
+        note = "didn't start: " + note.split(" while loading", 1)[1].lstrip(": ") or "didn't start"
+    return note if len(note) <= width else note[:width - 1].rsplit(" ", 1)[0] + "…"
+
+
 def quant_text(ep):
     """A pinned endpoint's quantization, as the provider declares it."""
     q = (ep or {}).get("quantization")
@@ -1447,7 +1455,32 @@ class RunScreen(Screen):
         self.ended = None
         self.recent_entries = {}  # Recent results row key -> answer (for AnswerScreen)
         self.waiting = None       # set while another tuieval window holds the machine
+        self.failed_packs = {}    # label -> [pack labels] failed, waiting to be reported in one notice
+        self.server_logs = {}     # label -> its server log, for failure notices
         self.total = sum(j.total for j in jobs if j.status in ("waiting", "done"))   # done: finished earlier
+
+    def notify_failure(self, label, message, model=False):
+        """One notice per failure: what went wrong, which packs it took down, and where to look.
+        Packs a failed model never ran are folded into the model's notice."""
+        packs = self.failed_packs.pop(label, [])
+        if not packs and not model:
+            return   # already reported with the model's failure
+        message = message.removeprefix(f"{label}: ")
+        reason, _, rest = message.partition(" (see ")
+        reason = reason.rstrip(".")
+        lines = [reason[:1].upper() + reason[1:] + "."]
+        if packs:
+            shown = " · ".join(packs[:4]) + (f" · and {len(packs) - 4} more" if len(packs) > 4 else "")
+            lines.append(f"{'Skipped' if model else 'Failed'} ({len(packs)}): {shown}")
+        log = self.server_logs.get(label)
+        if log:
+            root = self.app.engine.root + os.sep
+            home = os.path.expanduser("~") + os.sep
+            lines.append("Server log: " + (log[len(root):] if log.startswith(root) else
+                                           "~/" + log[len(home):] if log.startswith(home) else log))
+        title = f"{label} didn't start" if "while loading" in message or "not found" in message else \
+            f"{label} failed" if model else f"{label}: pack failed"
+        self.notify("\n".join(lines), title=title, severity="error", timeout=30)
 
     def check_action(self, action, parameters):
         if action in self.LIVE_ONLY:
@@ -1600,7 +1633,12 @@ class RunScreen(Screen):
                     if isinstance(screen, ResultsScreen):
                         screen.reload(f"{job.label} · {job.pack.label} finished; results refreshed.")
                 if job.status == "failed":
-                    self.notify(f"{job.key}: {job.note}", severity="error", timeout=30)
+                    # A model that fails to start fails all its packs at once, followed by model_failed:
+                    # collect them so one notice covers the lot instead of one per pack.
+                    first = job.label not in self.failed_packs
+                    self.failed_packs.setdefault(job.label, []).append(job.pack.label)
+                    if first:
+                        self.set_timer(1.0, lambda label=job.label, note=job.note: self.notify_failure(label, note))
             self.update_overall()
         elif kind == "machine_busy":
             self.waiting = d["holder"]
@@ -1616,6 +1654,8 @@ class RunScreen(Screen):
         elif kind == "model_loading":
             self.current = f"Loading [b]{d['label']}[/b]…"
             self.event(f"{d['label']}: starting server")
+            if d.get("log"):
+                self.server_logs[d["label"]] = d["log"]
             self.query_one("#serverlog", Log).write_line(f"$ {' '.join(d['command'])}")
             self.query_one("#reasoning", StreamView).clear()
             self.query_one("#answer", StreamView).clear()
@@ -1641,7 +1681,7 @@ class RunScreen(Screen):
         elif kind == "model_failed":
             self.event(f"{d['label']}: FAILED: {d['message']}")
             if "by user" not in d["message"]:
-                self.notify(f"{d['label']}: {d['message']}", severity="error", timeout=30)
+                self.notify_failure(d["label"], d["message"], model=True)
         elif kind == "prompt_reused":
             label, pack, tokens = d["label"], d["pack"], d["tokens"]
             if d.get("hosted"):
@@ -1697,7 +1737,7 @@ class RunScreen(Screen):
                            ("pass", f"[green]{j.passed}[/green]" if j.passed else ""),
                            ("fail", f"[red]{j.failed}[/red]" if j.failed else ""),
                            ("time", fmt_secs(elapsed) if elapsed else ""),
-                           ("note", j.note[:60])):
+                           ("note", short_note(j.note))):
             q.update_cell(j.key, col, value, update_width=True)
 
     def update_overall(self):
@@ -2285,10 +2325,15 @@ class EvalsApp(App):
     #pq-compare-title { padding: 0 1; height: auto; }
     #pq-summary { height: auto; max-height: 10; }
     #pq-legend { padding: 0 1; height: auto; }
-    Tab { color: $foreground 85%; }   /* Textual dims inactive tabs to 50%: too faint to read */
+    /* Tabs must read as tabs, not as a line of text: each tab is a button-like chip on its own band,
+       the active one filled with the accent colour. (Textual's default: dimmed words on the background.) */
+    Tabs { background: $panel; }
+    Tab { color: $foreground 85%; background: $boost; padding: 0 1; margin: 0 1 0 0; }
     Tab:ansi { text-style: not dim; }
-    Tab.-active, Tab:hover { color: $foreground; }
-    Tab.-active { text-style: bold; }
+    Tab:hover { color: $foreground; background: $primary 40%; }
+    Tab.-active { color: $text; background: $accent; text-style: bold; }
+    Tab.-active:hover { background: $accent; }
+    Underline > .underline--bar { color: $accent; background: $panel; }
     AnswerScreen { align: center middle; }
     #answer-dialog { width: 96%; height: 94%; border: thick $primary; background: $surface; padding: 0 1; }
     #answer-head { height: auto; }

@@ -182,6 +182,21 @@ class Units(unittest.TestCase):
         self.assertGreater(len(work[-1][1][0]["content"]), 30000)
         self.assertEqual(len(tune.decode_workload(None)), 3)
 
+    def test_server_error_prefers_the_specific_line(self):
+        from tuieval import engine
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "server.log")
+            write(log, "loading\nerror: this GGUF stores tensors it cannot load; choose another variant\n"
+                       "error: model failed to load\n")
+            self.assertEqual(engine.server_error(log, 0), "this GGUF stores tensors it cannot load; choose another variant")
+            write(log, "ok\nerror: runtime bootstrap failed [x]: context does not fit\n")
+            self.assertEqual(engine.server_error(log, 0), "context does not fit")
+
+    def test_short_note(self):
+        from tuieval import tui
+        self.assertEqual(tui.short_note("server exited with code 1 while loading: bad file"), "didn't start: bad file")
+        self.assertTrue(tui.short_note("word " * 30).endswith("…"))
+
     def test_module_needs(self):
         from tuieval import packs
         with tempfile.TemporaryDirectory() as tmp:

@@ -478,12 +478,21 @@ def server_error(log, start):
             lines = f.read().decode(errors="replace").splitlines()
     except OSError:
         return None
+    # The last block of error lines, read from its start: servers often follow the specific error
+    # ("this GGUF stores tensors … cannot load") with a generic one ("model failed to load"), and
+    # the specific one is what the user needs.
+    block = []
     for line in reversed(lines):
-        if line.startswith("error: runtime bootstrap failed"):
-            return line.split("]: ", 1)[-1]
         if line.startswith("error: "):
-            return line.removeprefix("error: ")
-    return None
+            block.append(line)
+        elif block:
+            break
+    if not block:
+        return None
+    line = block[-1]
+    if line.startswith("error: runtime bootstrap failed"):
+        return line.split("]: ", 1)[-1]
+    return line.removeprefix("error: ")
 
 def pack_min_context(pack):
     """Rough context a pack needs: its longest prompt (~4 chars/token) plus room to answer."""
