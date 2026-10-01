@@ -1,8 +1,13 @@
 # tuieval
 
-**Evaluate local LLMs on your own questions, in the terminal.** Compare models (tiny, dense, MoE; llama.cpp GGUFs, LM Studio, Ollama, vLLM, OpenRouter) on what *you* use them for, measuring **accuracy, speed and token use** together, and get a **PASS / FAIL / INCONCLUSIVE** verdict per use case. Grading is automatic; there's no LLM judge.
+**Find out which model you can trust with your work, on your own questions, in the terminal.** Run the same eval packs against local models (llama.cpp GGUFs, LM Studio, Ollama, vLLM; tiny, dense or MoE) and against any frontier model on OpenRouter, side by side. tuieval measures **accuracy, speed and token use** together, and gives a **PASS / FAIL / INCONCLUSIVE** verdict per use case. Grading is automatic; there's no LLM judge.
 
-tuieval ships with **no built-in benchmark**. Public benchmarks leak into training data and rarely match your work. You write *eval packs* (folders of your own questions with checkable answers), and tuieval runs them, grades them, and tells you which model is ready for that job on this machine.
+Public benchmarks leak into training data and rarely look like your work, so tuieval ships with **no built-in benchmark**. Instead you build *eval packs* from what you actually do: questions with checkable answers, in your domain, with your rules. Then you get an answer to the questions that matter:
+
+- Is this local model good enough to replace the API I'm paying for?
+- Which frontier model is best for *my* domain, not on a leaderboard?
+- Is a cheaper or faster model safe to use, or does it break my hard rules?
+- Did the new release, fine-tune or quantization get better or worse at my tasks?
 
 ```bash
 pipx install tuieval          # or: pip install tuieval   (Python 3.11+)
@@ -25,6 +30,14 @@ Once you've added your own packs and models, the setup screen looks like this (p
 - **Per-machine speed.** A fit check picks the largest context that fits your Mac's GPU memory, `tuieval tune` finds the fastest speed-only server flags (with a guard that rejects flags that change answers), and readiness includes a *Fast enough?* table per machine, measured or projected.
 - **Tests that check themselves.** Every test carries a reference answer and known-wrong answers, and `tuieval selftest` checks the grader accepts the first and rejects the second, and that each gate is reachable at all.
 - **History.** Verdict changes are appended to `results/verdicts.jsonl`, and replaced results are moved to `history/`, never overwritten.
+
+## Where your questions come from
+
+- **From the model you trust most.** Ask your best model to draft domain-specific questions with expected answers and the mistakes a weaker model would make, then save them as a pack (`tuieval new-pack` shows the format). `tuieval selftest` checks every test's reference answer passes and every known-wrong answer fails, so a bad generated question is caught before it fails a good model.
+- **From problems in your own workflow.** Point the app you already use at `tuieval watch` (a proxy in front of your model server), and every exchange is logged. When a model gets something wrong, `tuieval capture <log> --pack <name>` turns that exchange into a test skeleton, with the bad answer kept as a known-wrong answer. Fill in the expected answer, and that failure becomes a regression test for every model you try.
+- **From what you already know.** Policies, edge cases, past incidents, tricky customer questions: anything with an answer you can check.
+
+**Any model on OpenRouter** runs with no setup beyond `OPENROUTER_API_KEY`, e.g. `tuieval run --only openrouter:<model id>`, or pick it in the TUI. Each model is pinned to one provider endpoint, so its answers aren't a mix of providers and quantizations. Frontier and local models get the same tests, gates and verdicts.
 
 ## Eval packs
 
