@@ -10,7 +10,7 @@ Public benchmarks leak into training data and rarely look like your work, so tui
 - Did the new release, fine-tune or quantization get better or worse at my tasks?
 
 ```bash
-pipx install tuieval          # or: pip install tuieval   (Python 3.11+)
+pipx install tuieval          # or: uv tool install tuieval, or pip install tuieval   (Python 3.11+)
 tuieval init my-evals && cd my-evals
 tuieval new-pack my-first-pack # a pack of example questions to edit
 tuieval add ~/models/Some-Model-Q4_K_M.gguf

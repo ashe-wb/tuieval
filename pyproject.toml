@@ -44,4 +44,4 @@ path = "src/tuieval/__init__.py"
 packages = ["src/tuieval"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "docs/", "tests/", "packaging/", "README.md", "LICENSE", "CHANGELOG.md"]
+include = ["src/", "docs/", "tests/", "README.md", "LICENSE", "CHANGELOG.md", "RELEASING.md"]
