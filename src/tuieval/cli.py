@@ -1,4 +1,4 @@
-"""tuieval: evaluate local models on your own eval packs, in the terminal.
+"""tuieval: evaluate local and frontier models on your own eval packs, in the terminal.
 
 Usage: tuieval [--workspace DIR] [command] [options]
 

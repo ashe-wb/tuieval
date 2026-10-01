@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "tuieval"
 dynamic = ["version"]
-description = "Evaluate local LLMs on your own eval packs, in the terminal: accuracy, speed and tokens, with PASS/FAIL verdicts."
+description = "Evaluate local and frontier LLMs on your own questions: accuracy, speed, tokens and PASS/FAIL verdicts, in the terminal."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "tuieval contributors" }]
-keywords = ["llm", "evaluation", "evals", "llama.cpp", "local-llm", "tui", "benchmark"]
+keywords = ["llm", "evaluation", "evals", "llama.cpp", "local-llm", "openrouter", "tui", "benchmark"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console :: Curses",

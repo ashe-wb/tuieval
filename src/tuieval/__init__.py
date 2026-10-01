@@ -1,2 +1,2 @@
-"""tuieval: evaluate local models on your own eval packs, in the terminal."""
-__version__ = "0.1.0"
+"""tuieval: evaluate local and frontier models on your own eval packs, in the terminal."""
+__version__ = "0.1.1"

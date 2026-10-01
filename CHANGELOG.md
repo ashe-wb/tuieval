@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Package description and README: tuieval evaluates local and frontier (OpenRouter) models alike, and explains where eval questions come from.
+
 ## 0.1.0
 
 First public release.
