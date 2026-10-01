@@ -1,0 +1,17 @@
+# A pack is a folder of questions. Edit anything here; see docs/writing-packs.md for every field.
+label = "__LABEL__"              # shown in the TUI
+group = "__GROUP__"              # the use case: all packs in a group must PASS for it to PASS
+description = "Questions with one checkable answer (a number or a word) on the last ANSWER: line."
+grader = "answer"                # how answers are scored (answer, rag, reply, tool_call, code, or your own)
+system = "system.txt"            # the system prompt sent with every question
+order = 100                      # position in the list
+screen = 6                       # tests in a Screen run
+
+[certify]
+repeat = 3                       # times each question is asked in a Certify run
+
+[gate]                           # what PASS means (see docs/writing-packs.md#gates)
+min_accuracy = 0.80              # the 95% lower bound of the pass rate must reach this
+max_truncation = 0.02            # share of answers allowed to hit max_tokens
+# max_critical_rate = 0.05       # needs 3 / rate failure-free critical trials (60 here)
+# max_p90_s = 60                 # 90th-percentile seconds per answer, judged per machine

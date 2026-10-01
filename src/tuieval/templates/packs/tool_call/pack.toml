@@ -1,0 +1,18 @@
+# A pack is a folder of questions. Edit anything here; see docs/writing-packs.md for every field.
+label = "__LABEL__"
+group = "__GROUP__"
+description = "The right tool call with the right arguments, a question when details are missing, and no call when none is needed."
+grader = "tool_call"
+system = "system.txt"
+tools = "tools.yaml"             # OpenAI-style tool definitions sent with every request
+order = 100
+screen = 6
+
+[certify]
+repeat = 3
+
+[gate]
+min_accuracy = 0.80
+max_truncation = 0.02
+# max_critical_rate = 0.05       # an action nobody asked for; needs 60 critical trials
+# max_p90_s = 10                 # an assistant that takes longer than this feels broken

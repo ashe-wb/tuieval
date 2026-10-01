@@ -1,0 +1,59 @@
+# Example tests: replace them with your own.
+#   expect_tool     {name, arguments}: the one call expected (extra arguments are allowed)
+#   expect_no_tool  true: any call fails;  clarify: true: the reply must ask a question
+# Every tool test is a critical trial: a call nobody asked for, or the wrong tool, is critical.
+
+- id: timer-words
+  description: timer in words
+  category: tool call
+  difficulty: easy
+  input: Set a timer for twenty minutes.
+  expect_tool:
+    name: set_timer
+    arguments: {duration_seconds: 1200}
+
+- id: timer-label
+  description: timer with unit conversion and a label
+  category: tool call
+  difficulty: medium
+  input: Can you start a timer for an hour and a half for the roast?
+  expect_tool:
+    name: set_timer
+    arguments: {duration_seconds: 5400, label: roast}
+
+- id: alarm
+  description: alarm at a clock time
+  category: tool call
+  difficulty: medium
+  input: Wake me up at half past six tomorrow.
+  expect_tool:
+    name: set_alarm
+    arguments: {time: "06:30", day: tomorrow}
+
+- id: dim-lights
+  description: dim the lights in a room
+  category: tool call
+  difficulty: easy
+  input: Dim the living room lights to 30 percent.
+  expect_tool:
+    name: control_lights
+    arguments: {room: living room, brightness: 30}
+
+- id: alarm-no-time
+  description: asks for the missing time
+  category: clarify
+  difficulty: hard
+  input: Set an alarm for me.
+  expect_no_tool: true
+  clarify: true
+  reference: "Sure, what time should I set it for?"
+  wrong: ['{"name": "set_alarm", "arguments": {"time": "07:00"}}']
+
+- id: just-a-question
+  description: answers without calling a tool
+  category: no tool
+  difficulty: medium
+  input: How many seconds are there in an hour?
+  expect_no_tool: true
+  reference: "There are 3,600 seconds in an hour."
+  wrong: ['{"name": "set_timer", "arguments": {"duration_seconds": 3600}}']

@@ -1,0 +1,67 @@
+# Example tests: replace them with your own. Each test is one question.
+#   input       the user message (the only part of the test the model sees, with system.txt)
+#   expected    the right number (± tolerance), or NOT_AVAILABLE; expected_text for a word
+#   difficulty  easy | medium | hard: your label, never sent to the model
+#   reference   a correct answer: `tuieval selftest` checks the grader accepts it
+#   wrong       mistakes the grader must reject: `tuieval selftest` checks that too
+#   group       variants of one case share a group: a good model gets all of them right
+
+- id: percent-of
+  description: a percentage of a number
+  category: arithmetic
+  difficulty: easy
+  input: What is 15% of 80?
+  expected: 12
+  tolerance: 0
+  reference: "15% of 80 is 0.15 × 80 = 12.\nANSWER: 12"
+  wrong: ["ANSWER: 1200", "ANSWER: 5.33"]
+
+- id: unit-price
+  description: cheaper per unit
+  category: arithmetic
+  difficulty: medium
+  group: unit-price
+  input: A 750 g box costs 4.50 and a 1.2 kg box costs 6.60. What is the lower price per kilogram?
+  expected: 5.5
+  tolerance: 0.01
+  reference: "750 g: 4.50 / 0.75 = 6.00 per kg. 1.2 kg: 6.60 / 1.2 = 5.50 per kg.\nANSWER: 5.5"
+  wrong: ["ANSWER: 6", "ANSWER: 6.6"]
+
+- id: unit-price-reworded
+  description: cheaper per unit (reworded)
+  category: arithmetic
+  difficulty: medium
+  group: unit-price
+  input: Box A holds 1.2 kg for 6.60; box B holds 750 g for 4.50. Give the better price per kilo.
+  expected: 5.5
+  tolerance: 0.01
+  reference: "A: 6.60 / 1.2 = 5.50. B: 4.50 / 0.75 = 6.00.\nANSWER: 5.5"
+  wrong: ["ANSWER: 6"]
+
+- id: meeting-overlap
+  description: overlap of two time ranges, in minutes
+  category: reasoning
+  difficulty: medium
+  input: One meeting runs 09:40-11:15 and another 10:50-12:00. For how many minutes do they overlap?
+  expected: 25
+  tolerance: 0
+  reference: "The overlap is 10:50 to 11:15.\nANSWER: 25"
+  wrong: ["ANSWER: 35", "ANSWER: 95"]
+
+- id: weekday
+  description: weekday after a number of days
+  category: reasoning
+  difficulty: hard
+  input: If today is a Thursday, what day of the week is it 100 days from now? Answer with the day's name.
+  expected_text: Saturday
+  reference: "100 = 14 × 7 + 2, so two days after Thursday.\nANSWER: Saturday"
+  wrong: ["ANSWER: Friday", "ANSWER: Sunday"]
+
+- id: missing-data
+  description: declines when the data isn't there
+  category: traps
+  difficulty: hard
+  input: A shop sold 40 umbrellas on Monday and some more on Tuesday. How many did it sell on Tuesday?
+  expected: NOT_AVAILABLE
+  reference: "The question doesn't say how many were sold on Tuesday.\nANSWER: NOT_AVAILABLE"
+  wrong: ["ANSWER: 40", "ANSWER: 0"]

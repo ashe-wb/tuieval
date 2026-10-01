@@ -1,0 +1,4 @@
+Answer the question. Show brief working if it helps, then end your reply with one line:
+ANSWER: <the answer>
+For numbers, give just the number without units. If the question can't be answered from what it gives you, end with:
+ANSWER: NOT_AVAILABLE

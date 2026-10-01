@@ -1,0 +1,197 @@
+# Example tests: replace them with your own.
+#   hidden_tests   Python run after the model's code: a "# SETUP" block, then "# CHECK: <name>" blocks,
+#                  each run on its own (score = share of checks that pass)
+#   critical: true makes any failure disqualifying (a subtle bug that would silently do damage)
+
+- id: slugify
+  description: URL slug from a title
+  category: strings
+  difficulty: easy
+  input: |
+    Write `slugify(title: str) -> str`: lowercase, words joined by single hyphens, only a-z and 0-9 kept,
+    no leading or trailing hyphens. "Hello, World!  2024" -> "hello-world-2024".
+  hidden_tests: |
+    # CHECK: basic
+    assert slugify("Hello, World!  2024") == "hello-world-2024"
+    # CHECK: edges
+    assert slugify("  --Already-Slugged--  ") == "already-slugged"
+    assert slugify("") == ""
+  reference: |
+    ```python
+    import re
+    def slugify(title):
+        return "-".join(re.findall(r"[a-z0-9]+", title.lower()))
+    ```
+  wrong:
+    - |
+      ```python
+      def slugify(title):
+          return title.lower().replace(" ", "-")
+      ```
+
+- id: merge-ranges
+  description: merge overlapping ranges
+  category: algorithms
+  difficulty: medium
+  input: |
+    Write `merge(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]` that merges overlapping or touching
+    closed ranges and returns them sorted. merge([(6, 8), (1, 3), (2, 4)]) -> [(1, 4), (6, 8)];
+    (1, 2) and (3, 4) touch, so they become (1, 4).
+  hidden_tests: |
+    # CHECK: overlap
+    assert merge([(6, 8), (1, 3), (2, 4)]) == [(1, 4), (6, 8)]
+    # CHECK: touching
+    assert merge([(1, 2), (3, 4)]) == [(1, 4)]
+    # CHECK: empty
+    assert merge([]) == []
+  reference: |
+    ```python
+    def merge(ranges):
+        out = []
+        for a, b in sorted(ranges):
+            if out and a <= out[-1][1] + 1:
+                out[-1] = (out[-1][0], max(out[-1][1], b))
+            else:
+                out.append((a, b))
+        return out
+    ```
+  wrong:
+    - |
+      ```python
+      def merge(ranges):
+          out = []
+          for a, b in sorted(ranges):
+              if out and a <= out[-1][1]:
+                  out[-1] = (out[-1][0], max(out[-1][1], b))
+              else:
+                  out.append((a, b))
+          return out
+      ```
+
+- id: parse-duration
+  description: parse a duration string
+  category: parsing
+  difficulty: medium
+  input: |
+    Write `parse_duration(text: str) -> int` returning seconds for strings like "1h30m", "45s", "2m5s" or "3h".
+    Raise ValueError for anything else, including an empty string.
+  hidden_tests: |
+    # CHECK: values
+    assert parse_duration("1h30m") == 5400
+    assert parse_duration("2m5s") == 125
+    assert parse_duration("3h") == 10800
+    # CHECK: invalid
+    for bad in ["", "5x", "h1"]:
+        try:
+            parse_duration(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad!r}")
+  reference: |
+    ```python
+    import re
+    def parse_duration(text):
+        m = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", text)
+        if not text or not m:
+            raise ValueError(text)
+        h, mi, s = (int(x or 0) for x in m.groups())
+        return h * 3600 + mi * 60 + s
+    ```
+  wrong:
+    - |
+      ```python
+      def parse_duration(text):
+          return int(text[:-1])
+      ```
+
+- id: running-max
+  description: running maximum of a list
+  category: algorithms
+  difficulty: easy
+  input: |
+    Write `running_max(xs: list[float]) -> list[float]` where item i is the largest of xs[0..i].
+  hidden_tests: |
+    # CHECK: values
+    assert running_max([3, 1, 4, 1, 5]) == [3, 3, 4, 4, 5]
+    # CHECK: empty
+    assert running_max([]) == []
+  reference: |
+    ```python
+    def running_max(xs):
+        out, best = [], None
+        for x in xs:
+            best = x if best is None or x > best else best
+            out.append(best)
+        return out
+    ```
+  wrong:
+    - |
+      ```python
+      def running_max(xs):
+          return sorted(xs)
+      ```
+
+- id: chunk
+  description: split a list into chunks
+  category: algorithms
+  difficulty: easy
+  input: |
+    Write `chunk(xs: list, size: int) -> list[list]` splitting xs into consecutive chunks of `size`
+    (the last may be shorter). Raise ValueError if size < 1.
+  hidden_tests: |
+    # CHECK: values
+    assert chunk([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]
+    # CHECK: bad size
+    try:
+        chunk([1], 0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("size 0 accepted")
+  reference: |
+    ```python
+    def chunk(xs, size):
+        if size < 1:
+            raise ValueError(size)
+        return [xs[i:i + size] for i in range(0, len(xs), size)]
+    ```
+  wrong:
+    - |
+      ```python
+      def chunk(xs, size):
+          return [xs[i:i + size] for i in range(0, len(xs) - size + 1, size)]
+      ```
+
+- id: dedupe-keep-order
+  description: remove duplicates, keeping the first of each
+  category: algorithms
+  difficulty: hard
+  critical: true
+  input: |
+    Write `dedupe(records: list[dict], key: str) -> list[dict]` that keeps the first record for each value
+    of `key`, in the original order, and never modifies the input list.
+  hidden_tests: |
+    # SETUP
+    rows = [{"id": 2, "v": "a"}, {"id": 1, "v": "b"}, {"id": 2, "v": "c"}]
+    # CHECK: first-kept
+    assert dedupe(rows, "id") == [{"id": 2, "v": "a"}, {"id": 1, "v": "b"}]
+    # CHECK: input-untouched
+    dedupe(rows, "id")
+    assert len(rows) == 3
+  reference: |
+    ```python
+    def dedupe(records, key):
+        seen, out = set(), []
+        for r in records:
+            if r[key] not in seen:
+                seen.add(r[key])
+                out.append(r)
+        return out
+    ```
+  wrong:
+    - |
+      ```python
+      def dedupe(records, key):
+          return list({r[key]: r for r in records}.values())
+      ```

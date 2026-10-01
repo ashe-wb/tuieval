@@ -1,0 +1,67 @@
+# Example tests: replace them with your own. Every rule a test sets is one check; all must pass.
+#   max_words  no_markdown  ends_with_question  must_include ("a|b" = either)  must_not_include  must_match (regex)
+
+- id: short-fact
+  description: a short spoken answer
+  category: answers
+  difficulty: easy
+  input: How many days are there in a leap year?
+  max_words: 25
+  no_markdown: true
+  must_include: ["366"]
+  reference: "A leap year has 366 days."
+  wrong: ["A leap year has 365 days.", "**366 days**"]
+
+- id: no-list
+  description: steps as speech, not a list
+  category: style
+  difficulty: medium
+  input: How do I boil an egg?
+  max_words: 45
+  no_markdown: true
+  must_include: ["minute"]
+  reference: "Put the egg in boiling water for about eight minutes, then cool it in cold water."
+  wrong: ["1. Boil water\n2. Add the egg\n3. Wait eight minutes"]
+
+- id: asks-for-detail
+  description: asks when a detail is missing
+  category: clarify
+  difficulty: medium
+  input: Send a message to my sister.
+  max_words: 25
+  ends_with_question: true
+  reference: "Sure, what would you like the message to say?"
+  wrong: ["Done, I've sent it."]
+
+- id: conversion
+  description: a unit conversion
+  category: answers
+  difficulty: medium
+  input: What is 30 degrees Celsius in Fahrenheit?
+  max_words: 25
+  no_markdown: true
+  must_include: ["86"]
+  reference: "Thirty degrees Celsius is 86 degrees Fahrenheit."
+  wrong: ["It's about 54 degrees Fahrenheit."]
+
+- id: no-filler
+  description: answers without disclaimers
+  category: style
+  difficulty: easy
+  input: What's the capital of Canada?
+  max_words: 20
+  must_include: ["Ottawa"]
+  must_not_include: ["as an AI", "I'm not sure"]
+  reference: "The capital of Canada is Ottawa."
+  wrong: ["As an AI, I think it's Toronto."]
+
+- id: two-facts
+  description: two facts in one short reply
+  category: answers
+  difficulty: hard
+  input: When does spring start in the northern hemisphere, and what is the longest day called?
+  max_words: 40
+  no_markdown: true
+  must_include: ["March", "solstice"]
+  reference: "Spring starts around March 20, and the longest day is the summer solstice in June."
+  wrong: ["Spring starts in September, and the longest day is the equinox."]

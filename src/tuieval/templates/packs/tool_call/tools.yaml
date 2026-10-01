@@ -1,0 +1,32 @@
+# OpenAI-style tool definitions, sent with every request in this pack.
+- type: function
+  function:
+    name: set_timer
+    description: Start a countdown timer.
+    parameters:
+      type: object
+      properties:
+        duration_seconds: {type: integer, description: Length of the timer in seconds}
+        label: {type: string, description: Optional name for the timer, e.g. "pasta"}
+      required: [duration_seconds]
+- type: function
+  function:
+    name: set_alarm
+    description: Set an alarm at a clock time.
+    parameters:
+      type: object
+      properties:
+        time: {type: string, description: "24-hour time, HH:MM"}
+        day: {type: string, description: "today, tomorrow, or a weekday name"}
+      required: [time]
+- type: function
+  function:
+    name: control_lights
+    description: Turn lights on or off, or dim them, in a room.
+    parameters:
+      type: object
+      properties:
+        room: {type: string}
+        "on": {type: boolean}
+        brightness: {type: integer, description: 0-100}
+      required: [room]

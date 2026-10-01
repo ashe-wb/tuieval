@@ -1,0 +1,16 @@
+# A pack is a folder of questions. Edit anything here; see docs/writing-packs.md for every field.
+# The code grader RUNS model-written code on this machine: run it in a container or VM.
+label = "__LABEL__"
+group = "__GROUP__"
+description = "Small Python functions, run against hidden tests. Score = share of checks passed."
+grader = "code"
+system = "system.txt"
+order = 100
+screen = 6
+
+[certify]
+repeat = 3
+
+[gate]
+min_accuracy = 0.80
+max_truncation = 0.02

@@ -1,0 +1,99 @@
+# Example tests: replace them with your own (or generate them from your documents).
+#   expected / expected_text   the answer;  expected_sources   passages that must be cited
+# Score: 1 when the answer and the citations are right, 0.5 when only the answer is.
+
+- id: price-lookup
+  description: a fact from one passage
+  category: lookup
+  difficulty: easy
+  input: |
+    Passages:
+
+    [P1] The Orrin kettle holds 1.7 litres and costs 49 euros.
+    [P2] The Tamsin toaster has four slots and costs 65 euros.
+
+    Question: How much does the Orrin kettle cost, in euros?
+  expected: 49
+  expected_sources: [P1]
+  reference: "P1 gives the price.\nANSWER: 49\nSOURCES: P1"
+  wrong: ["ANSWER: 65\nSOURCES: P2"]
+
+- id: current-policy
+  description: prefers the current document over a superseded one
+  category: conflicts
+  difficulty: medium
+  input: |
+    Passages:
+
+    [P1] Travel policy (superseded): hotel nights are refunded up to 120 euros.
+    [P2] Travel policy (current, from March): hotel nights are refunded up to 150 euros.
+
+    Question: What is the hotel refund limit per night, in euros?
+  expected: 150
+  expected_sources: [P2]
+  reference: "P2 is the current policy.\nANSWER: 150\nSOURCES: P2"
+  wrong: ["ANSWER: 120\nSOURCES: P1"]
+
+- id: combine-two
+  description: combines two passages
+  category: multi-hop
+  difficulty: hard
+  input: |
+    Passages:
+
+    [P1] Lena Okafor leads the support team.
+    [P2] The support team works from the Porto office.
+    [P3] The Porto office opened in 2019.
+
+    Question: In which year did the office Lena Okafor's team works from open?
+  expected: 2019
+  expected_sources: [P1, P2, P3]
+  reference: "Lena leads support (P1), which works in Porto (P2), opened 2019 (P3).\nANSWER: 2019\nSOURCES: P1, P2, P3"
+  wrong: ["ANSWER: 2021\nSOURCES: P1"]
+
+- id: team-size
+  description: a number from the right passage among similar ones
+  category: lookup
+  difficulty: medium
+  input: |
+    Passages:
+
+    [P1] The design team has 9 people and works from Lyon.
+    [P2] The data team has 14 people and works from Lyon.
+
+    Question: How many people are on the data team?
+  expected: 14
+  expected_sources: [P2]
+  reference: "ANSWER: 14\nSOURCES: P2"
+  wrong: ["ANSWER: 9\nSOURCES: P1"]
+
+- id: not-there
+  description: declines when the passages don't say
+  category: traps
+  difficulty: hard
+  input: |
+    Passages:
+
+    [P1] The Orrin kettle holds 1.7 litres and costs 49 euros.
+    [P2] The Tamsin toaster has four slots and costs 65 euros.
+
+    Question: How much does the Orrin kettle weigh?
+  expected: NOT_AVAILABLE
+  reference: "Neither passage gives a weight.\nANSWER: NOT_AVAILABLE\nSOURCES: none"
+  wrong: ["ANSWER: 1.7\nSOURCES: P1"]
+
+- id: name-lookup
+  description: a name from one passage
+  category: lookup
+  difficulty: easy
+  input: |
+    Passages:
+
+    [P1] Lena Okafor leads the support team.
+    [P2] Tomas Reyes leads the billing team.
+
+    Question: Who leads the billing team?
+  expected_text: [Tomas Reyes, Tomas]
+  expected_sources: [P2]
+  reference: "ANSWER: Tomas Reyes\nSOURCES: P2"
+  wrong: ["ANSWER: Lena Okafor\nSOURCES: P1"]

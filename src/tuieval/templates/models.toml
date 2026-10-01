@@ -1,0 +1,137 @@
+# Every model tuieval knows about, and how to serve it. The questions live in packs/.
+#
+# ADDING A MODEL: press "a" in the TUI (tuieval), or:
+#     tuieval add ~/models/Some-Model-Q4_K_M.gguf                  # GGUF -> the llama server below
+#     tuieval add ~/models/VL-Model.gguf --mmproj ~/models/VL-mmproj.gguf   # vision
+#     tuieval add some-model-id --server local                      # a model on an already-running server
+#     tuieval run --tier smoke --only some-model-q4_k_m
+# or append a [[models]] block by hand (see the bottom of this file).
+#
+# Placeholders in cmd: {model} (the entry's model), {served_name}, {port}, {mmproj}, and for llama
+# {ctx} (chosen per machine by the fit check) and {kv_type}; {root} is this workspace folder.
+# A leading ~ in any argument or cwd is expanded.
+#
+# MACHINES: results record which machine they ran on. Quality results carry over between machines
+# when the output-affecting settings match; speed is tuned and judged per machine. Speed-only flags
+# come from tuning/<machine>/<label>.toml, written by `tuieval tune` (or `t` in the TUI).
+
+[defaults]
+repeat = 3
+request_timeout_ms = 1800000   # per request; long thinking runs need it
+ready_timeout_s = 1200         # how long a model may take to load before giving up
+model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
+
+# Sent with every request. A model may override it (see `thinking` / `sampling` below); results
+# record the settings each model actually ran with, and the scorecard shows any difference.
+[sampling]
+temperature = 0.7
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+max_tokens = 16384
+enable_thinking = true         # test every model in the SAME mode
+
+# llama.cpp's server (https://github.com/ggml-org/llama.cpp), started for each GGUF model.
+[servers.llama]
+# Output-affecting flags only. Anything here must be identical wherever results are compared,
+# so it's part of each result's fingerprint. Speed-only flags live in `perf` and `tune` below.
+cmd = [
+  "llama-server",
+  "-m", "{model}",
+  "--alias", "{served_name}",
+  "--host", "127.0.0.1", "--port", "{port}",
+  "--jinja",
+  "--metrics",
+  "-np", "1",
+  "-ctk", "{kv_type}", "-ctv", "{kv_type}",
+  "-c", "{ctx}",
+  "--reasoning-format", "auto",
+]
+port = 8080
+model_is_path = true           # check the GGUF exists and fits before starting
+vision_args = ["--mmproj", "{mmproj}"]   # appended only for models that set mmproj
+kv_type = "f16"                # a model's own `kv_type` (e.g. "q8_0") makes it a different model entry
+max_ctx = 65536                # upper bound; the fit check lowers it per machine (see machines.py)
+version_cmd = ["llama-server", "--version"]   # recorded with every result
+# Added to every request. cache_prompt = false: each answer is computed from scratch, so a repeat of
+# the same question reuses nothing from the last time it was asked (and its TTFT is honest).
+# Answers record any prompt tokens the server reused.
+request = { cache_prompt = false }
+
+# Speed-only flags, always applied (not tuned).
+perf = ["-ngl", "99"]
+
+# Speed-only knobs `tuieval tune` tries, one at a time from the best so far. The first option of
+# each knob is the default for models not tuned on this machine yet. Placeholders: {p} P-cores,
+# {p_minus_2}, {all} all cores. Options that stop the server from starting are skipped.
+# Check the flags against `llama-server --help` for your build.
+[servers.llama.tune]
+threads = [["-t", "{p}", "-tb", "{p}"], ["-t", "{p_minus_2}", "-tb", "{p}"], ["-t", "{all}", "-tb", "{all}"]]
+ubatch = [["-ub", "512"], ["-ub", "256"], ["-ub", "1024"]]
+batch = [["-b", "2048"], ["-b", "4096"]]
+flash_attn = [["-fa", "on"], ["-fa", "off"]]
+
+# A server that's already running (LM Studio, Ollama, vLLM, a remote box): give its URL and no cmd.
+# Its models are added with `tuieval add <model id> --server local`.
+[servers.local]
+url = "http://127.0.0.1:1234"   # LM Studio's default; Ollama is http://127.0.0.1:11434, vLLM :8000
+
+# OpenRouter: ANY model it serves, with no [[models]] entry. Name it when you run:
+#     tuieval run --tier smoke --only openrouter:qwen/qwen3-235b-a22b-2507
+#     TUI: tick "+ openrouter: any model" in the model list, or press "a" and type openrouter:<model id>
+# Results go to results/or-<id>/ and the model stays listed once it has results. A plain
+# `tuieval run` never includes OpenRouter models (they cost money); name them.
+# Needs OPENROUTER_API_KEY in the environment of the shell that starts tuieval.
+# pin_endpoint: every answer of a model comes from one provider endpoint (the closest to the released
+# weights), with no fallback, since providers run different quantizations.
+# To keep providers that store or train on prompts (and could learn your tests) out entirely, add
+#   request = { provider = { data_collection = "deny" } }
+[servers.openrouter]
+url = "https://openrouter.ai/api/v1"
+any_model = true
+label_prefix = "or"
+pin_endpoint = true
+api_key_env = "OPENROUTER_API_KEY"
+thinking_param = "reasoning"     # [sampling] enable_thinking -> OpenRouter's reasoning.enabled
+headers = { "X-Title" = "tuieval" }
+
+# Optional tuner settings.
+# [tune]
+# guard_similarity = 0.6       # greedy answers under a candidate flag must stay this similar to the defaults'
+# request_timeout_s = 600      # a tuning request that takes longer fails that candidate
+
+# Optional: llama-bench for the tuner's fast first stage (found on PATH as llama-bench otherwise).
+# [bench]
+# cmd = ["~/llama.cpp/build/bin/llama-bench"]
+
+# Optional per-machine settings, by machine id (tuieval machines shows the ids).
+# [machines.m4pro-24gb]
+# memory_headroom_gb = 3       # GPU memory kept free for macOS and other apps (default 4)
+# gpu_residency_gb = 12        # GPU memory the driver keeps resident before churning (default: half of RAM)
+
+# One block per model, run in this order.
+#   server  which [servers.*] block starts it
+#   model   GGUF path (llama) or model id (other servers)
+#   label   optional; names results/<label>/. Default: the file/repo name, lowercased.
+#           Never rename a label that has results, or they stop matching.
+#   served_name  optional; the model name sent with each request. Default: the label for llama
+#           (served via --alias), the model id for other servers.
+#   vision  optional; true if the model can read images. Without it, vision packs are skipped.
+#   mmproj  optional (llama); the vision projector GGUF. Setting it implies vision = true.
+#   thinking  optional; false runs the model with thinking off. Add the same model twice (two
+#           labels, e.g. foo and foo-nothink) to see what thinking costs and buys.
+#   tags    optional; e.g. ["9b", "dense", "q4"]. Filter by them in the TUI; shown in results.
+#   sampling  optional inline table overriding [sampling] for this model, e.g. {temperature = 0.6}
+#   server_args  optional; extra flags for this model's server command (counted as output-affecting)
+#   ctx     optional (llama); cap the context below the server's max_ctx. The fit check may lower it
+#           further per machine; packs whose prompts need more are skipped.
+#   max_context  optional (other servers); the context the server provides, for the same skip rule.
+#   kv_type  optional (llama); KV-cache type, e.g. "q8_0" to fit a smaller machine. It changes
+#           answers, so give it its own label: it is a different model for the evals.
+#   tools   optional; false skips packs that need tool calling.
+#
+# [[models]]
+# label = "my-model-q4"
+# server = "llama"
+# model = "~/models/My-Model-Q4_K_M.gguf"
+# tags = ["9b", "dense", "q4"]

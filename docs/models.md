@@ -1,0 +1,120 @@
+# Models, servers and machines
+
+Everything about models lives in your workspace's `models.toml`. `tuieval init` writes one with three servers ready to use:
+
+| server | what it is |
+|---|---|
+| `llama` | [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`, started by tuieval for each GGUF model, with a per-machine fit check and speed tuning |
+| `local` | any OpenAI-compatible server that's already running (LM Studio, Ollama, vLLM, a remote box): just a `url` |
+| `openrouter` | any model on [OpenRouter](https://openrouter.ai/models), named at run time, pinned to one provider endpoint |
+
+## Adding models
+
+```bash
+tuieval add ~/models/Some-Model-Q4_K_M.gguf --tags 9b,dense,q4      # GGUF -> llama
+tuieval add ~/models/Some-Model-Q4_K_M.gguf --no-think              # same model, thinking off (label …-nothink)
+tuieval add ~/models/VL-Q4.gguf --mmproj ~/models/VL-mmproj.gguf    # vision model
+tuieval add qwen3:8b --server local                                  # a model your running server serves
+tuieval scan --add                                                   # every new GGUF under model_dirs
+tuieval list                                                         # models, packs, result status
+```
+
+In the TUI, `a` adds a model and `m` scans your model folders. Each model is one `[[models]]` block:
+
+| field | meaning |
+|---|---|
+| `server` | which `[servers.*]` block serves it |
+| `model` | GGUF path (llama) or model id (other servers) |
+| `label` | names `results/<label>/`; default: the file or repo name, lowercased. Never rename a label that has results. |
+| `served_name` | the model name sent with each request (default: the label for llama, the model id elsewhere) |
+| `vision`, `mmproj` | the model reads images; `mmproj` is llama's vision projector and implies `vision` |
+| `thinking = false` | run with thinking off |
+| `tags = [...]` | filter by them in the TUI and with `--tags` |
+| `sampling = {...}` | override `[sampling]` for this model |
+| `server_args = [...]` | extra server flags (treated as answer-changing) |
+| `ctx` (llama) | cap the context; the fit check may lower it further per machine |
+| `max_context` (other servers) | the context the server provides; packs whose prompts need more are skipped |
+| `kv_type` (llama) | e.g. `"q8_0"`: a quantized KV cache, which makes it a different model (give it its own label) |
+| `tools = false` | packs that need tool calling are skipped |
+
+Results record the settings each model actually ran with, and the results screen notes any differences between models.
+
+## OpenRouter
+
+OpenRouter models need no block. Name any model from openrouter.ai/models when you run, e.g. `tuieval run --tier smoke --only openrouter:qwen/qwen3-235b-a22b-2507`. In the TUI, tick **+ openrouter: any model** at the bottom of the model list and pick from the live list (filter by typing; it shows context and price), or press `a` and type `openrouter:<model id>`. A wrong id is refused with the closest matches.
+
+- Needs `OPENROUTER_API_KEY` exported in the shell that starts tuieval. A plain `tuieval run` never includes OpenRouter models, since they cost money.
+- Vision, tool calling and context size come from OpenRouter's model list; packs the model can't do are skipped.
+- **One provider per model.** Left alone, OpenRouter spreads requests over providers running different quantizations. `pin_endpoint = true` picks one endpoint per model (closest to the released weights first: bf16 > fp8 > undeclared > lower; then tool and sampling support, uptime and price), sends every request only there with no fallback, keeps it while it's offered, and records it with the results. Answers from any other provider aren't counted.
+- Hosted providers cache shared prompt openings and that can't be switched off. It doesn't change answers, but those answers (⟲ in the run) are left out of TTFT and prompt-speed numbers.
+- To keep providers that store or train on prompts (and could learn your tests) out entirely, add `request = { provider = { data_collection = "deny" } }` under `[servers.openrouter]`.
+
+## Every answer is independent
+
+Each request is a fresh single-turn conversation: the system prompt and one question, never an earlier answer. Repeats go round by round, each round asking the tests in its own fixed shuffled order, so a question never follows itself. The llama server is told not to reuse earlier prompts (`request = { cache_prompt = false }`). Each answer records the messages sent and any prompt tokens the server reports reusing, and the run warns if that's ever not 0. If a question gets the exact same long answer twice with sampling on, the run flags it as a probable cached response. `tuieval selftest` checks all of this.
+
+## Answer-changing vs speed-only flags
+
+The best server flags differ per model and per machine, so tuieval splits them by what they change:
+
+| Changes **answers**: same everywhere, part of each result's fingerprint | Changes **only speed**: tuned per model per machine |
+|---|---|
+| model file and quant, KV-cache type, `--jinja`, `--reasoning-format`, sampling, mmproj (`cmd` in `models.toml`) | threads, batch sizes, flash attention, cache reuse (`perf` and `[servers.llama.tune]`) |
+
+**Quality results travel.** Tuning never invalidates results, and a result from one machine counts on another as long as the answer-changing settings match. So you can Certify on your fastest machine and only tune (and optionally Screen) on the others: sync the workspace folder between them.
+
+## Machines
+
+- **Machine id** is detected automatically (`m1max-32gb`, `m4pro-24gb`, …; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
+- **Fit check (Apple Silicon, llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory, capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers.
+- **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free for macOS, default 4) and `gpu_residency_gb` (see the stall guard).
+
+## Tuning
+
+`tuieval tune <model>` (or `t` on the setup screen, for the ticked models) finds the fastest speed flags for a model on this machine:
+
+1. If `llama-bench` is installed, it sweeps threads, micro-batch and flash attention first (fast, no server starts).
+2. Then it starts the real server with one knob changed at a time and times a fixed **built-in** workload (three short prompts, three medium ones and one ~8k-token prompt), so tuning needs no packs and speeds are comparable between workspaces.
+3. An **output guard** rejects any option that changes greedy answers beyond noise. Candidates that make macOS swap are rejected.
+
+Expect 8–15 server starts, about 20–30 minutes for a 27B model, once per model per machine. The result is saved in `tuning/<machine>/<model>.toml` and used by every later run there. Models without a profile run with each knob's first option and show *untuned*. A profile is marked for retuning when the model file or server version changes.
+
+The knobs are `[servers.<name>.tune]` in `models.toml`: each knob is a list of options, each option a list of flags. Placeholders: `{p}` P-cores, `{p_minus_2}`, `{all}` all cores, `{gpu_safe_gb}` (the GPU residency limit minus 2 GB; also `_minus_1`, `_minus_2`, `_plus_1`).
+
+## Speed verdicts
+
+Speed is judged separately, per machine: the same model can be production-grade in quality and still too slow on a smaller machine. Results → Production readiness has a **Fast enough?** table: p90 seconds per answer against each pack's `max_p90_s`, for every machine. It's *measured* where the model ran, and otherwise *projected* from each answer's token counts and that machine's tuned speeds. `tuieval compare --machine <id>` shows the same on the command line.
+
+## The stall guard (Apple Silicon)
+
+Measured on an M1 Max 32 GB: once the system's GPU allocations pass about half of RAM, the GPU driver evicts and re-maps memory on every GPU job, the server spends 70–95% of its CPU in the kernel while the GPU idles, and servers that submit many small GPU jobs slow to a crawl. For servers with `stall_guard = true`, tuieval samples the server's own vs kernel CPU time and the system's GPU allocation every 5 s during runs and tuning. If more than 70% of its CPU goes to the kernel for a minute, the run stops with an explanation instead of crawling for hours. Finished answers are kept and resume next time. If your machine behaves differently, set `gpu_residency_gb` under `[machines.<id>]`.
+
+## Server options
+
+| option | meaning |
+|---|---|
+| `cmd` | command that starts the server (no `cmd` = an already-running server at `url`). Placeholders: `{model}`, `{served_name}`, `{port}`, `{mmproj}`, `{ctx}`, `{kv_type}`, `{root}` (the workspace), and the tune placeholders. An argument `env:NAME=value` sets an environment variable instead. |
+| `url` | an already-running server's base URL |
+| `port` | the port `cmd` serves on |
+| `cwd` | folder to start `cmd` in |
+| `model_is_path` | `model` is a file or folder: check it exists (and, for GGUFs, that it fits) before starting |
+| `vision_args` | flags appended for models with `mmproj` |
+| `kv_type`, `max_ctx` | llama defaults: KV-cache type, upper bound on context |
+| `ctx_flag` | the server's context flag, so long packs are skipped if a configured context is too small |
+| `request` | fields added to every request (e.g. `{ cache_prompt = false }`) |
+| `perf` | speed-only flags always applied |
+| `tune` | speed-only knobs for `tuieval tune` |
+| `tune_objective` | `total` (default: workload time) or `decode` (tokens/s after a warm-up pass) |
+| `version_cmd` | prints the server version, recorded with every result |
+| `health` | readiness path for servers without `/v1/models` (must return JSON with `model`) |
+| `before_start` | a command run before starting the server (e.g. to free memory another process holds) |
+| `env` | environment variables for the server |
+| `log_facts` | `{name = "regex"}` read from the server's startup log and recorded with every run |
+| `require_facts` | `{name = "regex"}` the startup log must show, or the run refuses to start (e.g. a setting that must be off for fair evals) |
+| `stall_guard` | watch for GPU-driver stalls (see above) |
+| `outputs_depend_on_machine` | answers depend on this machine's memory settings: results only count on the machine that produced them, and tuned flags are fingerprinted |
+| `any_model`, `label_prefix` | any model the server lists can be named at run time as `<server>:<id>` (OpenRouter) |
+| `pin_endpoint` | pin each model to one provider endpoint (OpenRouter) |
+| `api_key_env` | environment variable holding the API key |
+| `thinking_param` | `reasoning` to send `[sampling] enable_thinking` as OpenRouter's `reasoning.enabled` |
+| `headers` | extra HTTP headers |
