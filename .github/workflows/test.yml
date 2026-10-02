@@ -1,5 +1,7 @@
 name: test
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 jobs:
   test:
     strategy:
@@ -9,8 +11,30 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the version comes from git tags
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e .
       - run: python -m unittest discover -s tests -v
+
+  # Every push to main is published as a dev build (X.Y.0.devN, installed with pip install --pre);
+  # a tag vX.Y.Z is published as that release. PyPI trusted publishing: no token is stored anywhere.
+  publish:
+    needs: test
+    if: github.event_name == 'push' && github.repository == 'ashe-wb/tuieval' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine && python -m build && twine check dist/*
+      - run: ls dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

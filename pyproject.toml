@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.24", "hatch-vcs>=0.4"]
 build-backend = "hatchling.build"
 
 [project]
@@ -37,8 +37,17 @@ tuieval = "tuieval.cli:main"
 Homepage = "https://github.com/ashe-wb/tuieval"
 Issues = "https://github.com/ashe-wb/tuieval/issues"
 
+# The version comes from git: a tag vX.Y.Z is that release; every commit after it on main is
+# X.(Y+1).0.devN, N = commits since the tag (see RELEASING.md).
 [tool.hatch.version]
-path = "src/tuieval/__init__.py"
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+version_scheme = "release-branch-semver"
+local_scheme = "no-local-version"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/tuieval/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tuieval"]

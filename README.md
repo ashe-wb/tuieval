@@ -17,6 +17,8 @@ tuieval add ~/models/Some-Model-Q4_K_M.gguf
 tuieval                        # open the TUI
 ```
 
+`pip install tuieval` gets the latest release. Every change on `main` is also published as a dev build (`X.Y.0.devN`); get it with `pipx install --pip-args=--pre tuieval` or `pip install --pre tuieval`.
+
 Once you've added your own packs and models, the setup screen looks like this (packs on the left, models with a verdict code per use case on the right, the highlighted model's details below):
 
 ![tuieval's setup screen with five eval packs and a dozen local models](https://raw.githubusercontent.com/ashe-wb/tuieval/main/docs/images/tui-setup.png)

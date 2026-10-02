@@ -11,3 +11,4 @@ dist/
 /logs/
 /tuning/
 /packs/
+src/tuieval/_version.py

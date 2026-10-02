@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Versions come from git tags: a tag `vX.Y.Z` is that release, and every commit on `main` after it is published automatically as a dev build `X.(Y+1).0.devN` (N = commits since the release). `pip install tuieval` keeps installing releases only; `pip install --pre tuieval` gets the latest build.
+
 ## 0.1.7 (replaces 0.1.6, withdrawn)
 
 - `tuieval tune` starts warm for fine-tunes: when a model with the same architecture and tensor shapes is already tuned on this machine, its flags are the starting point and only speculative decoding and micro-batch are re-tried (~4-6 server starts instead of 8-15). It tunes in full if the inherited flags fail, change answers or are slower than the defaults. `--cold` (or `[tune] warm_start = false`) always tunes in full; `[tune] warm_retest` names the re-tried knobs.
