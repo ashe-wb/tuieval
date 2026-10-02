@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- Pressing `r` during a run always opens all your results. During a Smoke run, a button switches to that run's own results (kept apart in results/smoke/) and back.
+- The readiness help text no longer sticks on the Smoke note after viewing Smoke results.
+
 ## 0.1.3
 
 - Graders can add their own Scorecard columns with `@scorecard_column("title")` (see docs/writing-packs.md).

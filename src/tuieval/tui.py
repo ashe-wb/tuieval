@@ -1812,9 +1812,11 @@ class RunScreen(Screen):
 
     @on(Button.Pressed, "#done-results")
     def action_results(self):
-        # works during the run too: finished packs are saved as they end; the one running shows as unfinished
-        dirs = {os.path.dirname(os.path.dirname(j.out_path)) for j in self.jobs}
-        self.app.push_screen(ResultsScreen(dirs.pop() if len(dirs) == 1 else None))
+        # Works during the run too: finished packs are saved as they end; the one running shows as unfinished.
+        # Always opens all your results; a smoke run's own results (kept apart) are one button away.
+        main = os.path.abspath(self.app.engine.results_dir)
+        smoke = {os.path.abspath(os.path.dirname(os.path.dirname(j.out_path))) for j in self.jobs} - {main}
+        self.app.push_screen(ResultsScreen(smoke_dir=smoke.pop() if len(smoke) == 1 else None))
 
     @on(Button.Pressed, "#done-new")
     def action_new_run(self):
@@ -1844,18 +1846,26 @@ class ResultsScreen(Screen):
     def action_runs(self):
         self.app.open_sessions()
 
-    def __init__(self, results_dir=None):
+    READINESS_HELP = ("[dim]PASS needs a Certify run with zero critical failures over enough trials and an "
+                      "accuracy lower bound that clears the pack's gate (pack.toml). Screening can only FAIL "
+                      "or look promising.[/dim]")
+
+    def __init__(self, results_dir=None, smoke_dir=None):
+        """results_dir: which results to show (default: all of them, smoke runs excluded).
+        smoke_dir: a smoke run's own results, offered with a button to switch to and back."""
         super().__init__()
         self.results_dir = results_dir
+        self.smoke_dir = smoke_dir
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(id="results-info")
+        with Horizontal(id="results-top"):
+            yield Static(id="results-info")
+            if self.smoke_dir:
+                yield Button("Show this Smoke run's results", id="toggle-smoke")
         with TabbedContent():
             with TabPane("Production readiness"):
-                yield Static("[dim]PASS needs a Certify run with zero critical failures over enough trials and an "
-                             "accuracy lower bound that clears the pack's gate (pack.toml). Screening can only FAIL "
-                             "or look promising.[/dim]", id="readiness-help")
+                yield Static(self.READINESS_HELP, id="readiness-help")
                 yield DataTable(id="readiness", zebra_stripes=True)
                 yield Static("[b]Fast enough?[/b] [dim]p90 seconds per answer against the pack's limit, per machine: "
                              "measured there, or projected from token counts and that machine's tuned speeds.[/dim]")
@@ -1923,6 +1933,15 @@ class ResultsScreen(Screen):
     def action_refresh(self):
         self.reload("Results refreshed.")
 
+    @on(Button.Pressed, "#toggle-smoke")
+    def toggle_smoke(self, event):
+        """Switch between all your results and the smoke run's own (kept apart in results/smoke/)."""
+        showing_smoke = self.results_dir == self.smoke_dir
+        self.results_dir = None if showing_smoke else self.smoke_dir
+        event.button.label = "Show this Smoke run's results" if showing_smoke else "Show all results"
+        self.reload("Showing all your results." if showing_smoke else
+                    "Showing this Smoke run's results (they never count toward verdicts).")
+
     def reload(self, message=None):
         """Re-read the result files (tables keep their tab; cursors go back to the top). Under
         another screen (an open answer, the run) it waits until Results is shown again: tables
@@ -1966,7 +1985,8 @@ class ResultsScreen(Screen):
             return
         rows, infos = compare.load(paths)
         notes = compare.settings_notes(infos)
-        info.update(f"{len(paths)} result files in {os.path.relpath(results_dir)}/" + banner
+        smoke = os.path.abspath(results_dir) != os.path.abspath(self.app.engine.results_dir)
+        info.update(f"{len(paths)} {'Smoke ' if smoke else ''}result files in {os.path.relpath(results_dir)}/" + banner
                     + "".join(f"\n[yellow]⚠ {n}[/yellow]" for n in notes))
         header, table = compare.scorecard(rows)
         t = self.query_one("#scorecard", DataTable)
@@ -2243,10 +2263,12 @@ class ResultsScreen(Screen):
         style = {"PASS": "bold green", "FAIL": "bold red", "INCONCLUSIVE": "yellow", "NO DATA": "dim"}
         matrix = self.query_one("#readiness", DataTable)
         detail = self.query_one("#readiness-detail", DataTable)
+        help_text = self.query_one("#readiness-help", Static)
         if os.path.abspath(results_dir) != os.path.abspath(self.app.engine.results_dir):
-            self.query_one("#readiness-help", Static).update(
-                "[yellow]These are smoke-test results; they don't count toward production readiness.[/yellow]")
+            help_text.update("[yellow]These are smoke-test results; they don't count toward production readiness."
+                             "[/yellow]")
             return
+        help_text.update(self.READINESS_HELP)
         table = verdict.readiness(self.app.engine)
         groups = sorted({g for t in table.values() for g in t})
         matrix.add_columns("Model", *groups)
@@ -2318,6 +2340,9 @@ class EvalsApp(App):
     #tune-status { padding: 0 1; height: auto; min-height: 2; background: $boost; }
     #tune-log { height: 1fr; }
     #speed-machine { width: 60; margin: 0 1; }
+    #results-top { height: auto; }
+    #results-info { width: 1fr; height: auto; }
+    #toggle-smoke { width: auto; min-width: 32; }
     #pq-controls { height: 3; }
     #pq-controls Checkbox { width: auto; }
     #pq-controls Select { width: 28; margin-right: 1; }
