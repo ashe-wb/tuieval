@@ -1,4 +1,4 @@
-# tuieval
+<p align="center"><img src="https://raw.githubusercontent.com/ashe-wb/tuieval/main/docs/images/brand/readme-header.png" alt="tuieval" width="100%"></p>
 
 **Find out which model you can trust with your work, on your own questions, in the terminal.** Run the same eval packs against local models (llama.cpp GGUFs, LM Studio, Ollama, vLLM; tiny, dense or MoE) and against any frontier model on OpenRouter, side by side. tuieval measures **accuracy, speed and token use** together, and gives a **PASS / FAIL / INCONCLUSIVE** verdict per use case. Grading is automatic; there's no LLM judge.
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5
+
+- The tuieval icon (the Scorecard Mosaic), a README header and a social preview; all brand files are in docs/images/brand/.
+
 ## 0.1.4
 
 - Pressing `r` during a run always opens all your results. During a Smoke run, a button switches to that run's own results (kept apart in results/smoke/) and back.
