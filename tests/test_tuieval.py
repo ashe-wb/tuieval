@@ -165,8 +165,24 @@ class WorkspaceGraders(unittest.TestCase):
             with open(os.path.join(pack, "tests.yaml"), "w") as f:
                 f.write("- {id: a, input: say hi, expected: hi, reference: HI, wrong: [hi], difficulty: easy}\n"
                         "- {id: b, input: say yo, expected: yo, reference: YO, wrong: [yo], difficulty: easy}\n")
+            with open(os.path.join(ws, "graders", "shout.py"), "a") as f:
+                f.write(textwrap.dedent('''
+
+                    from tuieval.graders import scorecard_column
+
+                    @scorecard_column("loud answers")
+                    def loud(rows):
+                        mine = [r for r in rows if r["suite"] == "loud"]
+                        return f"{sum(r['ok'] for r in mine)}/{len(mine)}" if mine else None
+                '''))
             out = tuieval(ws, "selftest").stdout
             self.assertIn("ok", out)
+            code = ("from tuieval import packs, compare; packs.load_packs(); "
+                    "rows = [{'model': 'm', 'suite': 'loud', 'test': 'loud: a', 'ok': True, 'score': 1.0, "
+                    "'error': False, 'truncated': False, 'output': 'HI'}]; "
+                    "h, t = compare.scorecard(rows); print(h[h.index('loud answers')], t[0][h.index('loud answers')])")
+            self.assertEqual(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                            env=dict(os.environ, TUIEVAL_HOME=ws)).stdout.strip(), "loud answers 1/1")
             env = dict(os.environ, TUIEVAL_HOME=ws)
             code = ("from tuieval import packs; p = packs.load_packs()['loud']; "
                     "print(all(t['critical_trial'] for t in p.tests))")

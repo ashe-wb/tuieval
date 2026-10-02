@@ -121,6 +121,31 @@ def ticket_route(answer, test, meta):
 - `critical=True` makes every test of this grader a critical trial (any of its failures *can* be critical). Otherwise only tests with `critical: true` or `expected: NOT_AVAILABLE` are.
 - `template` is the skeleton `tuieval capture` writes for a new test of this grader.
 
+A grader file can also add **Scorecard columns** (Results → Scorecard, and `tuieval compare`), for numbers your use case cares about that pass/fail doesn't show:
+
+```python
+import json
+
+from tuieval.graders import scorecard_column
+
+
+@scorecard_column("routing: json only")
+def json_only(rows):
+    """Share of this model's support-bot answers that are nothing but a JSON object."""
+    mine = [r for r in rows if r["suite"] == "support-bot"]
+    if not mine:
+        return None                      # shown as "-"
+    ok = 0
+    for r in mine:
+        try:
+            ok += isinstance(json.loads(r["output"].strip()), dict)
+        except ValueError:
+            pass
+    return f"{100 * ok / len(mine):.0f}%"
+```
+
+`rows` is one model's answers across all packs; each has `suite` (the pack's folder name), `test`, `ok`, `score`, `output` (the answer text), `truncated` and `repeat`.
+
 Truncated and empty answers are failed before your grader runs. After changing a grader, `tuieval regrade` re-scores the stored answers without rerunning any model.
 
 ## Gates

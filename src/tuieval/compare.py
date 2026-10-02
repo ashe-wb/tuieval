@@ -17,6 +17,7 @@ import statistics
 import sys
 
 from . import client
+from . import graders
 from . import workspace
 
 BOOTSTRAP = 2000
@@ -170,7 +171,8 @@ def scorecard(rows, rng=None):
     rng = rng or random.Random(0)
     models = sorted({r["model"] for r in rows})
     suites = sorted({r["suite"] for r in rows})
-    header = ["model"] + suites + ["overall", "95% CI", "mean score", "all repeats", "errors", "trunc", "rep"]
+    extra = dict(graders.COLUMNS)   # columns your graders add (graders.scorecard_column)
+    header = ["model"] + suites + ["overall", "95% CI", "mean score", "all repeats", *extra, "errors", "trunc", "rep"]
     table = []
     for m in models:
         mine = [r for r in rows if r["model"] == m]
@@ -184,6 +186,12 @@ def scorecard(rows, rng=None):
         line.append(f"{statistics.fmean(r['score'] for r in mine):.2f}")
         tmeans = per_test_means(mine)
         line.append(f"{sum(v == 1 for v in tmeans.values())}/{len(tmeans)}")
+        for title, fn in extra.items():
+            try:
+                cell = fn(mine)
+            except Exception:  # a broken column must not hide the scorecard
+                cell = "error"
+            line.append("-" if cell is None else str(cell))
         line += [str(sum(r["error"] for r in mine)), str(sum(r["truncated"] for r in mine)),
                  str(sum(repetitive(r["output"]) for r in mine))]
         table.append(line)
@@ -466,6 +474,8 @@ def main(argv):
         sys.exit(__doc__ + "\n(no results found in results/<model>/<pack>.json: run some evals first)")
     rows, infos = load(paths)
     rng = random.Random(0)
+    from . import packs as packs_mod
+    packs_mod.load_packs(errors=[])   # loads the workspace's graders, and their Scorecard columns
     for note in settings_notes(infos):
         print("NOTE:", note)
     print_table(*scorecard(rows, rng))

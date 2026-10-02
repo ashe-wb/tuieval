@@ -23,6 +23,13 @@ an unwanted action) registers with critical=True.
 `template` is the skeleton `tuieval capture` and `tuieval new-pack` write for a new test of
 this grader (the grader-specific fields, with TODO where you fill in).
 
+A grader file can also add columns to the Scorecard (Results in the TUI, and `tuieval compare`):
+
+    @scorecard_column("strict json")
+    def strict_json(rows):     # one model's answers; return the cell text, or None for "-"
+        mine = [r for r in rows if r["suite"] == "my-pack"]
+        ...
+
 Packs choose a grader with `grader = "<name>"` in pack.toml (a test may override it). The
 built-in graders live in this folder. Your own load from the workspace's graders/ folder (one
 .py file each) and from a pack's own grader.py, so a pack can bring its grading with it.
@@ -37,6 +44,7 @@ import sys
 REGISTRY = {}
 CRITICAL = set()     # graders whose every test can fail critically
 TEMPLATES = {}       # grader -> fields of a new test's skeleton
+COLUMNS = {}         # Scorecard column title -> fn(rows) -> cell text or None
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _LOADED = {}         # file path -> modification time it was loaded at
 
@@ -54,6 +62,16 @@ def grader(name, critical=False, template=None):
             CRITICAL.discard(name)
         if template is not None:
             TEMPLATES[name] = template
+        return fn
+    return register
+
+
+def scorecard_column(title):
+    """Register a Scorecard column. fn(rows) gets one model's answers across all packs, each a dict
+    with suite (the pack's folder name), test, ok, score, output (the answer text), truncated and
+    repeat, and returns the cell text, or None to show "-"."""
+    def register(fn):
+        COLUMNS[title] = fn
         return fn
     return register
 

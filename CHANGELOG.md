@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Graders can add their own Scorecard columns with `@scorecard_column("title")` (see docs/writing-packs.md).
+
 ## 0.1.2
 
 - A model that fails to start raises one notice (the reason, the packs it skipped, and its server log) instead of one per pack.
