@@ -16,8 +16,11 @@ tuieval add ~/models/Some-Model-Q4_K_M.gguf --no-think              # same model
 tuieval add ~/models/VL-Q4.gguf --mmproj ~/models/VL-mmproj.gguf    # vision model
 tuieval add qwen3:8b --server local                                  # a model your running server serves
 tuieval scan --add                                                   # every new GGUF under model_dirs
-tuieval list                                                         # models, packs, result status
+tuieval list                                                         # models; hidden ones listed separately
+tuieval remove --hidden                                              # clean up every hidden model
 ```
+
+`tuieval remove <model>` (or `--hidden` for every model hidden with `x` in the TUI) takes a model out of the workspace: its `models.toml` block (with the comment right above it), its results, smoke results and tuning profiles, and its hidden mark. It shows what it will do and asks first. Nothing is deleted: everything moves to `removed/<model>-<time>/`, with the `models.toml` block saved as `models.toml-entry.txt`, so you can put it back by hand.
 
 In the TUI, `a` adds a model and `m` scans your model folders. Each model is one `[[models]]` block:
 
@@ -79,7 +82,27 @@ The best server flags differ per model and per machine, so tuieval splits them b
 
 Expect 8–15 server starts, about 20–30 minutes for a 27B model, once per model per machine. The result is saved in `tuning/<machine>/<model>.toml` and used by every later run there. Models without a profile run with each knob's first option and show *untuned*. A profile is marked for retuning when the model file or server version changes.
 
+**Fine-tunes start warm.** When another model on the same server is already tuned on this machine and its GGUF has the same architecture and tensor shapes (a fine-tune or another quant of the same base model), its flags are the starting point. After the defaults (still timed, as the answer guard's reference), the tuner checks the inherited flags and then re-tries only the knobs that depend on the weights: speculative decoding (a fine-tune may have retrained or dropped its MTP layers) and micro-batch (the quant mix shifts it). Expect ~4–6 server starts. The closest file size wins when several models qualify. If the inherited flags fail, change answers or are slower than the defaults, it tunes in full. The profile records which model it started from (`meta.warm_start`). `tuieval tune --cold` always tunes in full; in `models.toml`, `[tune] warm_start = false` turns warm starts off and `[tune] warm_retest = ["spec", "ubatch"]` names the knobs a warm start re-tries.
+
 The knobs are `[servers.<name>.tune]` in `models.toml`: each knob is a list of options, each option a list of flags. Placeholders: `{p}` P-cores, `{p_minus_2}`, `{all}` all cores, `{gpu_safe_gb}` (the GPU residency limit minus 2 GB; also `_minus_1`, `_minus_2`, `_plus_1`).
+
+## Exporting to the pi coding agent
+
+`tuieval export pi <model>` makes pi serve a model the way the evals did: the same file, the output-affecting flags, the context from the fit check, the model's sampling, and the speed flags tuned on this machine. `tuieval tune <model> --export-pi` does it right after tuning.
+
+It writes a `[<id>]` section in llama-router's presets file (keys that equal its `[*]` section are left out) and an entry under pi's `llama` provider `modelOverrides` (name, context window, vision, reasoning). It exports models on llama servers.
+
+It shows the diff and the notes first (untuned or outdated tuning, other preset sections that name missing files, a reasoning effort to pick in pi), asks, backs every file up as `<file>.bak-tuieval-<time>`, and refuses to write a file that changed in the meantime. `--dry-run` only shows; `--yes` doesn't ask. Restart the router afterwards (`llama-router restart`).
+
+The id pi sees defaults to the GGUF's name; set `pi_id` and `pi_name` on the model (or pass `--id`/`--name`). Paths and provider names come from `[export.pi]` in `models.toml`:
+
+```toml
+[export.pi]
+presets = "~/models/presets.ini"
+pi_models = "~/.pi/agent/models.json"
+llama_provider = "llama"     # pi's provider name for the router
+servers = ["llama"]          # models.toml servers that llama-router can serve
+```
 
 ## Speed verdicts
 

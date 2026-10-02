@@ -8,6 +8,15 @@ profile in tuning/<machine-id>/<label>.toml. Eval runs then serve the model with
           workspaces). One knob at a time from the best so far (coordinate descent), so a model
           takes ~8-15 server starts rather than a full grid.
 
+Warm start: when another model on the same server is already tuned on this machine and its GGUF
+has the same architecture and shapes (a fine-tune or another quant of the same base), its flags are
+the starting point. Threads, batch sizes and flash attention depend on the shapes and the machine,
+not on the trained weights, so they carry over; only the knobs that do depend on the weights are
+re-tried ([tune] warm_retest, default speculative decoding and micro-batch: a fine-tune may have
+retrained or dropped its MTP layers, and its quant mix shifts the best micro-batch). That takes
+~4-6 server starts. If the inherited flags fail, change answers or are slower than the defaults,
+it tunes in full instead. `tuieval tune --cold` (or [tune] warm_start = false) always tunes in full.
+
 One objective per server (models.toml `tune_objective`):
   total   (default) total seconds for the workload: short prompts, medium ones and one long
           (~8k-token) prompt, fixed generation length
@@ -47,6 +56,7 @@ PROGRESS_EVERY_S = 10     # how often a running request reports progress
 LONG_PROMPT_CHARS = 32000  # ~8k tokens
 BENCH_FLAGS = {"-t": "-t", "-ub": "-ub", "-fa": "-fa"}   # knob flags llama-bench can sweep
 IGNORED_IN_BENCH = {"-tb"}
+WARM_RETEST = ["spec", "ubatch"]   # knobs a warm start re-tries ([tune] warm_retest)
 
 
 @dataclasses.dataclass
@@ -285,6 +295,73 @@ def resolve(knob_opts, choices):
     return [a for k, opts in knob_opts.items() for a in opts[choices.get(k, 0)]]
 
 
+def option_index(opts, args):
+    """Which of a knob's options a profile's args hold: the first non-empty option found in them as
+    a contiguous run, else the knob's empty option (it was off). None if neither: the knob's options
+    changed since, or the option isn't offered for this model (draft-mtp without MTP layers)."""
+    empty = None
+    for i, o in enumerate(opts):
+        if not o:
+            empty = i if empty is None else empty
+        elif any(args[j:j + len(o)] == o for j in range(len(args) - len(o) + 1)):
+            return i
+    return empty
+
+
+def family(path):
+    """What decides which speed flags suit a GGUF: architecture and tensor shapes (not the weights).
+    None if the header can't be read."""
+    try:
+        i = machines.read_gguf(engine_mod.expand(path))
+    except (OSError, ValueError):
+        return None
+    return (i["architecture"], i["layers"], i["embedding"], i["experts"], i["experts_used"],
+            i["head_dim_k"], i["head_dim_v"], tuple(i["kv_heads_per_layer"]))
+
+
+@dataclasses.dataclass
+class Sibling:
+    label: str
+    profile: dict
+    choices: dict     # {knob: option index} for this model's knobs
+    unmapped: list    # knobs whose inherited option isn't offered here (re-tried)
+
+
+def find_sibling(eng, m, knob_opts, machine_id):
+    """The best tuned profile to start from: a model on the same server and machine whose GGUF has the
+    same family, with a current profile from a tune or hand-tuned flags. The closest file size wins
+    (the most similar quant mix), then the newest profile. None if there isn't one."""
+    own = family(m["model"])
+    if own is None:
+        return None
+    version = eng.server_version(m)
+    size = os.path.getsize(engine_mod.expand(m["model"]))
+    found = []
+    for o in eng.cfg["models"]:
+        if o["label"] == m["label"] or o.get("server") != m["server"]:
+            continue
+        p = profiles.load(machine_id, o["label"], eng.tuning_dir)
+        if not p or not p.get("args") or p.get("meta", {}).get("method") not in ("tuned", "seeded"):
+            continue
+        path = engine_mod.expand(o["model"])
+        if not os.path.isfile(path) or profiles.stale(p, version, os.path.getsize(path)) or family(path) != own:
+            continue
+        choices, unmapped = {}, []
+        for name, opts in knob_opts.items():
+            i = option_index(opts, list(p["args"]))
+            if i is None:
+                unmapped.append(name)
+                i = 0
+            choices[name] = i
+        found.append((abs(os.path.getsize(path) - size), str(p.get("meta", {}).get("date", "")),
+                      Sibling(o["label"], p, choices, unmapped)))
+    if not found:
+        return None
+    found.sort(key=lambda f: f[1], reverse=True)   # newest first among equal sizes (the sort is stable)
+    found.sort(key=lambda f: f[0])
+    return found[0][2]
+
+
 def _flags(args):
     """["-t","8","-fa","on"] -> {"-t": "8", "-fa": "on"} (None when an arg isn't a flag/value pair)."""
     if len(args) % 2:
@@ -362,8 +439,9 @@ def bench_stage(eng, m, knob_opts, work, emit=lambda *a, **k: None):
 
 
 # ------------------------------------------------------------------ stage 2 + driver
-def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, use_bench=True):
-    """Tune one model on this machine and save its profile. Returns the profile dict."""
+def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, use_bench=True, warm=True):
+    """Tune one model on this machine and save its profile. Returns the profile dict. warm: start
+    from a tuned model of the same family when there is one (see the module docstring)."""
     m = eng.model(label)
     server = eng.cfg["servers"][m["server"]]
     sv = eng.serving(m)
@@ -436,14 +514,33 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
         if base is None or base.error:
             raise engine_mod.ModelFailed(f"the server doesn't start with the default flags: "
                                          f"{base.error if base else 'no starts left'}")
-        settled, bench_info = ({}, None)
-        if use_bench:
+        settled, bench_info, warm_info = {}, None, None
+        best, best_r, search = dict(default), base, list(knob_opts)
+        sib = find_sibling(eng, m, knob_opts, sv.machine.id) \
+            if warm and settings.get("warm_start", True) else None
+        if sib:
+            cand = {**default, **sib.choices}
+            r = evaluate(cand, f"{sib.label}'s flags (same architecture and shapes)")
+            why = "no server starts left" if r is None else f"they failed ({r.error})" if r.error else \
+                "they changed answers" if guard and similarity(r.texts, base.texts) < threshold else \
+                "they were slower than the defaults here" if r.score(objective) > base.score(objective) else None
+            if why:
+                notes.append(f"warm start from {sib.label} abandoned: {why}; tuned in full")
+                emit("tune_step", message=f"    {sib.label}'s flags don't carry over ({why}): tuning in full")
+            else:
+                retest = settings.get("warm_retest", WARM_RETEST)
+                search = [k for k in knob_opts if k in retest or k in sib.unmapped]
+                best, best_r = cand, r
+                warm_info = {"from": sib.label, "from_model_file": sib.profile.get("meta", {}).get("model_file"),
+                             "inherited": [k for k in knob_opts if k not in search], "retested": search}
+                emit("tune_step", message=f"    starting from {sib.label}'s flags; re-trying "
+                                          f"{', '.join(search) or 'nothing'}")
+        if use_bench and not warm_info:
             settled, bench_info = bench_stage(eng, m, knob_opts, work, emit)
             if isinstance(bench_info, str):
                 notes.append(bench_info)
                 emit("tune_step", message=bench_info)
                 bench_info = None
-        best, best_r = dict(default), base
         if settled:
             cand = {**default, **settled}
             r = evaluate(cand, "llama-bench pick")
@@ -453,6 +550,8 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
         for _pass in range(2):
             improved = False
             for name, opts in knob_opts.items():
+                if name not in search:
+                    continue
                 if name in settled and _pass == 0 and best.get(name) == settled[name]:
                     continue
                 for i in range(len(opts)):
@@ -480,6 +579,9 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
             if not improved or starts[0] >= max_starts:
                 break
         method = "tuned"
+        if warm_info:
+            notes.insert(0, f"warm start from {warm_info['from']}: inherited "
+                            f"{', '.join(warm_info['inherited']) or 'nothing'}")
     size = sv.identity.get("model_bytes")
     profile = {
         "args": resolve(knob_opts, best),
@@ -495,6 +597,7 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
                  "model_bytes": size, "ctx": sv.ctx, "server_starts": starts[0],
                  "workload": f"{len(work)} prompts x {gen_tokens} tokens" + (f", {passes} passes" if passes > 1 else ""),
                  "llama_bench": bool(bench_info), "answer_guard": guard,
+                 **({"warm_start": warm_info} if knob_opts and warm_info else {}),
                  "rejected": rejected, "notes": notes[:10]},
     }
     path = profiles.save(sv.machine.id, label, profile, eng.tuning_dir)

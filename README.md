@@ -114,6 +114,7 @@ tuieval capture logs/live/<file> --pack X     # turn a real failure into a new t
 tuieval regrade                               # re-score stored answers after changing a grader
 tuieval machines                              # this machine and others, fit and tuning per model
 tuieval tune <model>                          # fastest speed flags for a model on this machine
+tuieval export pi <model>                     # serve it in the pi coding agent with those flags
 tuieval watch --upstream http://localhost:8080   # show the reasoning of any app using your server
 tuieval help
 ```

@@ -77,7 +77,8 @@ class EmptyWorkspace(unittest.TestCase):
         tuieval(self.tmp.name, "init", self.ws)
         for f in ("models.toml", "packs", "graders", ".gitignore"):
             self.assertTrue(os.path.exists(os.path.join(self.ws, f)), f)
-        self.assertIn("none yet", tuieval(self.ws, "list").stdout)
+        self.assertIn("none yet", tuieval(self.ws, "list", "--packs").stdout)
+        self.assertIn("Models: none yet", tuieval(self.ws, "list").stdout)
         self.assertIn("No packs yet", tuieval(self.ws, "selftest").stdout)
         p = tuieval(self.ws, "run", check=False)
         self.assertNotEqual(p.returncode, 0)
@@ -222,6 +223,260 @@ class Units(unittest.TestCase):
             write(os.path.join(d, "tests.yaml"), "- {input: hi, expected: 1}\n")
             p = packs.load_pack(d)
             self.assertEqual(p.modules, ["some_missing_module"])
+
+
+def fake_gguf(path, embedding=5120, size=0):
+    """A GGUF header with just the keys machines.read_gguf reads, padded to size bytes."""
+    import struct
+    s = lambda t: struct.pack("<Q", len(t)) + t.encode()  # noqa: E731
+    kv = [("general.architecture", 8, "qwen35"), ("qwen35.block_count", 4, 64),
+          ("qwen35.embedding_length", 4, embedding), ("qwen35.attention.head_count", 4, 24),
+          ("qwen35.attention.head_count_kv", 4, 4), ("qwen35.attention.key_length", 4, 256),
+          ("qwen35.full_attention_interval", 4, 4), ("qwen35.nextn_predict_layers", 4, 1)]
+    out = b"GGUF" + struct.pack("<IQQ", 3, 0, len(kv))
+    for key, t, v in kv:
+        out += s(key) + struct.pack("<I", t) + (s(v) if t == 8 else struct.pack("<I", v))
+    with open(path, "wb") as f:
+        f.write(out + b"\0" * max(0, size - len(out)))
+
+
+class WarmTune(unittest.TestCase):
+    """tune.tune starting from a tuned model of the same family, on a fake engine whose speed is a
+    function of the flags."""
+    KNOBS = {"threads": [["-t", "8"], ["-t", "6"]], "ubatch": [["-ub", "512"], ["-ub", "256"], ["-ub", "1024"]],
+             "spec": [[], ["--spec-type", "ngram"], ["--spec-type", "draft-mtp"]]}
+
+    def setUp(self):
+        import contextlib
+        import types
+        from tuieval import profiles, tune
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        fake_gguf(f"{d}/new.gguf", size=1000)
+        fake_gguf(f"{d}/sib.gguf", size=1100)
+        fake_gguf(f"{d}/other.gguf", embedding=4096, size=1000)
+        machine = types.SimpleNamespace(id="mac", summary="a Mac")
+        eng = types.SimpleNamespace(
+            cfg={"servers": {"llama": {"cmd": ["llama"], "tune": self.KNOBS}},
+                 "models": [{"label": n, "server": "llama", "model": f"{d}/{n}.gguf"}
+                            for n in ("new", "sib", "other")],
+                 "defaults": {"request_timeout_ms": 1000}},
+            tuning_dir=f"{d}/tuning", root=d, _serving={}, starts=[])
+        eng.model = lambda label: {**next(m for m in eng.cfg["models"] if m["label"] == label), "served_name": label}
+        eng.serving = lambda m: types.SimpleNamespace(fits=True, ctx=8192, machine=machine, mtp_layers=1,
+                                                      identity={"model_bytes": 1000})
+        eng.knob_values = lambda mc: {}
+        eng.server_version = lambda m: "v1"
+        eng.gpu_residency_gb = lambda: 24
+
+        @contextlib.contextmanager
+        def serve(m, perf_args, log_name):
+            eng.starts.append(list(perf_args))
+            yield "http://x", {"load_s": 1, "facts": {}}
+        eng.serve = serve
+
+        def measure(eng_, m, url, work, *a):
+            args = eng.starts[-1]
+            fast = {"6": 1, "256": 1, "draft-mtp": 3}
+            return tune.Measure(total_s=10 - sum(v for k, v in fast.items() if k in args), texts=["same"])
+        self.orig = tune.measure
+        tune.measure = measure
+        self.eng, self.tune, self.profiles = eng, tune, profiles
+        for label, args in (("sib", ["-t", "6", "-ub", "256", "--spec-type", "draft-mtp"]),
+                            ("other", ["-t", "8"])):
+            profiles.save("mac", label, {"args": args, "meta": {"method": "seeded", "server_version": "v1"}},
+                          eng.tuning_dir)
+
+    def tearDown(self):
+        self.tune.measure = self.orig
+        self.tmp.cleanup()
+
+    def test_option_index(self):
+        opts = self.KNOBS["spec"]
+        self.assertEqual(self.tune.option_index(opts, ["-t", "6", "--spec-type", "draft-mtp"]), 2)
+        self.assertEqual(self.tune.option_index(opts, ["-t", "6"]), 0)   # off: the empty option
+        self.assertIsNone(self.tune.option_index(self.KNOBS["ubatch"], ["-ub", "64"]))
+
+    def test_sibling_is_same_family_only(self):
+        sib = self.tune.find_sibling(self.eng, self.eng.model("new"), self.KNOBS, "mac")
+        self.assertEqual((sib.label, sib.choices, sib.unmapped), ("sib", {"threads": 1, "ubatch": 1, "spec": 2}, []))
+        os.remove(f"{self.tmp.name}/tuning/mac/sib.toml")
+        self.assertIsNone(self.tune.find_sibling(self.eng, self.eng.model("new"), self.KNOBS, "mac"))
+
+    def test_warm_start_retries_only_weight_dependent_knobs(self):
+        p = self.tune.tune(self.eng, "new", use_bench=False)
+        self.assertEqual(p["args"], ["-t", "6", "-ub", "256", "--spec-type", "draft-mtp"])
+        self.assertEqual(p["meta"]["warm_start"]["from"], "sib")
+        self.assertEqual(p["meta"]["warm_start"]["inherited"], ["threads"])
+        self.assertEqual(len(self.eng.starts), 6)   # defaults, sib's flags, 2 other ubatch, 2 other spec
+        self.assertTrue(all(s[:2] == ["-t", "6"] for s in self.eng.starts[1:]))   # threads never re-tried
+
+    def test_cold_tunes_every_knob(self):
+        p = self.tune.tune(self.eng, "new", use_bench=False, warm=False)
+        self.assertNotIn("warm_start", p["meta"])
+        self.assertGreater(len(self.eng.starts), 6)
+
+    def test_falls_back_when_inherited_flags_are_slower(self):
+        self.profiles.save("mac", "sib", {"args": ["-t", "8", "-ub", "1024"], "meta": {"method": "tuned",
+                                          "server_version": "v1"}}, self.eng.tuning_dir)
+        orig = self.tune.measure
+        self.tune.measure = lambda *a: self.tune.Measure(
+            total_s=99 if "1024" in self.eng.starts[-1] else orig(*a).total_s, texts=["same"])
+        p = self.tune.tune(self.eng, "new", use_bench=False)
+        self.assertNotIn("warm_start", p["meta"])
+        self.assertIn("abandoned", " ".join(p["meta"]["notes"]))
+        self.assertEqual(p["args"], ["-t", "6", "-ub", "256", "--spec-type", "draft-mtp"])
+
+
+class ExportPi(unittest.TestCase):
+    """export.plan/apply against a temporary presets file and pi models.json."""
+    PRESETS = textwrap.dedent("""\
+        version = 1
+
+        [*]
+        threads         = 8
+        ubatch-size     = 256
+        cache-reuse     = 256
+
+        [Old]
+        model = /nowhere/old.gguf
+        temp  = 0.7
+
+        # --- next section's comment ---
+        [Keep]
+        model = /nowhere/keep.gguf
+        """)
+
+    def setUp(self):
+        import types
+        from tuieval import export
+        self.export = export
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        fake_gguf(f"{d}/Old.gguf")
+        write(f"{d}/presets.ini", self.PRESETS)
+        write(f"{d}/models.json", json.dumps({"providers": {
+            "llama": {"apiKey": "SECRET", "modelOverrides": {}}}}, indent=2) + "\n")
+        cfg = {"sampling": {"temperature": 1.0, "max_tokens": 16384, "enable_thinking": True},
+               "servers": {"llama": {"cmd": ["llama"], "tune": {"cache_reuse": [["--cache-reuse", "256"], []]}},
+                           "mlx": {"cmd": ["mlx"]}},
+               "models": [{"label": "l", "server": "llama", "model": f"{d}/Old.gguf",
+                           "sampling": {"presence_penalty": 1.5}},
+                          {"label": "s", "server": "mlx", "model": "~/b"}],
+               "export": {"pi": {"presets": f"{d}/presets.ini", "pi_models": f"{d}/models.json"}}}
+        eng = types.SimpleNamespace(cfg=cfg)
+        eng.model = lambda label: next(m for m in cfg["models"] if m["label"] == label)
+        eng.serving = lambda m: types.SimpleNamespace(perf_source="tuned", ctx=98304)
+        eng.server_command = lambda m: (["llama", "serve", "-m", m["model"], "--alias", "x", "--port", "1",
+                                         "--jinja", "-t", "8", "-ub", "512", "-c", "98304", "--temp", "1.0"],
+                                        None, "")
+        self.eng, self.d = eng, d
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_flags_to_keys(self):
+        self.assertEqual(self.export.flags_to_keys(["-ub", "512", "--jinja", "--spec-type", "a,b"]),
+                         [("ubatch-size", "512"), ("jinja", "true"), ("spec-type", "a,b")])
+
+    def test_set_ini_section_keeps_the_next_sections_comment(self):
+        new = self.export.set_ini_section(self.PRESETS, "Old", ["model = /x.gguf"])
+        self.assertIn("[Old]\nmodel = /x.gguf\n\n# --- next section's comment ---\n[Keep]", new)
+        self.assertNotIn("temp  = 0.7", new)
+        self.assertTrue(self.export.set_ini_section(self.PRESETS, "New", ["a = 1"]).endswith("\n\n[New]\na = 1\n"))
+
+    def test_llama_writes_only_what_differs_from_the_common_section(self):
+        changes, notes = self.export.plan(self.eng, "l", model_id="Old")
+        presets = next(c for c in changes if c.path.endswith("presets.ini")).new
+        section = presets.split("[Old]\n")[1].split("\n\n")[0].splitlines()
+        self.assertEqual([x.split()[0] for x in section],
+                         ["model", "jinja", "ubatch-size", "ctx-size", "temp", "presence-penalty"])
+        self.assertIn("presence-penalty = 1.5", presets)
+        self.assertNotIn("threads", presets.split("[Old]")[1])
+        self.assertTrue(any("cache-reuse" in n for n in notes))   # [*] sets a knob the tuned flags left off
+        self.assertTrue(any("don't exist" in n and n.endswith(": Keep") for n in notes))        # names a file that doesn't exist
+        pi = json.loads(next(c for c in changes if c.path.endswith("models.json")).new)
+        self.assertEqual(pi["providers"]["llama"]["modelOverrides"]["Old"]["contextWindow"], 98304)
+
+    def test_only_llama_servers(self):
+        with self.assertRaises(self.export.ExportError):
+            self.export.plan(self.eng, "s")
+
+    def test_diff_hides_credentials(self):
+        changes, _ = self.export.plan(self.eng, "l", model_id="New")
+        diff = next(c for c in changes if c.path.endswith("models.json")).diff()
+        self.assertIn('"New"', diff)
+        self.assertNotIn("SECRET", diff)
+
+    def test_apply_backs_up_and_refuses_a_file_changed_since(self):
+        changes, _ = self.export.plan(self.eng, "l", model_id="New")
+        backups = self.export.apply(changes)
+        self.assertEqual(len(backups), 2)
+        self.assertIn("[New]", read(f"{self.d}/presets.ini"))
+        self.assertNotIn("[New]", read(next(b for b in backups if "presets.ini" in b)))
+        self.assertEqual(self.export.plan(self.eng, "l", model_id="New")[0], [])   # already exported
+        changes, _ = self.export.plan(self.eng, "l", model_id="Other")
+        write(f"{self.d}/presets.ini", "edited\n")
+        with self.assertRaises(self.export.ExportError):
+            self.export.apply(changes)
+
+class Remove(unittest.TestCase):
+    TOML = textwrap.dedent("""\
+        [servers.llama]
+        cmd = ["llama"]
+
+        # first model
+        [[models]]
+        server = "llama"
+        model = "~/a/First-Q4.gguf"
+
+        # second model, with a long comment
+        # over two lines
+        [[models]]
+        label = "second"
+        server = "llama"
+        model = "~/b.gguf"
+
+        # trailing comment about the next section
+        [servers.other]
+        url = "http://x"
+        """)
+
+    def test_block_removal(self):
+        from tuieval import remove
+        new = remove.without_block(self.TOML, "second")
+        self.assertNotIn("second", new)
+        self.assertIn("# first model\n[[models]]", new)
+        self.assertIn('model = "~/a/First-Q4.gguf"\n\n# trailing comment about the next section\n[servers.other]', new)
+        new = remove.without_block(self.TOML, "first-q4")   # a label derived from the file name
+        self.assertNotIn("First-Q4", new)
+        self.assertNotIn("# first model", new)
+        self.assertIsNone(remove.without_block(self.TOML, "nope"))
+
+    def test_remove_archives_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            with open(os.path.join(ws, "models.toml"), "a") as f:
+                f.write('\n[[models]]\nlabel = "gone"\nserver = "llama"\nmodel = "~/gone.gguf"\n')
+            os.makedirs(os.path.join(ws, "results", "gone"))
+            write(os.path.join(ws, "results", "gone", "x.json"), "{}")
+            os.makedirs(os.path.join(ws, "tuning", "mac"))
+            write(os.path.join(ws, "tuning", "mac", "machine.toml"), 'id = "mac"\nsummary = "a Mac"\n')
+            write(os.path.join(ws, "tuning", "mac", "gone.toml"), 'args = []\n')
+            write(os.path.join(ws, "results", "hidden.txt"), "gone\n")
+            listed = tuieval(ws, "list").stdout
+            self.assertIn("Hidden (1", listed)
+            self.assertNotIn("gone", listed.split("Hidden")[0])
+            self.assertNotEqual(tuieval(ws, "remove", "--hidden", check=False).returncode, 0)   # asks first
+            tuieval(ws, "remove", "--hidden", "--yes")
+            self.assertNotIn("gone", read(os.path.join(ws, "models.toml")))
+            self.assertNotIn("gone", read(os.path.join(ws, "results", "hidden.txt")))
+            self.assertFalse(os.path.exists(os.path.join(ws, "results", "gone")))
+            self.assertFalse(os.path.exists(os.path.join(ws, "tuning", "mac", "gone.toml")))
+            [kept] = os.listdir(os.path.join(ws, "removed"))
+            for rel in ("results/gone/x.json", "tuning/mac/gone.toml", "models.toml-entry.txt", "models.toml.before"):
+                self.assertTrue(os.path.exists(os.path.join(ws, "removed", kept, rel)), rel)
 
 
 if __name__ == "__main__":

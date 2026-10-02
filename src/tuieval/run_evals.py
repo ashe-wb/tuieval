@@ -16,11 +16,13 @@
     tuieval run --dry-run                         # print the plan and server commands only
     tuieval add ~/models/New-Model-Q4_K_M.gguf    # register a model (--vision/--mmproj, --no-think, --tags)
     tuieval scan                                  # GGUFs in model_dirs that aren't registered yet
-    tuieval list                                  # models, packs, and which results are current
+    tuieval list                                  # the models tuieval knows; hidden ones listed separately
+    tuieval remove --hidden                       # clean up hidden models (archived in removed/)
     tuieval regrade                               # re-score stored answers with the current graders
     tuieval machines                              # this machine, known machines, fit and tuning per model
     tuieval tune my-model                         # find the fastest speed flags for a model on this machine
     tuieval tune --untuned                        # tune every model that has no profile here yet
+    tuieval export pi my-model                    # serve it in the pi coding agent with the tuned flags
 
 Each model's server is started once, every selected pack runs against it, then it is stopped.
 Results go to results/<label>/<pack>.json. Interrupted packs resume where they stopped.
@@ -167,25 +169,69 @@ def cmd_scan(argv):
 
 
 def cmd_list(argv):
-    p = argparse.ArgumentParser(prog="tuieval list")
+    p = argparse.ArgumentParser(prog="tuieval list", description="The models tuieval knows, with the hidden ones "
+                                                                  "listed separately.")
+    p.add_argument("--packs", action="store_true", help="list the packs instead")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
     a = p.parse_args(argv)
     e = engine.Engine(models_path=a.models)
-    print("Packs:" if e.packs else "Packs: none yet (tuieval new-pack <name>)")
-    for n, pk in e.packs.items():
-        needs = f"  needs {', '.join(pk.needs)}" if pk.needs else ""
-        print(f"  {n:12s} {pk.label:28s} {len(pk.tests):4d} tests  grader={pk.grader}{needs}")
-    names = list(e.packs)
-    mark = {"certified": "✓", "screened": "◐", "partial": "…", None: "-"}
-    head = ["label", "server", "tags", "vision", "think"] + names
-    rows = [[m["label"], m["server"], ",".join(m["tags"]), "yes" if m["vision"] else "-",
-             "off" if m.get("thinking") is False else "on"]
-            + [mark.get(st, "~") for st in (e.result_status(m["label"], n) for n in names)]
-            for m in e.cfg["models"]]
-    widths = [max(len(str(r[i])) for r in rows + [head]) for i in range(len(head))]
-    print("\nModels (✓ certified, ◐ screened, ~ outdated, … partial, - none):")
-    for r in [head] + rows:
-        print("  " + "  ".join(str(x).ljust(w) for x, w in zip(r, widths)).rstrip())
+    if a.packs:
+        print("Packs:" if e.packs else "Packs: none yet (tuieval new-pack <name>)")
+        for n, pk in e.packs.items():
+            needs = f"  needs {', '.join(pk.needs)}" if pk.needs else ""
+            print(f"  {n:12s} {pk.label:28s} {len(pk.tests):4d} tests  grader={pk.grader}{needs}")
+        return
+    home = os.path.expanduser("~")
+    hidden = e.hidden()
+    widths = [max((len(m[k]) for m in e.cfg["models"]), default=0) for k in ("label", "server")]
+
+    def table(models):
+        for m in models:
+            where = "~" + m["model"][len(home):] if m["model"].startswith(home + os.sep) else m["model"]
+            print(f"  {m['label'].ljust(widths[0])}  {m['server'].ljust(widths[1])}  {where}")
+    shown = [m for m in e.cfg["models"] if m["label"] not in hidden]
+    hid = [m for m in e.cfg["models"] if m["label"] in hidden]
+    print(f"Models ({len(shown)}):" if shown or hid else "Models: none yet (tuieval add <GGUF or model id>)")
+    table(shown)
+    if hid:
+        print(f"\nHidden ({len(hid)}; tuieval remove <model> or tuieval remove --hidden cleans them up):")
+        table(hid)
+
+
+def cmd_remove(argv):
+    p = argparse.ArgumentParser(prog="tuieval remove",
+                                description="Remove models: their models.toml entry, results, tuning profiles and "
+                                            "hidden mark. Nothing is deleted: it all moves to removed/<model>-<time>/.")
+    p.add_argument("labels", nargs="*", help="models to remove")
+    p.add_argument("--hidden", action="store_true", help="every hidden model")
+    p.add_argument("--yes", action="store_true", help="don't ask")
+    p.add_argument("--models", default=None, help="default: the workspace's models.toml")
+    a = p.parse_args(argv)
+    from . import remove
+    e = engine.Engine(models_path=a.models)
+    labels = list(a.labels)
+    if a.hidden:
+        labels += [m["label"] for m in e.cfg["models"] if m["label"] in e.hidden() and m["label"] not in labels]
+    if not labels:
+        sys.exit("name models to remove, or --hidden" if not a.hidden else "no hidden models")
+    try:
+        plans = [remove.plan(e, label) for label in labels]
+    except ValueError as ex:
+        sys.exit(str(ex))
+    for pl in plans:
+        say(pl.label)
+        for line in pl.describe(e.root) or ["  (nothing stored)"]:
+            print(line)
+    diff, _ = remove.models_diff(plans, e.models_path)
+    if diff:
+        print(diff)
+    if not a.yes:
+        if not sys.stdin.isatty():
+            sys.exit("not a terminal: pass --yes to remove")
+        if input(f"Remove {len(plans)} model(s)? Everything moves to removed/. [y/N] ").strip().lower() not in ("y", "yes"):
+            sys.exit("nothing removed")
+    folders = remove.apply(e, plans)
+    say(f"removed {len(plans)} model(s); kept in {os.path.relpath(os.path.dirname(folders[0]), e.root)}/", GREEN)
 
 
 def cmd_regrade(argv):
@@ -425,11 +471,16 @@ class TunePrinter:
 def cmd_tune(argv):
     p = argparse.ArgumentParser(prog="tuieval tune",
                                 description="Find the fastest speed-only server flags for models on this machine "
-                                            "(tune.py). Takes ~8-15 server starts per model.")
+                                            "(tune.py). Takes ~8-15 server starts per model, or ~4-6 when a model of the "
+                                            "same architecture is already tuned here (its flags are the starting point).")
     p.add_argument("labels", nargs="*", help="models to tune")
     p.add_argument("--untuned", action="store_true", help="every local model without a current profile here")
     p.add_argument("--max-starts", type=int, default=16, help="server starts per model (default 16)")
     p.add_argument("--no-bench", action="store_true", help="skip llama-bench even if it is installed")
+    p.add_argument("--export-pi", action="store_true",
+                   help="after tuning, export each model's serving settings to the pi coding agent (asks first)")
+    p.add_argument("--cold", action="store_true",
+                   help="tune every knob from the defaults, even if a model of the same architecture is tuned here")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
     a = p.parse_args(argv)
     from . import tune
@@ -455,7 +506,8 @@ def cmd_tune(argv):
 
         def work(label=label, result=result):
             try:
-                result["profile"] = tune.tune(e, label, e.on_event, max_starts=a.max_starts, use_bench=not a.no_bench)
+                result["profile"] = tune.tune(e, label, e.on_event, max_starts=a.max_starts, use_bench=not a.no_bench,
+                                                 warm=not a.cold)
             except (engine.ModelFailed, engine.Cancelled) as ex:
                 result["error"] = str(ex) or "cancelled"
         t = threading.Thread(target=work)
@@ -473,16 +525,80 @@ def cmd_tune(argv):
         gain = ", " + tune.gain_text(ms) if tune.gain_text(ms) else ""
         result = f"{ms['tg_tps']} tok/s decode" if ms.get("objective") == "decode" else f"{ms['total_s']}s for the workload"
         say(f"{label}: {' '.join(pr['args']) or '(no knobs)'}  ->  {result}{gain}", GREEN)
+        if pr["meta"].get("warm_start"):
+            ws = pr["meta"]["warm_start"]
+            say(f"{label}: started from {ws['from']}'s flags; re-tried {', '.join(ws['retested']) or 'nothing'}")
         if not pr["meta"].get("answer_guard", True):
             say(f"{label}: its answers depend on these settings; rerun its evals on this machine", "\033[33m")
         if pr["meta"].get("rejected"):
             say(f"{label}: rejected because answers changed: {'; '.join(pr['meta']['rejected'])}")
+        if a.export_pi and not export_pi(e, label):
+            failed += 1
     sys.exit(1 if failed else 0)
+
+
+def export_pi(e, label, model_id=None, name=None, dry_run=False, yes=False):
+    """Show what exporting a model to pi changes, ask, then write it. False if it failed or was declined."""
+    from . import export
+    try:
+        changes, notes = export.plan(e, label, model_id, name)
+    except (export.ExportError, ValueError) as ex:
+        say(f"{label}: not exported: {ex}", RED)
+        return False
+    for c in changes:
+        print(c.diff())
+    for n in notes:
+        say(f"note: {n}", YELLOW)
+    if not changes:
+        say(f"{label}: pi already has these settings", GREEN)
+        return True
+    if dry_run:
+        say("dry run: nothing written")
+        return True
+    if not yes:
+        if not sys.stdin.isatty():
+            say("not a terminal: pass --yes to write", RED)
+            return False
+        if input(f"Write {len(changes)} file(s)? [y/N] ").strip().lower() not in ("y", "yes"):
+            say("nothing written")
+            return False
+    try:
+        backups = export.apply(changes)
+    except (export.ExportError, OSError) as ex:
+        say(f"{label}: not exported: {ex}", RED)
+        return False
+    say(f"{label}: exported to pi; backups: {', '.join(backups)}", GREEN)
+    return True
+
+
+def cmd_export(argv):
+    p = argparse.ArgumentParser(prog="tuieval export",
+                                description="Write a model's serving settings (model file, output-affecting flags, "
+                                            "context and the speed flags tuned on this machine) to another tool. "
+                                            "Shows the diff and asks first; every file is backed up.")
+    p.add_argument("target", choices=["pi"], help="pi: the pi coding agent (llama-router presets and pi's "
+                                                  "models.json)")
+    p.add_argument("labels", nargs="+", help="models to export")
+    p.add_argument("--id", help="the model id pi sees (default: models.toml pi_id, else the GGUF's name)")
+    p.add_argument("--name", help="the name pi shows (default: models.toml pi_name, else the id)")
+    p.add_argument("--dry-run", action="store_true", help="show the changes only")
+    p.add_argument("--yes", action="store_true", help="write without asking")
+    p.add_argument("--models", default=None, help="default: the workspace's models.toml")
+    a = p.parse_args(argv)
+    if (a.id or a.name) and len(a.labels) > 1:
+        sys.exit("--id and --name take one model")
+    e = engine.Engine(TunePrinter(), models_path=a.models)
+    bad = [x for x in a.labels if x not in {m["label"] for m in e.cfg["models"]}]
+    if bad:
+        sys.exit(f"unknown model(s) {bad}; see tuieval list")
+    ok = all([export_pi(e, label, a.id, a.name, a.dry_run, a.yes) for label in a.labels])
+    sys.exit(0 if ok else 1)
 
 
 COMMANDS = {"add": cmd_add, "list": cmd_list, "scan": cmd_scan, "regrade": cmd_regrade,
             "verdict": cmd_verdict, "report": cmd_report, "items": cmd_items, "selftest": cmd_selftest,
-            "capture": cmd_capture, "history": cmd_history, "machines": cmd_machines, "tune": cmd_tune}
+            "capture": cmd_capture, "history": cmd_history, "machines": cmd_machines, "tune": cmd_tune,
+            "export": cmd_export, "remove": cmd_remove}
 
 
 def main(argv=None):

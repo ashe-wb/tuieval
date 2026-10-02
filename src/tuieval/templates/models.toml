@@ -99,6 +99,8 @@ headers = { "X-Title" = "tuieval" }
 # [tune]
 # guard_similarity = 0.6       # greedy answers under a candidate flag must stay this similar to the defaults'
 # request_timeout_s = 600      # a tuning request that takes longer fails that candidate
+# warm_start = true            # start from a tuned model with the same architecture and shapes (a fine-tune)
+# warm_retest = ["spec", "ubatch"]   # the knobs a warm start re-tries; the rest are inherited
 
 # Optional: llama-bench for the tuner's fast first stage (found on PATH as llama-bench otherwise).
 # [bench]
@@ -129,6 +131,7 @@ headers = { "X-Title" = "tuieval" }
 #   kv_type  optional (llama); KV-cache type, e.g. "q8_0" to fit a smaller machine. It changes
 #           answers, so give it its own label: it is a different model for the evals.
 #   tools   optional; false skips packs that need tool calling.
+#   pi_id, pi_name  optional; the model id and name `tuieval export pi` gives it in the pi coding agent.
 #
 # [[models]]
 # label = "my-model-q4"

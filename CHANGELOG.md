@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7 (replaces 0.1.6, withdrawn)
+
+- `tuieval tune` starts warm for fine-tunes: when a model with the same architecture and tensor shapes is already tuned on this machine, its flags are the starting point and only speculative decoding and micro-batch are re-tried (~4-6 server starts instead of 8-15). It tunes in full if the inherited flags fail, change answers or are slower than the defaults. `--cold` (or `[tune] warm_start = false`) always tunes in full; `[tune] warm_retest` names the re-tried knobs.
+- `tuieval export pi <model>` (and `tuieval tune --export-pi`) writes a model's serving settings to the pi coding agent: a llama-router preset section and pi's models.json. It shows the diff, asks, and backs every file up. See docs/models.md.
+- `tuieval list` lists the models, with hidden ones separately (`--packs` lists the packs).
+- `tuieval remove <model>` / `--hidden` removes models: their models.toml entry, results, tuning profiles and hidden mark, archived in removed/.
+- `tuieval --help` gives every command its own line.
+
 ## 0.1.5
 
 - The tuieval icon (the Scorecard Mosaic), a README header and a social preview; all brand files are in docs/images/brand/.
