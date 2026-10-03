@@ -225,6 +225,17 @@ def swapped_out_bytes():
 RESIDENCY_FRACTION = 0.5
 
 
+def memory_pressure_level():
+    """macOS memory pressure: 1 normal, 2 warning, 4 critical (the system starts ending processes).
+    None elsewhere."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True,
+                             text=True, timeout=5).stdout
+        return int(out.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
 def gpu_residency_gb(machine, override=None):
     """GPU memory the driver keeps resident without churning (models.toml
     [machines.<id>] gpu_residency_gb overrides the half-of-RAM default)."""

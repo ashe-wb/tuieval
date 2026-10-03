@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- `tuieval tune`: swapping the defaults already cause is a warning, not a failure; an option is rejected only if it swaps more than the defaults.
+- `tuieval tune` scores options on projected full-length answers (`[tune] answer_tokens`, default 1024), so generation speed counts as in real runs.
+- `tuieval tune` reports an option's memory cost instead of rejecting it; it rejects only on critical memory pressure or over `[tune] swap_limit_mb`.
 - Warm-start tuning recognises fine-tunes whose GGUF describes the MTP draft layer differently (e.g. listing KV heads per layer) as the same model shape, so they start from an already-tuned sibling instead of tuning in full.
 - The fit check (context sized from the GGUF header, llama.cpp's memory use) only applies to servers whose command takes `{ctx}`. Servers that size their own memory keep the model's `max_context` instead of an estimate that didn't apply to them; `fit_check = true|false` on a server overrides it.
 - `tuieval export pi` has no default presets path any more: set `[export.pi] presets` to your llama.cpp router's `--models-preset` file.
