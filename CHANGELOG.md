@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Warm-start tuning recognises fine-tunes whose GGUF describes the MTP draft layer differently (e.g. listing KV heads per layer) as the same model shape, so they start from an already-tuned sibling instead of tuning in full.
 - The fit check (context sized from the GGUF header, llama.cpp's memory use) only applies to servers whose command takes `{ctx}`. Servers that size their own memory keep the model's `max_context` instead of an estimate that didn't apply to them; `fit_check = true|false` on a server overrides it.
 - `tuieval export pi` has no default presets path any more: set `[export.pi] presets` to your llama.cpp router's `--models-preset` file.
 - A new README screenshot from a demo workspace.

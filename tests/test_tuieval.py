@@ -225,17 +225,25 @@ class Units(unittest.TestCase):
             self.assertEqual(p.modules, ["some_missing_module"])
 
 
-def fake_gguf(path, embedding=5120, size=0):
-    """A GGUF header with just the keys machines.read_gguf reads, padded to size bytes."""
+def fake_gguf(path, embedding=5120, size=0, kv_heads=4):
+    """A GGUF header with just the keys machines.read_gguf reads, padded to size bytes. kv_heads: a
+    number, or one per layer (a list, as some GGUFs store it)."""
     import struct
     s = lambda t: struct.pack("<Q", len(t)) + t.encode()  # noqa: E731
     kv = [("general.architecture", 8, "qwen35"), ("qwen35.block_count", 4, 64),
           ("qwen35.embedding_length", 4, embedding), ("qwen35.attention.head_count", 4, 24),
-          ("qwen35.attention.head_count_kv", 4, 4), ("qwen35.attention.key_length", 4, 256),
+          ("qwen35.attention.head_count_kv", 9 if isinstance(kv_heads, list) else 4, kv_heads),
+          ("qwen35.attention.key_length", 4, 256),
           ("qwen35.full_attention_interval", 4, 4), ("qwen35.nextn_predict_layers", 4, 1)]
     out = b"GGUF" + struct.pack("<IQQ", 3, 0, len(kv))
     for key, t, v in kv:
-        out += s(key) + struct.pack("<I", t) + (s(v) if t == 8 else struct.pack("<I", v))
+        out += s(key) + struct.pack("<I", t)
+        if t == 8:
+            out += s(v)
+        elif t == 9:   # an array of uint32
+            out += struct.pack("<IQ", 4, len(v)) + b"".join(struct.pack("<I", x) for x in v)
+        else:
+            out += struct.pack("<I", v)
     with open(path, "wb") as f:
         f.write(out + b"\0" * max(0, size - len(out)))
 
@@ -315,6 +323,15 @@ class WarmTune(unittest.TestCase):
     def tearDown(self):
         self.tune.measure = self.orig
         self.tmp.cleanup()
+
+    def test_family_ignores_the_mtp_layer(self):
+        # one GGUF lists KV heads per layer, none on the MTP (last) layer; the other gives one number
+        d = self.tmp.name
+        per_layer = [4 if (i + 1) % 4 == 0 else 0 for i in range(63)] + [0]
+        fake_gguf(f"{d}/listed.gguf", kv_heads=per_layer)
+        self.assertEqual(self.tune.family(f"{d}/listed.gguf"), self.tune.family(f"{d}/new.gguf"))
+        fake_gguf(f"{d}/other-shape.gguf", kv_heads=[8 if (i + 1) % 4 == 0 else 0 for i in range(64)])
+        self.assertNotEqual(self.tune.family(f"{d}/other-shape.gguf"), self.tune.family(f"{d}/new.gguf"))
 
     def test_option_index(self):
         opts = self.KNOBS["spec"]

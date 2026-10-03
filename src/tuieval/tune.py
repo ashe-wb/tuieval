@@ -315,8 +315,11 @@ def family(path):
         i = machines.read_gguf(engine_mod.expand(path))
     except (OSError, ValueError):
         return None
+    # The MTP (nextn) draft layers at the end are left out: GGUFs of the same model describe them
+    # differently, and whether draft-mtp is offered is decided per model (knobs) anyway.
+    heads = i["kv_heads_per_layer"][:len(i["kv_heads_per_layer"]) - i["mtp_layers"]]
     return (i["architecture"], i["layers"], i["embedding"], i["experts"], i["experts_used"],
-            i["head_dim_k"], i["head_dim_v"], tuple(i["kv_heads_per_layer"]))
+            i["head_dim_k"], i["head_dim_v"], tuple(heads))
 
 
 @dataclasses.dataclass
