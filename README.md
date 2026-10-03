@@ -6,7 +6,7 @@ Run the same eval packs against local models (llama.cpp GGUFs, LM Studio, Ollama
 
 tuieval measures **accuracy, speed and token use** together, and gives a **PASS / FAIL / INCONCLUSIVE** verdict per use case. Grading is automatic; there's no LLM judge.
 
-Public benchmarks leak into training data and You know your workload better than anyone. tuieval ships with **no built-in benchmark**.
+You know your workload better than anyone. tuieval ships with **no built-in benchmark**.
 Instead you build *eval packs* from what you actually do: questions with checkable answers, in your domain, with your rules
 Then you get an answer to the questions that matter:
 
