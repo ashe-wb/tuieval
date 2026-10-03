@@ -308,12 +308,17 @@ class WarmTune(unittest.TestCase):
             yield "http://x", {"load_s": 1, "facts": {}}
         eng.serve = serve
 
-        def measure(eng_, m, url, work, *a):
+        def measure(eng_, m, url, work, *a, **k):
             args = eng.starts[-1]
             fast = {"6": 1, "256": 1, "draft-mtp": 3}
             return tune.Measure(total_s=10 - sum(v for k, v in fast.items() if k in args), texts=["same"])
         self.orig = tune.measure
         tune.measure = measure
+        from tuieval import machines
+        self.pressure = lambda args: 1   # macOS memory pressure per start's flags: normal
+        orig_pressure = machines.memory_pressure_level
+        machines.memory_pressure_level = lambda: self.pressure(eng.starts[-1] if eng.starts else [])
+        self.addCleanup(setattr, machines, "memory_pressure_level", orig_pressure)
         self.eng, self.tune, self.profiles = eng, tune, profiles
         for label, args in (("sib", ["-t", "6", "-ub", "256", "--spec-type", "draft-mtp"]),
                             ("other", ["-t", "8"])):
@@ -352,12 +357,41 @@ class WarmTune(unittest.TestCase):
         self.assertEqual(p["args"], ["-t", "6", "-ub", "256", "--spec-type", "draft-mtp"])   # tuned as usual
         self.assertIn("800 MB", p["meta"]["warnings"][0])
 
-    def test_a_flag_that_swaps_more_than_the_defaults_is_rejected(self):
-        # -ub 256 is the fastest micro-batch here, but it costs 600 MB of swap the defaults don't
+    def test_a_flag_that_costs_memory_still_wins_with_a_warning(self):
+        # -ub 256 is the fastest micro-batch here, and costs 600 MB of swap the defaults don't
+        self._swap(at_load_mb=0, while_serving_mb=lambda args: 600 if "256" in args else 100)
+        p = self.tune.tune(self.eng, "new", use_bench=False, warm=False)
+        self.assertIn("256", p["args"])
+        self.assertTrue(any("~500 MB more" in w for w in p["meta"]["warnings"]))
+
+    def test_swap_limit_rules_out_flags_that_cost_memory(self):
+        self.eng.cfg["tune"] = {"swap_limit_mb": 256}
         self._swap(at_load_mb=0, while_serving_mb=lambda args: 600 if "256" in args else 100)
         p = self.tune.tune(self.eng, "new", use_bench=False, warm=False)
         self.assertNotIn("256", p["args"])
-        self.assertTrue(any("500 MB more than with the defaults" in n for n in p["meta"]["notes"]))
+        self.assertTrue(any("over swap_limit_mb = 256" in n for n in p["meta"]["notes"]))
+
+    def test_critical_memory_pressure_rejects_a_flag(self):
+        self.pressure = lambda args: 4 if "draft-mtp" in args else 1
+        p = self.tune.tune(self.eng, "new", use_bench=False, warm=False)
+        self.assertNotIn("draft-mtp", p["args"])
+        self.assertTrue(any("memory pressure turned critical" in n for n in p["meta"]["notes"]))
+
+    def test_projected_time_scores_full_length_answers(self):
+        # 10 s for 128 tokens at 16 tok/s: 2 s reading the prompt + 8 s generating
+        res = {"error": None, "total_s": 10.0, "ttft_s": 2.0, "reasoning": "", "answer": "x",
+               "usage": {"completion_tokens": 128, "prompt_tokens": 50},
+               "timings": {"predicted_per_second": 16.0, "prompt_per_second": 25.0}}
+        self.eng.cfg["sampling"] = {"temperature": 0}
+        self.eng._check = lambda: None
+        orig = self.tune._request
+        self.tune._request = lambda *a, **k: dict(res)
+        self.addCleanup(setattr, self.tune, "_request", orig)
+        out = self.tune._measure_once(self.eng, self.eng.model("new"), "http://x", [("p", [])], 128,
+                                      lambda *a, **k: None, 60, answer_tokens=1024)
+        self.assertEqual((out.total_s, out.projected_s), (10.0, 66.0))   # 2 s + 1024 / 16
+        self.assertEqual(out.score("projected"), 66.0)
+        self.assertEqual(out.score("total"), 10.0)
 
     def test_family_ignores_the_mtp_layer(self):
         # one GGUF lists KV heads per layer, none on the MTP (last) layer; the other gives one number
@@ -397,7 +431,7 @@ class WarmTune(unittest.TestCase):
         self.profiles.save("mac", "sib", {"args": ["-t", "8", "-ub", "1024"], "meta": {"method": "tuned",
                                           "server_version": "v1"}}, self.eng.tuning_dir)
         orig = self.tune.measure
-        self.tune.measure = lambda *a: self.tune.Measure(
+        self.tune.measure = lambda *a, **k: self.tune.Measure(
             total_s=99 if "1024" in self.eng.starts[-1] else orig(*a).total_s, texts=["same"])
         p = self.tune.tune(self.eng, "new", use_bench=False)
         self.assertNotIn("warm_start", p["meta"])

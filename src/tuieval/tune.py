@@ -18,18 +18,24 @@ retrained or dropped its MTP layers, and its quant mix shifts the best micro-bat
 it tunes in full instead. `tuieval tune --cold` (or [tune] warm_start = false) always tunes in full.
 
 One objective per server (models.toml `tune_objective`):
-  total   (default) total seconds for the workload: short prompts, medium ones and one long
-          (~8k-token) prompt, fixed generation length
-  decode  generated tokens per second, measured on a second pass over a few prompts after a
-          warm-up pass (for servers whose decode speed grows as their caches warm)
+  projected  (default) seconds the workload would take with full-length answers: each prompt's
+             measured reading time plus [tune] answer_tokens (default 1024) at its measured
+             generation speed. The workload generates 128 tokens per prompt, but eval answers run
+             to thousands, so generation speed counts as much as it does in real runs.
+  total      wall-clock seconds for the workload as run (128-token answers)
+  decode     generated tokens per second, measured on a second pass over a few prompts after a
+             warm-up pass (for servers whose decode speed grows as their caches warm)
 An output guard compares greedy answers with the default flags; an option that changes them beyond
 noise is rejected, because speed flags must not change answers. Servers whose answers depend on
 the machine's memory settings (`outputs_depend_on_machine`) skip the guard; their tuned flags
 become part of the results fingerprint instead, so retuning marks that machine's results
-outdated. A candidate under which macOS swaps more than with the defaults is rejected (it costs
-memory). Swapping the defaults already cause (the model, its context, other apps) is a warning, and
-swapping while the model loads is only noted. Servers without tune knobs are only
-measured.
+outdated.
+
+Memory: a candidate is rejected if macOS memory pressure turns critical while it works, or, with
+[tune] swap_limit_mb set, if it swaps more than that beyond the defaults. Otherwise memory is a
+reported cost, not a reason to reject: a flag that pushes other apps' idle memory to swap can still
+win, and the result warns about it. Swapping the defaults already cause is a warning too, and
+swapping while the model loads is only noted. Servers without tune knobs are only measured.
 
 The knobs and their options come from models.toml [servers.<name>.tune]; placeholders {p},
 {p_minus_2} and {all} are this machine's core counts.
@@ -50,7 +56,10 @@ from . import profiles
 
 GEN_TOKENS = 128          # generated per workload prompt
 DECODE_TOKENS = 256      # generated per prompt for the decode objective
-SWAP_LIMIT = 256 * 2**20  # a candidate that swaps this much more than the defaults is rejected
+SWAP_NOTABLE = 256 * 2**20  # swap worth a warning (bytes); rejecting for swap needs [tune] swap_limit_mb
+ANSWER_TOKENS = 1024       # answer length the projected objective scores ([tune] answer_tokens)
+PRESSURE_CRITICAL = 4      # macOS memory pressure level that rejects a candidate
+PRESSURE_EVERY_S = 2
 GPU_MARGIN_GB = 0.75      # a candidate whose GPU allocation comes this close to the residency limit
                           # is rejected even before it stalls: servers grow as requests arrive
 REQUEST_LIMIT_S = 600     # a tuning request taking longer fails the candidate ([tune] request_timeout_s)
@@ -72,16 +81,21 @@ class Measure:
     error: str = ""
     facts: dict = dataclasses.field(default_factory=dict)   # from the server log, e.g. expert capacity
     swapped_mb: float | None = None  # macOS swap-outs while the loaded server worked
+    projected_s: float | None = None  # the workload with full-length answers (projected objective)
+    pressure: int | None = None      # highest macOS memory pressure level while it worked
 
     def score(self, objective):
         """Lower is better."""
         if objective == "decode":
             return 1 / self.tg_tps if self.tg_tps else float("inf")
+        if objective == "projected" and self.projected_s is not None:
+            return self.projected_s
         return self.total_s
 
     def summary(self):
         facts = "".join(f" · {k} {v}" for k, v in self.facts.items())
-        return (f"{self.total_s:.1f}s total · gen {self.tg_tps} tok/s · prompt {self.pp_tps} tok/s"
+        projected = f"{self.projected_s:.0f}s projected · " if self.projected_s is not None else ""
+        return (f"{projected}{self.total_s:.1f}s total · gen {self.tg_tps} tok/s · prompt {self.pp_tps} tok/s"
                 f" · ttft {self.ttft_s}s{facts}")
 
 
@@ -194,20 +208,21 @@ def _request(eng, base_url, body, name, emit, limit):
 
 
 def measure(eng, m, base_url, work, gen_tokens=GEN_TOKENS, passes=1, emit=lambda *a, **k: None,
-            limit=REQUEST_LIMIT_S):
+            limit=REQUEST_LIMIT_S, answer_tokens=ANSWER_TOKENS):
     """Time the workload (after a warm-up request). With passes > 1 the earlier passes warm the
-    server's caches and only the last pass is reported."""
+    server's caches and only the last pass is reported. answer_tokens: the answer length the
+    projected time is for."""
     out = Measure()
     for p in range(passes):
         if passes > 1:
             emit("tune_progress", message=f"    pass {p + 1} of {passes}" + (" (warm-up)" if p < passes - 1 else " (timed)"))
-        out = _measure_once(eng, m, base_url, work, gen_tokens, emit, limit)
+        out = _measure_once(eng, m, base_url, work, gen_tokens, emit, limit, answer_tokens)
         if out.error:
             break
     return out
 
 
-def _measure_once(eng, m, base_url, work, gen_tokens, emit, limit):
+def _measure_once(eng, m, base_url, work, gen_tokens, emit, limit, answer_tokens=ANSWER_TOKENS):
     sampling = engine_mod.effective_sampling(eng.cfg, m)
     request = eng.cfg["servers"][m["server"]].get("request", {})
     timeout = eng.cfg["defaults"]["request_timeout_ms"] / 1000
@@ -218,7 +233,7 @@ def _measure_once(eng, m, base_url, work, gen_tokens, emit, limit):
     if warm["error"]:
         out.error = warm["error"]
         return out
-    ttfts, p_tok, p_s, g_tok, g_s = [], 0, 0.0, 0, 0.0
+    ttfts, p_tok, p_s, g_tok, g_s, projected = [], 0, 0.0, 0, 0.0, 0.0
     for name, msgs in work:
         eng._check()
         emit("tune_progress", message=f"    {name} ({gen_tokens} tokens)")
@@ -230,6 +245,13 @@ def _measure_once(eng, m, base_url, work, gen_tokens, emit, limit):
         emit("tune_progress", message=f"      done: {met['completion_tokens']} tokens in {res['total_s']:.1f}s"
                                       + (f", {met['gen_tps']} tok/s" if met["gen_tps"] else ""))
         out.total_s += res["total_s"]
+        # The same request with a full-length answer: its reading time plus answer_tokens at the
+        # generation speed measured here (as run if the server doesn't report that speed).
+        if met["completion_tokens"] and met["gen_tps"]:
+            reading = max(res["total_s"] - met["completion_tokens"] / met["gen_tps"], 0.0)
+            projected += reading + answer_tokens / met["gen_tps"]
+        else:
+            projected += res["total_s"]
         out.texts.append((res["reasoning"] or "") + (res["answer"] or ""))
         if name != "long" and res.get("ttft_s") is not None:
             ttfts.append(res["ttft_s"])
@@ -238,6 +260,7 @@ def _measure_once(eng, m, base_url, work, gen_tokens, emit, limit):
         if met["completion_tokens"] and met["gen_tps"]:
             g_tok, g_s = g_tok + met["completion_tokens"], g_s + met["completion_tokens"] / met["gen_tps"]
     out.total_s = round(out.total_s, 2)
+    out.projected_s = round(projected, 1)
     out.ttft_s = round(sum(ttfts) / len(ttfts), 3) if ttfts else None
     out.pp_tps = round(p_tok / p_s, 1) if p_s else None
     out.tg_tps = round(g_tok / g_s, 2) if g_s else None
@@ -246,12 +269,37 @@ def _measure_once(eng, m, base_url, work, gen_tokens, emit, limit):
 
 def gain_pct(objective, base, best):
     """How much better the chosen settings are than the defaults: % more decode tok/s for the
-    decode objective, % less total time otherwise."""
+    decode objective, % less (projected or total) time otherwise."""
     if base is None:
         return None
     if objective == "decode":
         return round(100 * (best.tg_tps / base.tg_tps - 1)) if base.tg_tps and best.tg_tps else None
-    return round(100 * (1 - best.total_s / base.total_s)) if base.total_s else None
+    b, n = base.score(objective), best.score(objective)
+    return round(100 * (1 - n / b)) if b else None
+
+
+class PressureWatch:
+    """The highest macOS memory pressure level seen while a block runs (None where unknown)."""
+
+    def __enter__(self):
+        self.level, self._stop = machines.memory_pressure_level(), threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def _sample(self):
+        lvl = machines.memory_pressure_level()
+        if lvl is not None:
+            self.level = max(self.level or 0, lvl)
+
+    def _run(self):
+        while not self._stop.wait(PRESSURE_EVERY_S):
+            self._sample()
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(PRESSURE_EVERY_S + 1)
+        self._sample()
 
 
 def gain_text(measured):
@@ -453,12 +501,14 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
     sv = eng.serving(m)
     if not sv.fits:
         raise engine_mod.ModelFailed(sv.fit_note)
-    objective = server.get("tune_objective", "total")
+    objective = server.get("tune_objective", "projected")
     if objective == "decode":
         work, gen_tokens, passes = decode_workload(eng), DECODE_TOKENS, 2
     else:
         work, gen_tokens, passes = workload(eng, sv.ctx), GEN_TOKENS, 1
     settings = eng.cfg.get("tune", {})
+    answer_tokens = settings.get("answer_tokens", ANSWER_TOKENS)
+    swap_limit = settings.get("swap_limit_mb")   # MB beyond the defaults' swap that rejects; None: report only
     threshold = settings.get("guard_similarity", 0.6)
     guard = not server.get("outputs_depend_on_machine")
     knob_opts = knobs(eng, m, sv) if server.get("cmd") else {}
@@ -484,18 +534,20 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
                 # Loading may push other apps to swap once (e.g. a model locked in RAM with mlock);
                 # that's recorded, not held against the settings. Swapping while serving is.
                 loaded = machines.swapped_out_bytes()
-                r = measure(eng, m, url, work, gen_tokens, passes, emit,
-                            settings.get("request_timeout_s", REQUEST_LIMIT_S))
+                with PressureWatch() as pressure:
+                    r = measure(eng, m, url, work, gen_tokens, passes, emit,
+                                settings.get("request_timeout_s", REQUEST_LIMIT_S), answer_tokens=answer_tokens)
                 end = machines.swapped_out_bytes()
+                r.pressure = pressure.level
                 if None not in (swap0, loaded, end):
                     swapped = (end - loaded) / 2**20
                     at_load = (loaded - swap0) / 2**20
-                    if at_load > SWAP_LIMIT / 2**20:
+                    if at_load > SWAP_NOTABLE / 2**20:
                         emit("tune_step", message=f"    note: loading pushed {at_load:.0f} MB of other apps to swap "
                                                   "(close apps for more headroom)")
                 r.load_s = round(info["load_s"], 1) if info["load_s"] else None
                 r.facts = dict(info["facts"])
-                if swapped is not None and at_load > SWAP_LIMIT / 2**20:
+                if swapped is not None and at_load > SWAP_NOTABLE / 2**20:
                     r.facts["load_swapped_mb"] = round(at_load)
                 # Settled allocation after the timed pass (brief peaks while processing a prompt are
                 # harmless; sustained allocation over the limit is what makes the driver churn).
@@ -516,10 +568,15 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
             r = Measure(error=str(e).splitlines()[0])
         r.swapped_mb = swapped
         # Swapping every candidate shares (model, context, prompt cache, other apps) says nothing about
-        # a flag; only swapping beyond the defaults' does.
+        # a flag; only swapping beyond the defaults' does, and it's a cost to report unless it harms:
+        # critical memory pressure, or more than the user's swap_limit_mb.
         extra = None if swapped is None or swap_ref[0] is None else swapped - swap_ref[0]
-        if not r.error and extra is not None and extra > SWAP_LIMIT / 2**20:
-            r.error = f"macOS swapped {extra:.0f} MB more than with the defaults (uses too much memory)"
+        if extra is not None and extra > SWAP_NOTABLE / 2**20:
+            r.facts["extra_swap_mb"] = round(extra)
+        if not r.error and r.pressure is not None and r.pressure >= PRESSURE_CRITICAL:
+            r.error = "macOS memory pressure turned critical (memory too tight)"
+        elif not r.error and swap_limit is not None and extra is not None and extra > swap_limit:
+            r.error = f"macOS swapped {extra:.0f} MB more than with the defaults (over swap_limit_mb = {swap_limit})"
         cache[k] = r
         emit("tune_result", message=f"    failed: {r.error}" if r.error else "    " + r.summary(), result=r, args=args)
         return r
@@ -527,7 +584,7 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
     def set_baseline(r):
         """The defaults' swapping is the machine's baseline: warned about, never held against a flag."""
         swap_ref[0] = r.swapped_mb or 0
-        if swap_ref[0] > SWAP_LIMIT / 2**20:
+        if swap_ref[0] > SWAP_NOTABLE / 2**20:
             warnings.append(f"serving this model pushed {swap_ref[0]:.0f} MB of other apps' memory to swap on "
                             "this machine; close other apps or lower this model's context for more headroom")
             emit("tune_step", message="    warning: " + warnings[-1])
@@ -615,6 +672,11 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
         if warm_info:
             notes.insert(0, f"warm start from {warm_info['from']}: inherited "
                             f"{', '.join(warm_info['inherited']) or 'nothing'}")
+    if best_r.facts.get("extra_swap_mb") and best_r is not base:
+        warnings.append(f"the chosen flags use more memory than the defaults: macOS swapped "
+                        f"~{best_r.facts['extra_swap_mb']} MB more of other apps' memory; close apps during runs, "
+                        "or set [tune] swap_limit_mb to rule such flags out")
+        emit("tune_step", message="    warning: " + warnings[-1])
     size = sv.identity.get("model_bytes")
     profile = {
         "args": resolve(knob_opts, best),
@@ -623,12 +685,15 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
                      "tg_tps": best_r.tg_tps, "load_s": best_r.load_s,
                      "default_total_s": base.total_s if knob_opts else None,
                      "default_tg_tps": base.tg_tps if knob_opts else None, "objective": objective,
+                     "projected_s": best_r.projected_s,
+                     "default_projected_s": base.projected_s if knob_opts else None,
                      **{f"server_{k}": v for k, v in best_r.facts.items()},
                      "gain_pct": gain_pct(objective, base, best_r)},
         "meta": {"method": method, "date": profiles.now(), "machine": sv.machine.summary,
                  "server_version": eng.server_version(m), "model_file": os.path.basename(m["model"]),
                  "model_bytes": size, "ctx": sv.ctx, "server_starts": starts[0],
-                 "workload": f"{len(work)} prompts x {gen_tokens} tokens" + (f", {passes} passes" if passes > 1 else ""),
+                 "workload": f"{len(work)} prompts x {gen_tokens} tokens" + (f", {passes} passes" if passes > 1 else "")
+                 + (f", scored for {answer_tokens}-token answers" if objective == "projected" else ""),
                  "llama_bench": bool(bench_info), "answer_guard": guard,
                  **({"warm_start": warm_info} if knob_opts and warm_info else {}),
                  "rejected": rejected, "notes": notes[:10], "warnings": warnings},

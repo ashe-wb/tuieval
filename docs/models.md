@@ -77,8 +77,8 @@ The best server flags differ per model and per machine, so tuieval splits them b
 `tuieval tune <model>` (or `t` on the setup screen, for the ticked models) finds the fastest speed flags for a model on this machine:
 
 1. If `llama-bench` is installed, it sweeps threads, micro-batch and flash attention first (fast, no server starts).
-2. Then it starts the real server with one knob changed at a time and times a fixed **built-in** workload (three short prompts, three medium ones and one ~8k-token prompt), so tuning needs no packs and speeds are comparable between workspaces.
-3. An **output guard** rejects any option that changes greedy answers beyond noise. An option under which macOS swaps more than with the defaults is rejected (it costs memory). If the defaults already push other apps to swap, the tune warns and carries on.
+2. Then it starts the real server with one knob changed at a time and times a fixed **built-in** workload (three short prompts, three medium ones and one ~8k-token prompt), so tuning needs no packs and speeds are comparable between workspaces. Options are scored on the **projected** time: each prompt's measured reading time plus a full-length answer (`[tune] answer_tokens`, default 1024) at its measured generation speed. The workload itself generates 128 tokens per prompt, but eval answers run to thousands, so generation speed counts as much as in real runs.
+3. An **output guard** rejects any option that changes greedy answers beyond noise. Memory is a cost, not a reason to reject: an option that makes macOS push other apps' idle memory to swap can still win, and the result warns about it. An option is rejected only if macOS memory pressure turns critical while it runs, or, with `[tune] swap_limit_mb` set, if it swaps more than that beyond the defaults.
 
 Expect 8–15 server starts, about 20–30 minutes for a 27B model, once per model per machine. The result is saved in `tuning/<machine>/<model>.toml` and used by every later run there. Models without a profile run with each knob's first option and show *untuned*. A profile is marked for retuning when the model file or server version changes.
 
@@ -128,7 +128,7 @@ On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM,
 | `request` | fields added to every request (e.g. `{ cache_prompt = false }`) |
 | `perf` | speed-only flags always applied |
 | `tune` | speed-only knobs for `tuieval tune` |
-| `tune_objective` | `total` (default: workload time) or `decode` (tokens/s after a warm-up pass) |
+| `tune_objective` | `projected` (default: workload time with full-length answers), `total` (workload time as run) or `decode` (tokens/s after a warm-up pass) |
 | `version_cmd` | prints the server version, recorded with every result |
 | `health` | readiness path for servers without `/v1/models` (must return JSON with `model`) |
 | `before_start` | a command run before starting the server (e.g. to free memory another process holds) |

@@ -523,7 +523,9 @@ def cmd_tune(argv):
         pr = result["profile"]
         ms = pr["measured"]
         gain = ", " + tune.gain_text(ms) if tune.gain_text(ms) else ""
-        result = f"{ms['tg_tps']} tok/s decode" if ms.get("objective") == "decode" else f"{ms['total_s']}s for the workload"
+        result = f"{ms['tg_tps']} tok/s decode" if ms.get("objective") == "decode" else \
+            f"{ms['projected_s']}s projected for the workload" if ms.get("objective") == "projected" and ms.get("projected_s") \
+            else f"{ms['total_s']}s for the workload"
         say(f"{label}: {' '.join(pr['args']) or '(no knobs)'}  ->  {result}{gain}", GREEN)
         if pr["meta"].get("warm_start"):
             ws = pr["meta"]["warm_start"]

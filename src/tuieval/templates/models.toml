@@ -101,6 +101,8 @@ headers = { "X-Title" = "tuieval" }
 # request_timeout_s = 600      # a tuning request that takes longer fails that candidate
 # warm_start = true            # start from a tuned model with the same architecture and shapes (a fine-tune)
 # warm_retest = ["spec", "ubatch"]   # the knobs a warm start re-tries; the rest are inherited
+# answer_tokens = 1024         # answer length options are scored for (projected objective)
+# swap_limit_mb = 500          # reject options that swap more than this beyond the defaults (default: report only)
 
 # Optional: llama-bench for the tuner's fast first stage (found on PATH as llama-bench otherwise).
 # [bench]
