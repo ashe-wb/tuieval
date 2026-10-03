@@ -2,9 +2,13 @@
 
 **Find out which model you can trust with your work, on your own questions, in the terminal.**
 
-Run the same eval packs against local models (llama.cpp GGUFs, LM Studio, Ollama, vLLM; tiny, dense or MoE) and against any frontier model on OpenRouter, side by side. tuieval measures **accuracy, speed and token use** together, and gives a **PASS / FAIL / INCONCLUSIVE** verdict per use case. Grading is automatic; there's no LLM judge.
+Run the same eval packs against local models (llama.cpp GGUFs, LM Studio, Ollama, vLLM; tiny, dense or MoE) and against any frontier model on OpenRouter, side by side.
 
-Public benchmarks leak into training data and rarely look like your work, so tuieval ships with **no built-in benchmark**. Instead you build *eval packs* from what you actually do: questions with checkable answers, in your domain, with your rules. Then you get an answer to the questions that matter:
+tuieval measures **accuracy, speed and token use** together, and gives a **PASS / FAIL / INCONCLUSIVE** verdict per use case. Grading is automatic; there's no LLM judge.
+
+Public benchmarks leak into training data and You know your workload better than anyone. tuieval ships with **no built-in benchmark**.
+Instead you build *eval packs* from what you actually do: questions with checkable answers, in your domain, with your rules
+Then you get an answer to the questions that matter:
 
 - Is this local model good enough to replace the API I'm paying for?
 - Which frontier model is best for *my* domain, not on a leaderboard?
