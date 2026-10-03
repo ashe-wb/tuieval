@@ -21,7 +21,7 @@ tuieval                        # open the TUI
 
 Once you've added your own packs and models, the setup screen looks like this (packs on the left, models with a verdict code per use case on the right, the highlighted model's details below):
 
-![tuieval's setup screen with five eval packs and a dozen local models](https://raw.githubusercontent.com/ashe-wb/tuieval/main/docs/images/tui-setup.png)
+![tuieval's setup screen with five eval packs and three models with their verdicts](https://raw.githubusercontent.com/ashe-wb/tuieval/main/docs/images/tui-setup.png)
 
 ## What you get
 

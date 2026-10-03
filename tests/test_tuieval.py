@@ -398,6 +398,11 @@ class ExportPi(unittest.TestCase):
         pi = json.loads(next(c for c in changes if c.path.endswith("models.json")).new)
         self.assertEqual(pi["providers"]["llama"]["modelOverrides"]["Old"]["contextWindow"], 98304)
 
+    def test_presets_path_is_required(self):
+        del self.eng.cfg["export"]["pi"]["presets"]
+        with self.assertRaises(self.export.ExportError):
+            self.export.plan(self.eng, "l")
+
     def test_only_llama_servers(self):
         with self.assertRaises(self.export.ExportError):
             self.export.plan(self.eng, "s")

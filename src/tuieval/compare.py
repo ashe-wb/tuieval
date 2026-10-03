@@ -3,7 +3,7 @@
 Usage:
     tuieval compare                          # everything in results/<model>/<pack>.json
     tuieval compare --speed                  # speed & tokens table (TTFT, tok/s, tokens, memory)
-    tuieval compare --machine m4pro-24gb     # speed on another machine (measured there, or projected)
+    tuieval compare --machine m3max-64gb     # speed on another machine (measured there, or projected)
     tuieval compare --pairwise --failures    # is each difference real? which tests failed?
     tuieval compare results/some-model/*.json    # specific files
 """

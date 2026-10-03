@@ -68,7 +68,7 @@ The best server flags differ per model and per machine, so tuieval splits them b
 
 ## Machines
 
-- **Machine id** is detected automatically (`m1max-32gb`, `m4pro-24gb`, …; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
+- **Machine id** is detected automatically (e.g. `m3max-64gb`, `m2-16gb`; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
 - **Fit check (Apple Silicon, llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory, capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers.
 - **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free for macOS, default 4) and `gpu_residency_gb` (see the stall guard).
 
@@ -90,18 +90,18 @@ The knobs are `[servers.<name>.tune]` in `models.toml`: each knob is a list of o
 
 `tuieval export pi <model>` makes pi serve a model the way the evals did: the same file, the output-affecting flags, the context from the fit check, the model's sampling, and the speed flags tuned on this machine. `tuieval tune <model> --export-pi` does it right after tuning.
 
-It writes a `[<id>]` section in llama-router's presets file (keys that equal its `[*]` section are left out) and an entry under pi's `llama` provider `modelOverrides` (name, context window, vision, reasoning). It exports models on llama servers.
+It writes a `[<id>]` section in the model presets file of a llama.cpp router (`llama-server --models-preset <file>`; keys that equal its `[*]` section are left out) and an entry under pi's `llama` provider `modelOverrides` (name, context window, vision, reasoning). It exports models on llama servers.
 
-It shows the diff and the notes first (untuned or outdated tuning, other preset sections that name missing files, a reasoning effort to pick in pi), asks, backs every file up as `<file>.bak-tuieval-<time>`, and refuses to write a file that changed in the meantime. `--dry-run` only shows; `--yes` doesn't ask. Restart the router afterwards (`llama-router restart`).
+It shows the diff and the notes first (untuned or outdated tuning, other preset sections that name missing files, a reasoning effort to pick in pi), asks, backs every file up as `<file>.bak-tuieval-<time>`, and refuses to write a file that changed in the meantime. `--dry-run` only shows; `--yes` doesn't ask. Restart the router afterwards so it reads the new presets.
 
 The id pi sees defaults to the GGUF's name; set `pi_id` and `pi_name` on the model (or pass `--id`/`--name`). Paths and provider names come from `[export.pi]` in `models.toml`:
 
 ```toml
 [export.pi]
-presets = "~/models/presets.ini"
-pi_models = "~/.pi/agent/models.json"
+presets = "/path/to/presets.ini"           # required: the router's --models-preset file
+pi_models = "~/.pi/agent/models.json"       # pi's default
 llama_provider = "llama"     # pi's provider name for the router
-servers = ["llama"]          # models.toml servers that llama-router can serve
+servers = ["llama"]          # models.toml servers the router can serve
 ```
 
 ## Speed verdicts
@@ -110,7 +110,7 @@ Speed is judged separately, per machine: the same model can be production-grade 
 
 ## The stall guard (Apple Silicon)
 
-Measured on an M1 Max 32 GB: once the system's GPU allocations pass about half of RAM, the GPU driver evicts and re-maps memory on every GPU job, the server spends 70–95% of its CPU in the kernel while the GPU idles, and servers that submit many small GPU jobs slow to a crawl. For servers with `stall_guard = true`, tuieval samples the server's own vs kernel CPU time and the system's GPU allocation every 5 s during runs and tuning. If more than 70% of its CPU goes to the kernel for a minute, the run stops with an explanation instead of crawling for hours. Finished answers are kept and resume next time. If your machine behaves differently, set `gpu_residency_gb` under `[machines.<id>]`.
+On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM, the GPU driver evicts and re-maps memory on every GPU job, the server spends 70–95% of its CPU in the kernel while the GPU idles, and servers that submit many small GPU jobs slow to a crawl. For servers with `stall_guard = true`, tuieval samples the server's own vs kernel CPU time and the system's GPU allocation every 5 s during runs and tuning. If more than 70% of its CPU goes to the kernel for a minute, the run stops with an explanation instead of crawling for hours. Finished answers are kept and resume next time. If your machine behaves differently, set `gpu_residency_gb` under `[machines.<id>]`.
 
 ## Server options
 

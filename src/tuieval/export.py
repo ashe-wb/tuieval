@@ -1,17 +1,18 @@
 """Export a model's serving settings to the pi coding agent, so pi serves it exactly as the evals did:
 the same model file, output-affecting flags and context, plus the speed flags tuned on this machine.
 
-  a section in llama-router's presets (~/models/presets.ini; keys that equal the [*] section are
-  left out) and an entry under pi's `llama` provider modelOverrides. Models on llama servers only.
+  a section in a llama.cpp router's model presets file (llama-server --models-preset; keys that
+  equal its [*] section are left out) and an entry under pi's `llama` provider modelOverrides.
+  Models on llama servers only.
 
 Every file is backed up next to itself (<file>.bak-tuieval-<time>) before it changes, and the diff
 is shown first. Paths come from models.toml [export.pi]:
 
   [export.pi]
-  presets = "~/models/presets.ini"            # llama-router --models-preset
+  presets = "/path/to/presets.ini"            # required: the router's --models-preset file
   pi_models = "~/.pi/agent/models.json"
   llama_provider = "llama"                     # pi's provider name for the router
-  servers = ["llama"]                          # models.toml servers that llama-router can serve
+  servers = ["llama"]                          # models.toml servers the router can serve
 """
 import configparser
 import difflib
@@ -23,7 +24,7 @@ import time
 
 from . import engine as engine_mod
 
-DEFAULTS = {"presets": "~/models/presets.ini", "pi_models": "~/.pi/agent/models.json",
+DEFAULTS = {"presets": None, "pi_models": "~/.pi/agent/models.json",
             "llama_provider": "llama", "servers": ["llama"]}
 # llama.cpp short flags -> the long names presets use as keys
 SHORT = {"-m": "model", "-c": "ctx-size", "-t": "threads", "-tb": "threads-batch", "-ub": "ubatch-size",
@@ -127,7 +128,7 @@ def plan(eng, label, model_id=None, name=None):
     m = eng.model(label)
     s = settings(eng)
     if m["server"] not in s["servers"]:
-        raise ExportError(f"{label} runs on the {m['server']} server; pi export writes llama-router presets, "
+        raise ExportError(f"{label} runs on the {m['server']} server; pi export writes llama.cpp router presets, "
                           "for llama servers ([export.pi] servers lists them)")
     model_id = model_id or m.get("pi_id") or default_id(m)
     name = name or m.get("pi_name") or model_id
@@ -157,6 +158,8 @@ def plan(eng, label, model_id=None, name=None):
     for k, key in SAMPLING_KEYS.items():
         if sampling.get(k) is not None:
             flags[key] = str(sampling[k])
+    if not s.get("presets"):
+        raise ExportError("set [export.pi] presets in models.toml to your llama.cpp router's --models-preset file")
     path = engine_mod.expand(s["presets"])
     old = _read(path)
     if not old:
@@ -183,7 +186,7 @@ def plan(eng, label, model_id=None, name=None):
                   "maxTokens": entry.get("maxTokens", sampling.get("max_tokens")),
                   "reasoning": bool(sampling.get("enable_thinking", True)),
                   "input": ["text", "image"] if vision else ["text"]})
-    notes.append("restart llama-router to load the new presets (llama-router restart)")
+    notes.append("restart the llama.cpp router so it reads the new presets")
     if sampling.get("reasoning_effort"):
         notes.append(f"the evals ran reasoning_effort {sampling['reasoning_effort']}: pick that thinking level in pi")
     pi_new = json.dumps(pi, indent=2, ensure_ascii=False) + "\n"

@@ -576,7 +576,7 @@ def cmd_export(argv):
                                 description="Write a model's serving settings (model file, output-affecting flags, "
                                             "context and the speed flags tuned on this machine) to another tool. "
                                             "Shows the diff and asks first; every file is backed up.")
-    p.add_argument("target", choices=["pi"], help="pi: the pi coding agent (llama-router presets and pi's "
+    p.add_argument("target", choices=["pi"], help="pi: the pi coding agent (llama.cpp router presets and pi's "
                                                   "models.json)")
     p.add_argument("labels", nargs="+", help="models to export")
     p.add_argument("--id", help="the model id pi sees (default: models.toml pi_id, else the GGUF's name)")

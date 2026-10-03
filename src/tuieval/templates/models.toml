@@ -107,7 +107,7 @@ headers = { "X-Title" = "tuieval" }
 # cmd = ["~/llama.cpp/build/bin/llama-bench"]
 
 # Optional per-machine settings, by machine id (tuieval machines shows the ids).
-# [machines.m4pro-24gb]
+# [machines.m3max-64gb]
 # memory_headroom_gb = 3       # GPU memory kept free for macOS and other apps (default 4)
 # gpu_residency_gb = 12        # GPU memory the driver keeps resident before churning (default: half of RAM)
 

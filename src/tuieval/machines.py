@@ -1,6 +1,6 @@
 """Which machine this is, what a model needs, and whether it fits.
 
-    detect()              -> Machine (chip, cores, RAM, GPU memory limit, id like "m1max-32gb")
+    detect()              -> Machine (chip, cores, RAM, GPU memory limit, id like "m3max-64gb")
     read_gguf(path)       -> GGUF header facts (architecture, layers, KV heads, context length, …)
     fit(model_path, …)    -> Fit (largest context that fits this machine, estimated memory)
 
@@ -219,8 +219,7 @@ def swapped_out_bytes():
 
 
 # ---------------------------------------------------------------- GPU residency
-# Measured on an M1 Max 32 GB with macOS 27.0: once the system's GPU allocations exceed about half
-# of RAM, the GPU driver evicts and re-maps memory on every command submission (70-95% of the
+# On Apple Silicon Macs, once the system's GPU allocations exceed about half of RAM, the GPU driver evicts and re-maps memory on every command submission (70-95% of the
 # server's CPU in the kernel, GPU idle), whatever iogpu.wired_limit_mb says. Servers that submit
 # many small GPU jobs collapse; see the stall guard in docs/models.md.
 RESIDENCY_FRACTION = 0.5
