@@ -26,7 +26,8 @@ An output guard compares greedy answers with the default flags; an option that c
 noise is rejected, because speed flags must not change answers. Servers whose answers depend on
 the machine's memory settings (`outputs_depend_on_machine`) skip the guard; their tuned flags
 become part of the results fingerprint instead, so retuning marks that machine's results
-outdated. Any candidate that makes macOS swap is rejected. Servers without tune knobs are only
+outdated. Any candidate under which macOS swaps while the server works is rejected (swapping
+while the model loads, e.g. to lock it in RAM, is only noted). Servers without tune knobs are only
 measured.
 
 The knobs and their options come from models.toml [servers.<name>.tune]; placeholders {p},
@@ -474,12 +475,25 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
         emit("tune_step", message=f"[{starts[0]}] {why}: {' '.join(args) or '(server defaults)'}",
              start=starts[0], max_starts=max_starts)
         swap0 = machines.swapped_out_bytes()
+        swapped = None   # MB swapped out while the loaded server worked (loading itself doesn't count)
         try:
             with eng.serve(m, perf_args=fixed + args, log_name=f"{label}.tune") as (url, info):
+                # Loading may push other apps to swap once (e.g. a model locked in RAM with mlock);
+                # that's recorded, not held against the settings. Swapping while serving is.
+                loaded = machines.swapped_out_bytes()
                 r = measure(eng, m, url, work, gen_tokens, passes, emit,
                             settings.get("request_timeout_s", REQUEST_LIMIT_S))
+                end = machines.swapped_out_bytes()
+                if None not in (swap0, loaded, end):
+                    swapped = (end - loaded) / 2**20
+                    at_load = (loaded - swap0) / 2**20
+                    if at_load > SWAP_LIMIT / 2**20:
+                        emit("tune_step", message=f"    note: loading pushed {at_load:.0f} MB of other apps to swap "
+                                                  "(close apps for more headroom)")
                 r.load_s = round(info["load_s"], 1) if info["load_s"] else None
                 r.facts = dict(info["facts"])
+                if swapped is not None and at_load > SWAP_LIMIT / 2**20:
+                    r.facts["load_swapped_mb"] = round(at_load)
                 # Settled allocation after the timed pass (brief peaks while processing a prompt are
                 # harmless; sustained allocation over the limit is what makes the driver churn).
                 settled = machines.gpu_allocated_gb() if server.get("stall_guard") else None
@@ -497,9 +511,8 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
                                               "close other apps for faster and fairer results")
         except engine_mod.ModelFailed as e:
             r = Measure(error=str(e).splitlines()[0])
-        swap1 = machines.swapped_out_bytes()
-        if not r.error and swap0 is not None and swap1 is not None and swap1 - swap0 > SWAP_LIMIT:
-            r.error = f"macOS swapped {(swap1 - swap0) / 2**20:.0f} MB (memory too tight)"
+        if not r.error and swapped is not None and swapped > SWAP_LIMIT / 2**20:
+            r.error = f"macOS swapped {swapped:.0f} MB while the server worked (memory too tight)"
         cache[k] = r
         emit("tune_result", message=f"    failed: {r.error}" if r.error else "    " + r.summary(), result=r, args=args)
         return r

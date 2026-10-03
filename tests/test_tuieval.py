@@ -324,6 +324,32 @@ class WarmTune(unittest.TestCase):
         self.tune.measure = self.orig
         self.tmp.cleanup()
 
+    def _swap(self, at_load_mb, while_serving_mb):
+        """Fake macOS swap counter: each server start swaps at_load_mb while loading (between the
+        reading before the start and the one once it serves) and while_serving_mb during the work."""
+        from tuieval import machines
+        state = {"n": 0, "total": 0}
+
+        def swapped_out_bytes():
+            step = state["n"] % 3          # 0: before the start, 1: loaded, 2: after the work
+            state["total"] += {0: 0, 1: at_load_mb, 2: while_serving_mb}[step] * 2**20
+            state["n"] += 1
+            return state["total"]
+        orig = machines.swapped_out_bytes
+        machines.swapped_out_bytes = swapped_out_bytes
+        self.addCleanup(setattr, machines, "swapped_out_bytes", orig)
+
+    def test_swapping_while_loading_is_only_noted(self):
+        self._swap(at_load_mb=900, while_serving_mb=0)
+        p = self.tune.tune(self.eng, "new", use_bench=False)
+        self.assertEqual(p["measured"]["server_load_swapped_mb"], 900)
+
+    def test_swapping_while_serving_fails_the_settings(self):
+        self._swap(at_load_mb=0, while_serving_mb=500)
+        with self.assertRaises(self.tune.engine_mod.ModelFailed) as cm:
+            self.tune.tune(self.eng, "new", use_bench=False)
+        self.assertIn("swapped 500 MB while the server worked", str(cm.exception))
+
     def test_family_ignores_the_mtp_layer(self):
         # one GGUF lists KV heads per layer, none on the MTP (last) layer; the other gives one number
         d = self.tmp.name

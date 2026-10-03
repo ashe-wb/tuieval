@@ -78,7 +78,7 @@ The best server flags differ per model and per machine, so tuieval splits them b
 
 1. If `llama-bench` is installed, it sweeps threads, micro-batch and flash attention first (fast, no server starts).
 2. Then it starts the real server with one knob changed at a time and times a fixed **built-in** workload (three short prompts, three medium ones and one ~8k-token prompt), so tuning needs no packs and speeds are comparable between workspaces.
-3. An **output guard** rejects any option that changes greedy answers beyond noise. Candidates that make macOS swap are rejected.
+3. An **output guard** rejects any option that changes greedy answers beyond noise. Candidates under which macOS swaps while the server works are rejected; swapping while the model loads (e.g. other apps making room for a model locked in RAM) is only noted.
 
 Expect 8–15 server starts, about 20–30 minutes for a 27B model, once per model per machine. The result is saved in `tuning/<machine>/<model>.toml` and used by every later run there. Models without a profile run with each knob's first option and show *untuned*. A profile is marked for retuning when the model file or server version changes.
 
