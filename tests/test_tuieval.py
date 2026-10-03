@@ -240,6 +240,31 @@ def fake_gguf(path, embedding=5120, size=0):
         f.write(out + b"\0" * max(0, size - len(out)))
 
 
+class FitCheck(unittest.TestCase):
+    def test_default_follows_the_ctx_placeholder(self):
+        from tuieval import engine
+        self.assertTrue(engine.fit_check({"cmd": ["llama-server", "-c", "{ctx}"]}))
+        self.assertFalse(engine.fit_check({"cmd": ["other-server", "--model", "{model}"]}))
+        self.assertFalse(engine.fit_check({"url": "http://x"}))
+        self.assertTrue(engine.fit_check({"cmd": ["other"], "fit_check": True}))
+        self.assertFalse(engine.fit_check({"cmd": ["llama", "-c", "{ctx}"], "fit_check": False}))
+
+    def test_own_memory_servers_keep_their_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            fake_gguf(os.path.join(tmp, "m.gguf"), size=1000)
+            with open(os.path.join(ws, "models.toml"), "a") as f:
+                f.write(f'\n[servers.own]\ncmd = ["own-server", "--model", "{{model}}"]\nport = 18500\nmodel_is_path = true\n'
+                        f'\n[[models]]\nlabel = "sized"\nserver = "llama"\nmodel = "{tmp}/m.gguf"\n'
+                        f'\n[[models]]\nlabel = "own"\nserver = "own"\nmodel = "{tmp}/m.gguf"\nmax_context = 131072\n')
+            code = ("from tuieval import engine; e = engine.Engine(); "
+                    "print(e.serving(e.model('own')).ctx, e.serving(e.model('sized')).fit_note != '')")
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env=dict(os.environ, TUIEVAL_HOME=ws)).stdout.split()
+            self.assertEqual(out, ["131072", "True"])   # own server: its max_context; llama: fit-checked
+
+
 class WarmTune(unittest.TestCase):
     """tune.tune starting from a tuned model of the same family, on a fake engine whose speed is a
     function of the flags."""

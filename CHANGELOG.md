@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The fit check (context sized from the GGUF header, llama.cpp's memory use) only applies to servers whose command takes `{ctx}`. Servers that size their own memory keep the model's `max_context` instead of an estimate that didn't apply to them; `fit_check = true|false` on a server overrides it.
 - `tuieval export pi` has no default presets path any more: set `[export.pi] presets` to your llama.cpp router's `--models-preset` file.
 - A new README screenshot from a demo workspace.
 - Versions come from git tags: a tag `vX.Y.Z` is that release, and every commit on `main` after it is published automatically as a dev build `X.(Y+1).0.devN` (N = commits since the release). `pip install tuieval` keeps installing releases only; `pip install --pre tuieval` gets the latest build.

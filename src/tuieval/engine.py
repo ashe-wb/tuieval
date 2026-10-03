@@ -96,6 +96,16 @@ def load_config(path):
     return cfg
 
 
+def fit_check(server):
+    """Whether tuieval sizes the context for this server's models from GGUF headers (machines.fit,
+    which assumes llama.cpp's memory use). By default only servers whose command takes {ctx}, i.e.
+    where tuieval chooses the context; others size their own memory, and their context is the
+    model's max_context. models.toml `fit_check = true|false` on a server overrides it."""
+    if "fit_check" in server:
+        return bool(server["fit_check"])
+    return any("{ctx}" in str(a) for a in server.get("cmd", []))
+
+
 def effective_sampling(cfg, m):
     """The request settings this model runs with: [sampling], then the model's own overrides."""
     s = dict(cfg["sampling"])
@@ -1018,13 +1028,15 @@ class Engine:
         path = expand(m["model"])
         if server.get("model_is_path") and os.path.isfile(path):
             try:
-                mmproj = expand(m.get("mmproj", ""))
-                extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
-                headroom = self.machine_settings(mc.id).get("memory_headroom_gb", 4.0)
-                f = machines.fit(path, mc, kv_type=kv or "f16", headroom_gb=headroom, extra_bytes=extra,
-                                 want_ctx=want)
                 info = machines.read_gguf(path)
-                ctx, fits, note, mtp, size = f.max_ctx, f.fits, f.note, info["mtp_layers"], info["bytes"]
+                mtp, size = info["mtp_layers"], info["bytes"]
+                if fit_check(server):
+                    mmproj = expand(m.get("mmproj", ""))
+                    extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
+                    headroom = self.machine_settings(mc.id).get("memory_headroom_gb", 4.0)
+                    f = machines.fit(path, mc, kv_type=kv or "f16", headroom_gb=headroom, extra_bytes=extra,
+                                     want_ctx=want)
+                    ctx, fits, note = f.max_ctx, f.fits, f.note
             except (OSError, ValueError) as e:
                 note = f"couldn't read the GGUF header ({e}); context not checked"
         profile, perf, source = None, [], "n/a"

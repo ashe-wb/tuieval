@@ -69,7 +69,7 @@ The best server flags differ per model and per machine, so tuieval splits them b
 ## Machines
 
 - **Machine id** is detected automatically (e.g. `m3max-64gb`, `m2-16gb`; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
-- **Fit check (Apple Silicon, llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory, capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers.
+- **Fit check (Apple Silicon, llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory, capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers. Servers that size their own memory (their `cmd` doesn't take `{ctx}`) are left alone: their context is the model's `max_context`; `fit_check` on the server changes that.
 - **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free for macOS, default 4) and `gpu_residency_gb` (see the stall guard).
 
 ## Tuning
@@ -120,7 +120,8 @@ On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM,
 | `url` | an already-running server's base URL |
 | `port` | the port `cmd` serves on |
 | `cwd` | folder to start `cmd` in |
-| `model_is_path` | `model` is a file or folder: check it exists (and, for GGUFs, that it fits) before starting |
+| `model_is_path` | `model` is a file or folder: check it exists before starting |
+| `fit_check` | size the context from the GGUF header and skip models that don't fit (the fit check; it assumes llama.cpp's memory use). Default: on for servers whose `cmd` takes `{ctx}`, off for others, whose context is the model's `max_context` |
 | `vision_args` | flags appended for models with `mmproj` |
 | `kv_type`, `max_ctx` | llama defaults: KV-cache type, upper bound on context |
 | `ctx_flag` | the server's context flag, so long packs are skipped if a configured context is too small |
