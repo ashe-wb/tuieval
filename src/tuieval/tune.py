@@ -26,8 +26,9 @@ An output guard compares greedy answers with the default flags; an option that c
 noise is rejected, because speed flags must not change answers. Servers whose answers depend on
 the machine's memory settings (`outputs_depend_on_machine`) skip the guard; their tuned flags
 become part of the results fingerprint instead, so retuning marks that machine's results
-outdated. Any candidate under which macOS swaps while the server works is rejected (swapping
-while the model loads, e.g. to lock it in RAM, is only noted). Servers without tune knobs are only
+outdated. A candidate under which macOS swaps more than with the defaults is rejected (it costs
+memory). Swapping the defaults already cause (the model, its context, other apps) is a warning, and
+swapping while the model loads is only noted. Servers without tune knobs are only
 measured.
 
 The knobs and their options come from models.toml [servers.<name>.tune]; placeholders {p},
@@ -49,7 +50,7 @@ from . import profiles
 
 GEN_TOKENS = 128          # generated per workload prompt
 DECODE_TOKENS = 256      # generated per prompt for the decode objective
-SWAP_LIMIT = 256 * 2**20  # a candidate that swaps out more than this is rejected
+SWAP_LIMIT = 256 * 2**20  # a candidate that swaps this much more than the defaults is rejected
 GPU_MARGIN_GB = 0.75      # a candidate whose GPU allocation comes this close to the residency limit
                           # is rejected even before it stalls: servers grow as requests arrive
 REQUEST_LIMIT_S = 600     # a tuning request taking longer fails the candidate ([tune] request_timeout_s)
@@ -70,6 +71,7 @@ class Measure:
     load_s: float | None = None
     error: str = ""
     facts: dict = dataclasses.field(default_factory=dict)   # from the server log, e.g. expert capacity
+    swapped_mb: float | None = None  # macOS swap-outs while the loaded server worked
 
     def score(self, objective):
         """Lower is better."""
@@ -462,7 +464,8 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
     knob_opts = knobs(eng, m, sv) if server.get("cmd") else {}
     fixed = list(server.get("perf", [])) if server.get("cmd") else []
     cache, starts, notes, rejected, bad = {}, [0], [], [], set()   # bad: (knob, option) that failed
-    warned = []
+    warned, warnings = [], []
+    swap_ref = [None]   # MB the defaults swapped while serving: the machine's baseline
 
     def evaluate(choices, why):
         k = tuple(sorted(choices.items()))
@@ -511,17 +514,30 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
                                               "close other apps for faster and fairer results")
         except engine_mod.ModelFailed as e:
             r = Measure(error=str(e).splitlines()[0])
-        if not r.error and swapped is not None and swapped > SWAP_LIMIT / 2**20:
-            r.error = f"macOS swapped {swapped:.0f} MB while the server worked (memory too tight)"
+        r.swapped_mb = swapped
+        # Swapping every candidate shares (model, context, prompt cache, other apps) says nothing about
+        # a flag; only swapping beyond the defaults' does.
+        extra = None if swapped is None or swap_ref[0] is None else swapped - swap_ref[0]
+        if not r.error and extra is not None and extra > SWAP_LIMIT / 2**20:
+            r.error = f"macOS swapped {extra:.0f} MB more than with the defaults (uses too much memory)"
         cache[k] = r
         emit("tune_result", message=f"    failed: {r.error}" if r.error else "    " + r.summary(), result=r, args=args)
         return r
+
+    def set_baseline(r):
+        """The defaults' swapping is the machine's baseline: warned about, never held against a flag."""
+        swap_ref[0] = r.swapped_mb or 0
+        if swap_ref[0] > SWAP_LIMIT / 2**20:
+            warnings.append(f"serving this model pushed {swap_ref[0]:.0f} MB of other apps' memory to swap on "
+                            "this machine; close other apps or lower this model's context for more headroom")
+            emit("tune_step", message="    warning: " + warnings[-1])
 
     base = None
     if not server.get("cmd") or not knob_opts:
         r = evaluate({}, "measuring (no speed knobs to tune)")
         if r.error:
             raise engine_mod.ModelFailed(r.error)
+        set_baseline(r)
         best, best_r = {}, r
         method, bench_info = "measured", None
     else:
@@ -530,6 +546,7 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
         if base is None or base.error:
             raise engine_mod.ModelFailed(f"the server doesn't start with the default flags: "
                                          f"{base.error if base else 'no starts left'}")
+        set_baseline(base)
         settled, bench_info, warm_info = {}, None, None
         best, best_r, search = dict(default), base, list(knob_opts)
         sib = find_sibling(eng, m, knob_opts, sv.machine.id) \
@@ -614,7 +631,7 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
                  "workload": f"{len(work)} prompts x {gen_tokens} tokens" + (f", {passes} passes" if passes > 1 else ""),
                  "llama_bench": bool(bench_info), "answer_guard": guard,
                  **({"warm_start": warm_info} if knob_opts and warm_info else {}),
-                 "rejected": rejected, "notes": notes[:10]},
+                 "rejected": rejected, "notes": notes[:10], "warnings": warnings},
     }
     path = profiles.save(sv.machine.id, label, profile, eng.tuning_dir)
     eng._serving.clear()

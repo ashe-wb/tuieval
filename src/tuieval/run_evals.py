@@ -530,6 +530,8 @@ def cmd_tune(argv):
             say(f"{label}: started from {ws['from']}'s flags; re-tried {', '.join(ws['retested']) or 'nothing'}")
         if not pr["meta"].get("answer_guard", True):
             say(f"{label}: its answers depend on these settings; rerun its evals on this machine", "\033[33m")
+        for w in pr["meta"].get("warnings", []):
+            say(f"{label}: warning: {w}", YELLOW)
         if pr["meta"].get("rejected"):
             say(f"{label}: rejected because answers changed: {'; '.join(pr['meta']['rejected'])}")
         if a.export_pi and not export_pi(e, label):

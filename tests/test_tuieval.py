@@ -325,14 +325,15 @@ class WarmTune(unittest.TestCase):
         self.tmp.cleanup()
 
     def _swap(self, at_load_mb, while_serving_mb):
-        """Fake macOS swap counter: each server start swaps at_load_mb while loading (between the
-        reading before the start and the one once it serves) and while_serving_mb during the work."""
+        """Fake macOS swap counter: each server start swaps at_load_mb while loading and
+        while_serving_mb(args) during the work (args: that start's flags)."""
         from tuieval import machines
         state = {"n": 0, "total": 0}
 
         def swapped_out_bytes():
             step = state["n"] % 3          # 0: before the start, 1: loaded, 2: after the work
-            state["total"] += {0: 0, 1: at_load_mb, 2: while_serving_mb}[step] * 2**20
+            mb = {0: 0, 1: at_load_mb, 2: while_serving_mb(self.eng.starts[-1]) if step == 2 else 0}[step]
+            state["total"] += mb * 2**20
             state["n"] += 1
             return state["total"]
         orig = machines.swapped_out_bytes
@@ -340,15 +341,23 @@ class WarmTune(unittest.TestCase):
         self.addCleanup(setattr, machines, "swapped_out_bytes", orig)
 
     def test_swapping_while_loading_is_only_noted(self):
-        self._swap(at_load_mb=900, while_serving_mb=0)
+        self._swap(at_load_mb=900, while_serving_mb=lambda args: 0)
         p = self.tune.tune(self.eng, "new", use_bench=False)
         self.assertEqual(p["measured"]["server_load_swapped_mb"], 900)
+        self.assertEqual(p["meta"]["warnings"], [])
 
-    def test_swapping_while_serving_fails_the_settings(self):
-        self._swap(at_load_mb=0, while_serving_mb=500)
-        with self.assertRaises(self.tune.engine_mod.ModelFailed) as cm:
-            self.tune.tune(self.eng, "new", use_bench=False)
-        self.assertIn("swapped 500 MB while the server worked", str(cm.exception))
+    def test_swapping_every_candidate_shares_is_a_warning(self):
+        self._swap(at_load_mb=0, while_serving_mb=lambda args: 800)
+        p = self.tune.tune(self.eng, "new", use_bench=False)
+        self.assertEqual(p["args"], ["-t", "6", "-ub", "256", "--spec-type", "draft-mtp"])   # tuned as usual
+        self.assertIn("800 MB", p["meta"]["warnings"][0])
+
+    def test_a_flag_that_swaps_more_than_the_defaults_is_rejected(self):
+        # -ub 256 is the fastest micro-batch here, but it costs 600 MB of swap the defaults don't
+        self._swap(at_load_mb=0, while_serving_mb=lambda args: 600 if "256" in args else 100)
+        p = self.tune.tune(self.eng, "new", use_bench=False, warm=False)
+        self.assertNotIn("256", p["args"])
+        self.assertTrue(any("500 MB more than with the defaults" in n for n in p["meta"]["notes"]))
 
     def test_family_ignores_the_mtp_layer(self):
         # one GGUF lists KV heads per layer, none on the MTP (last) layer; the other gives one number

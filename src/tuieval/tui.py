@@ -2565,6 +2565,8 @@ class EvalsApp(App):
                             p = tune.tune(e, label, lambda kind, **d: on_event(kind, label=label, **d))
                             ms = p["measured"]
                             gain = f" ({tune.gain_text(ms)})" if tune.gain_text(ms) else ""
+                            if p["meta"].get("warnings"):
+                                gain += " (warning: it pushes other apps' memory to swap; see the log)"
                             if not p["meta"].get("answer_guard", True):
                                 gain += " (answers depend on these settings: rerun its evals here)"
                             done.append(f"{label}{gain}")
