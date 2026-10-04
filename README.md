@@ -99,7 +99,7 @@ See **[docs/models.md](docs/models.md)** for servers, OpenRouter endpoint pinnin
 
 ## The TUI
 
-1. **Pick packs and models** (space ticks; type to filter models by label or tag). Each model shows a short code per use case, e.g. `C✓ S?` (✓ pass, ✗ fail, ? inconclusive; grey = from earlier results).
+1. **Pick packs and models** (space ticks; type to filter models by label or tag). Each model shows a short code per use case, e.g. `C✓ S?` (✓ pass, ✗ fail, ? inconclusive; grey = from earlier results). To run only some tests of a pack, highlight it and press `e`. Runs of different tests add up, and the pack can PASS once all its tests have run.
 2. **Pick a tier** (Smoke to check setup, Screen, Certify) and **press `s`**. The line above the buttons shows how many answers that is and roughly how long it will take. For each model, tuieval starts its server (or uses a running one), checks the right model is loaded, runs every selected pack, then stops it.
 3. **Watch the run:** progress with ETA, live score, tok/s, TTFT and memory, the current test with reasoning and answer side by side, recent results with the grader's reason. `k` skips a model, `c` cancels (finished work is kept and resumes next time). Runs started while one is going are queued.
 4. **Press `r` for results:** production readiness, verdict history, scorecard, speed & tokens (★ marks models nothing beats on both accuracy and time), per question, is the difference real?, tests that separate models, by difficulty, failures, and test quality.
@@ -111,6 +111,7 @@ Other keys: `t` tunes the ticked models' speed flags, `a` adds a model, `m` scan
 ```bash
 tuieval run                                   # Screen every model on every pack
 tuieval run --tier certify --only a,b --packs support-bot,coding
+tuieval run --packs coding --tests parse-dates,fix-bug   # only these tests (or --tests coding:parse-dates)
 tuieval run --dry-run                         # the plan and server commands
 tuieval verdict                               # PASS / FAIL / INCONCLUSIVE per model and use case
 tuieval report                                # the same with evidence, as a markdown file

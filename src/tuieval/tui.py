@@ -21,6 +21,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import threading
 import time
 
@@ -398,6 +399,7 @@ class SetupScreen(Screen):
         Binding("a", "add_model", "Add model"),
         Binding("m", "scan", "Scan for models"),
         Binding("p", "presets", "Presets"),
+        Binding("e", "pick_tests", "Pick tests"),
         Binding("t", "tune", "Tune speed"),
         Binding("r", "results", "Results"),
         Binding("x", "hide_model", "Hide/unhide"),
@@ -426,7 +428,7 @@ class SetupScreen(Screen):
         yield Static(id="machine")
         with Horizontal(id="pickers"):
             with Vertical(classes="picker"):
-                yield Label("[b]Eval packs[/b]  (space to toggle)")
+                yield Label("[b]Eval packs[/b]  (space to toggle · e picks tests)")
                 yield SelectionList(id="suites")
             with Vertical(classes="picker"):
                 yield Label(id="models-legend")
@@ -455,6 +457,7 @@ class SetupScreen(Screen):
 
     def on_mount(self):
         self.selected_models = set()
+        self.picks = {}    # pack -> test ids to run instead of the tier's usual tests
         self.refresh_machine()
         self.refresh_packs()
         self.refresh_models()
@@ -471,14 +474,19 @@ class SetupScreen(Screen):
     def refresh_packs(self):
         e = self.app.engine
         packs = self.query_one("#suites", SelectionList)
-        keep = set(packs.selected)
+        keep, at = set(packs.selected), packs.highlighted
         packs.clear_options()
         for name, pk in e.packs.items():
+            picked = self.current_picks().get(name)
+            count = (f"[b cyan]{len(picked)}/{len(pk.tests)} tests picked[/]" if picked
+                     else f"[dim]{len(pk.tests)} tests[/dim]")
             needs = f"  [magenta]{', '.join(pk.needs)}[/magenta]" if pk.needs else ""
             mix = {lvl: sum(t.get("difficulty") == lvl for t in pk.tests) for lvl in ("easy", "medium", "hard")}
             mixed = " ".join(f"[{DIFF_STYLE[l]}]{n}{l[0].upper()}[/]" for l, n in mix.items() if n)
-            packs.add_option(Selection(f"[dim]{pk.group} ·[/dim] {pk.label}  [dim]{len(pk.tests)} tests[/dim] {mixed}{needs}",
+            packs.add_option(Selection(f"[dim]{pk.group} ·[/dim] {pk.label}  {count} {mixed}{needs}",
                                        name, name in keep))
+        if at is not None and at < packs.option_count:
+            packs.highlighted = at
         if not e.packs:
             for i, line in enumerate(NO_PACKS):
                 packs.add_option(Selection(line, f"\x00nopacks:{i}", disabled=True))
@@ -637,6 +645,38 @@ class SetupScreen(Screen):
                 list(self.query_one("#suites", SelectionList).selected), repeat,
                 self.tier(), self.query_one("#force", Checkbox).value)
 
+    def current_picks(self, suites=None):
+        """{pack: picked test ids} for packs that still have those tests (and, given suites, are ticked)."""
+        e = self.app.engine
+        out = {}
+        for name, ids in getattr(self, "picks", {}).items():
+            pk = e.packs.get(name)
+            known = [i for i in ids if pk and any(t["id"] == i for t in pk.tests)]
+            if known and (suites is None or name in suites):
+                out[name] = known
+        return out
+
+    def action_pick_tests(self):
+        """Choose which tests of the highlighted pack run (none ticked: the tier's usual tests)."""
+        packs = self.query_one("#suites", SelectionList)
+        opt = packs.highlighted_option
+        if opt is None or opt.value not in self.app.engine.packs:
+            self.notify("Highlight a pack first.", severity="warning")
+            return
+        name = opt.value
+
+        def done(ids):
+            if ids is None:
+                return
+            if ids:
+                self.picks[name] = ids
+                packs.select(name)
+            else:
+                self.picks.pop(name, None)
+            self.refresh_packs()
+            self.update_estimate()
+        self.app.push_screen(PickTestsScreen(self.app.engine.packs[name], self.current_picks().get(name, [])), done)
+
     @on(SelectionList.SelectedChanged)
     @on(Input.Changed)
     @on(Checkbox.Changed)
@@ -658,10 +698,11 @@ class SetupScreen(Screen):
         if not labels or not suites:
             est.update("[dim]Select at least one eval pack and one model.[/dim]" + self.queue_hint())
             return
-        jobs = self.app.engine.plan(labels, suites, repeat, tier, force)
+        picks = self.current_picks(suites)
+        jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks)
         rerun = not any(j.status == "waiting" for j in jobs)
         if rerun:   # everything has results: Start runs it again, so estimate that
-            jobs = self.app.engine.plan(labels, suites, repeat, tier, force=True)
+            jobs = self.app.engine.plan(labels, suites, repeat, tier, True, picks)
         run = [j for j in jobs if j.status == "waiting"]
         skipped = [j for j in jobs if j.status == "skipped"]
         secs, notes = self.app.engine.estimate_seconds(jobs)
@@ -672,7 +713,10 @@ class SetupScreen(Screen):
                 f"[b]{reps_text}[/b] repeat(s) = "
                 f"[b]{todo:,}[/b] answers · about [b]{fmt_secs(secs)}[/b]"
                 + (f" [dim](rough: {'; '.join(notes)})[/dim]" if notes else ""))
-        if tier == "screen":
+        if picks:
+            text += f"\n[cyan]Picked tests only in {', '.join(e.packs[p].label for p in picks)}[/cyan]" \
+                    "[dim] (e changes; a pack with picked tests can't PASS until all its tests have run)[/dim]"
+        elif tier == "screen":
             text += "\n[dim]Screening can only say FAIL or promising; PASS needs Certify.[/dim]"
         finished = [j for j in jobs if j.status == "done"]
         if finished:
@@ -708,6 +752,8 @@ class SetupScreen(Screen):
             return
         e = self.app.engine
         self.selected_models = {l for l in sel.get("models", []) if any(m["label"] == l for m in e.cfg["models"])}
+        self.picks = {p: list(ids) for p, ids in (sel.get("tests") or {}).items()}
+        self.refresh_packs()
         packs = self.query_one("#suites", SelectionList)
         packs.deselect_all()
         for name in sel.get("packs", []):
@@ -726,13 +772,14 @@ class SetupScreen(Screen):
 
     def action_presets(self):
         labels, packs, repeat, _, _ = self.settings()
+        tests = self.current_picks(packs)
 
         def done(result):
             if result and result[0] == "load":
                 self.apply_selection(result[1])
             elif result and result[0] == "saved":
                 self.notify(f"Saved preset '{result[1]}'. Also usable as tuieval run --preset {result[1]}")
-        self.app.push_screen(PresetsScreen(labels, packs, repeat), done)
+        self.app.push_screen(PresetsScreen(labels, packs, repeat, tests), done)
 
     def action_scan(self):
         def done(added):
@@ -750,13 +797,14 @@ class SetupScreen(Screen):
         if not labels or not suites:
             self.notify("Select at least one eval pack and one model.", severity="warning")
             return
-        sel = {"models": labels, "packs": suites, "repeat": repeat, "tier": tier, "force": force}
-        jobs = self.app.engine.plan(labels, suites, repeat, tier, force)
+        picks = self.current_picks(suites)
+        sel = {"models": labels, "packs": suites, "repeat": repeat, "tier": tier, "force": force, "tests": picks}
+        jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks)
         rerun = False
         if not any(j.status == "waiting" for j in jobs):
             # Everything selected already has results: Start means run it again (earlier results
             # are kept in history/). Packs skipped for another reason (no vision, …) stay skipped.
-            jobs = self.app.engine.plan(labels, suites, repeat, tier, force=True)
+            jobs = self.app.engine.plan(labels, suites, repeat, tier, True, picks)
             if not any(j.status == "waiting" for j in jobs):
                 reasons = sorted({j.note for j in jobs if j.status == "skipped"})
                 self.notify(f"Nothing selected can run: {'; '.join(reasons)}", severity="warning")
@@ -1102,9 +1150,9 @@ class PresetsScreen(ModalScreen):
     """Load a saved selection, or save the current one (presets.toml)."""
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, labels, packs, repeat):
+    def __init__(self, labels, packs, repeat, tests=None):
         super().__init__()
-        self.current = (labels, packs, repeat)
+        self.current = (labels, packs, repeat, tests or {})
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -1123,7 +1171,8 @@ class PresetsScreen(ModalScreen):
         for name, pr in self.presets.items():
             who = ", ".join(pr.get("models", [])) or ("tags " + ", ".join(pr["tags"]) if pr.get("tags") else "all models")
             opts.add_option(f"[b]{name}[/b]  [dim]{', '.join(pr.get('packs', ['all packs']))} · {who}"
-                            f"{' · repeat ' + str(pr['repeat']) if pr.get('repeat') else ''}[/dim]")
+                            f"{' · repeat ' + str(pr['repeat']) if pr.get('repeat') else ''}"
+                            f"{' · picked tests in ' + ', '.join(pr['tests']) if pr.get('tests') else ''}[/dim]")
         if not self.presets:
             opts.add_option("[dim]No presets yet: select models and packs, then save them here.[/dim]")
             opts.disabled = True
@@ -1131,14 +1180,15 @@ class PresetsScreen(ModalScreen):
     @on(OptionList.OptionSelected, "#presets")
     def load(self, event):
         name = list(self.presets)[event.option_index]
-        labels, packs, repeat = engine.resolve_preset(self.app.engine.cfg, self.presets[name], list(self.app.engine.packs))
-        self.dismiss(("load", {"models": labels, "packs": packs, "repeat": repeat}))
+        labels, packs, repeat, tests = engine.resolve_preset(self.app.engine.cfg, self.presets[name],
+                                                             list(self.app.engine.packs))
+        self.dismiss(("load", {"models": labels, "packs": packs, "repeat": repeat, "tests": tests}))
 
     @on(Button.Pressed, "#save")
     @on(Input.Submitted, "#name")
     def save(self):
         name = self.query_one("#name", Input).value.strip()
-        labels, packs, repeat = self.current
+        labels, packs, repeat, tests = self.current
         err = self.query_one("#error", Static)
         if not name or not engine.LABEL_RE.match(name):
             err.update("[red]Use lowercase letters, digits, '.', '_' or '-'.[/red]")
@@ -1146,7 +1196,7 @@ class PresetsScreen(ModalScreen):
         if not labels or not packs:
             err.update("[red]Select at least one model and one pack first.[/red]")
             return
-        engine.save_preset(self.app.presets_path, name, labels, packs, repeat)
+        engine.save_preset(self.app.presets_path, name, labels, packs, repeat, tests)
         self.dismiss(("saved", name))
 
     @on(Button.Pressed, "#cancel")
@@ -1215,13 +1265,24 @@ class QueuedRun:
         self.jobs = jobs
         self.est = eng.estimate_seconds(jobs)[0]
 
+    def tests(self, eng):
+        """The picked tests that are still in their packs (a pack edited while queued drops the rest)."""
+        out = {}
+        for p, ids in (self.sel.get("tests") or {}).items():
+            pk = eng.packs.get(p)
+            known = [i for i in ids if pk and any(t["id"] == i for t in pk.tests)]
+            if known:
+                out[p] = known
+        return out
+
     def line(self):
         return f"{self.title}  [dim]~{fmt_secs(self.est)} · queued {time.strftime('%H:%M', time.localtime(self.queued))}[/dim]"
 
     def make(self, eng):
         """(RunScreen, None), or (None, why it can't start) when its turn comes."""
         sel = self.sel
-        jobs = eng.plan(sel["models"], sel["packs"], sel["repeat"], sel["tier"], sel["force"] or self.rerun)
+        jobs = eng.plan(sel["models"], sel["packs"], sel["repeat"], sel["tier"], sel["force"] or self.rerun,
+                        self.tests(eng))
         waiting = [j for j in jobs if j.status == "waiting"]
         if not waiting:
             return None, "nothing left to run (earlier runs finished it)"
@@ -1285,6 +1346,138 @@ class ConfirmScreen(ModalScreen):
     @on(Button.Pressed)
     def answer(self, event):
         self.dismiss(event.button.id == "yes")
+
+
+def _words(text):
+    return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def test_note(t):
+    """What a test's row shows after its id: the description's words the id doesn't already say,
+    and the category unless the id or description already names it."""
+    desc, ids = str(t.get("description") or ""), [w for w in _words(t["id"]) if not re.fullmatch(r"v\d+", w)]
+    note = desc
+    tokens = list(re.finditer(r"[a-z0-9]+", desc.lower()))
+    if set(w.group() for w in tokens) <= set(_words(t["id"])):
+        note = ""                                   # the id in other words
+    elif len(ids) > 1:                              # "normal entry #1, pretty JSON" for normal-entry-1-v1
+        n = 0
+        while n < len(tokens) and n < len(ids) and tokens[n].group() == ids[n]:
+            n += 1
+        if n == len(ids):
+            note = desc[tokens[n - 1].end():].strip(" ,;:·-#")
+    cat = str(t.get("category") or "")
+    said = " ".join(_words(t["id"]) + _words(note))
+    if cat and " ".join(_words(cat)) not in said:
+        note = f"{note} · {cat}" if note else cat
+    return note
+
+
+class PickTestsScreen(ModalScreen):
+    """Pick which tests of one pack run. Dismisses with the ticked ids in pack order (empty = the
+    tier's usual tests), or None to keep the current pick."""
+    BINDINGS = [Binding("escape", "cancel", "Cancel"),
+                Binding("space", "toggle", "Tick", show=False),
+                Binding("a", "toggle_shown", "Tick all shown")]
+
+    def __init__(self, pack, chosen):
+        super().__init__()
+        self.pack, self.chosen, self.shown = pack, set(chosen), []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="wide"):
+            yield Label(f"[b]Pick tests: {rich_escape(self.pack.label)}[/b]\n[dim]space ticks · a ticks all shown · "
+                        "type to filter, enter to go to the list · none ticked = the tier's usual tests[/dim]")
+            yield Input(placeholder="filter by id, description or category", id="pick-filter")
+            yield OptionList(id="pick-tests")
+            yield Static(id="pick-count")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Use these", id="pick-apply", variant="success")
+                yield Button("Clear (usual tests)", id="pick-clear")
+                yield Button("Cancel", id="pick-cancel")
+
+    def on_mount(self):
+        self.fill("")
+        self.query_one("#pick-tests").focus()
+
+    def row(self, t):
+        on = t["id"] in self.chosen
+        mark = "[b green]\\[✓][/]" if on else "[dim]\\[ ][/dim]"
+        tid = f"[b]{rich_escape(t['id'])}[/b]" if on else rich_escape(t["id"])
+        note = test_note(t)
+        return f"{mark} {diff_badge(t.get('difficulty', 'unrated'))} {tid}" + (f"  [dim]{rich_escape(note)}[/dim]" if note else "")
+
+    def fill(self, text):
+        ol = self.query_one("#pick-tests", OptionList)
+        ol.clear_options()
+        text = text.lower()
+        self.shown = [t for t in self.pack.tests
+                      if text in " ".join(str(t.get(k, "")) for k in ("id", "description", "category")).lower()]
+        ol.add_options([Option(self.row(t), id=t["id"]) for t in self.shown])
+        if self.shown:
+            ol.highlighted = 0
+        self.count()
+
+    def count(self):
+        shown = f"  [dim]({len(self.shown)} shown)[/dim]" if len(self.shown) != len(self.pack.tests) else ""
+        self.query_one("#pick-count", Static).update(
+            (f"[b]{len(self.chosen)}[/b] of {len(self.pack.tests)} ticked" if self.chosen
+             else "[dim]None ticked: the tier's usual tests run.[/dim]") + shown)
+
+    def redraw(self, indexes):
+        ol = self.query_one("#pick-tests", OptionList)
+        for i in indexes:
+            ol.replace_option_prompt_at_index(i, self.row(self.shown[i]))
+        self.count()
+
+    def action_toggle(self):
+        ol = self.query_one("#pick-tests", OptionList)
+        if not ol.has_focus or ol.highlighted is None:
+            return
+        self.chosen.symmetric_difference_update({self.shown[ol.highlighted]["id"]})
+        self.redraw([ol.highlighted])
+
+    @on(OptionList.OptionSelected, "#pick-tests")
+    def selected(self, event):   # enter on a row ticks it too
+        self.chosen.symmetric_difference_update({event.option.id})
+        self.redraw([event.option_index])
+
+    def action_toggle_shown(self):
+        """Tick every shown test, or untick them all when they're all ticked."""
+        if self.query_one("#pick-filter", Input).has_focus:
+            return
+        ids = {t["id"] for t in self.shown}
+        if ids <= self.chosen:
+            self.chosen -= ids
+        else:
+            self.chosen |= ids
+        self.redraw(range(len(self.shown)))
+
+    def check_action(self, action, parameters):
+        # while typing in the filter, space and a are text
+        if action in ("toggle", "toggle_shown") and self.query_one("#pick-filter", Input).has_focus:
+            return None
+        return True
+
+    @on(Input.Changed, "#pick-filter")
+    def filter_changed(self, event):
+        self.fill(event.value)
+
+    @on(Input.Submitted, "#pick-filter")
+    def to_list(self):
+        self.query_one("#pick-tests").focus()
+
+    @on(Button.Pressed, "#pick-apply")
+    def apply(self):
+        self.dismiss([t["id"] for t in self.pack.tests if t["id"] in self.chosen])
+
+    @on(Button.Pressed, "#pick-clear")
+    def clear(self):
+        self.dismiss([])
+
+    @on(Button.Pressed, "#pick-cancel")
+    def action_cancel(self):
+        self.dismiss(None)
 
 
 class ModelPickScreen(ModalScreen):
@@ -2331,7 +2524,7 @@ class EvalsApp(App):
     #dialog { width: 80; height: auto; max-height: 90%; padding: 1 2; border: thick $primary; background: $surface; }
     #dialog.wide { width: 120; }
     #dialog SelectionList, #dialog OptionList { height: auto; max-height: 20; }
-    PresetsScreen, ScanScreen, SessionsScreen, ChoiceScreen { align: center middle; }
+    PresetsScreen, ScanScreen, SessionsScreen, ChoiceScreen, PickTestsScreen { align: center middle; }
     #dialog Input, #dialog Select { margin-bottom: 1; }
     .dialog-buttons { height: 3; margin-top: 1; }
     .dialog-buttons Button { margin-right: 2; }
