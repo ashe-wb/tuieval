@@ -2211,6 +2211,7 @@ class ResultsScreen(Screen):
                 yield Button("Show this Smoke run's results", id="toggle-smoke")
         with TabbedContent():
             with TabPane("Production readiness"):
+                yield Static(id="readiness-short")
                 yield Static(self.READINESS_HELP, id="readiness-help")
                 yield DataTable(id="readiness", zebra_stripes=True)
                 yield Static("[b]Fast enough?[/b] [dim]p90 seconds per answer against the pack's limit, per machine: "
@@ -2616,6 +2617,14 @@ class ResultsScreen(Screen):
             return
         help_text.update(self.READINESS_HELP)
         table = verdict.readiness(self.app.engine)
+        short = ["[b]In short[/b]"]
+        for label, sentence, todo in verdict.plain_summary(table):
+            short.append(f"  [b]{rich_escape(label)}[/b]: {rich_escape(sentence)}")
+            short += [f"     → {rich_escape(g)}: {rich_escape(what)}" for g, what, _ in todo]
+        if any("Certify" in what for _, _, todo in verdict.plain_summary(table) for _, what, _ in todo):
+            short.append("  [dim]To run Certify: in Setup tick the model and pack, choose Certify, press s.[/dim]")
+        self.query_one("#readiness-short", Static).update("\n".join(short) if table else
+                                                          "[dim]No verdicts yet: run something from Setup.[/dim]")
         groups = sorted({g for t in table.values() for g in t})
         matrix.add_columns("Model", *groups)
         detail.add_columns("Model", "Use case", "Pack", "Verdict", "Why")
@@ -2691,6 +2700,7 @@ class EvalsApp(App):
     .dialog-buttons { height: 3; margin-top: 1; }
     .dialog-buttons Button { margin-right: 2; }
     #results-info { padding: 0 1; height: auto; }
+    #readiness-short { padding: 0 1 1 1; height: auto; }
     #machine { padding: 0 1; height: auto; }
     #tune-status { padding: 0 1; height: auto; min-height: 2; background: $boost; }
     #tune-log { height: 1fr; }

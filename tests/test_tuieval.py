@@ -133,6 +133,9 @@ class Starters(unittest.TestCase):
             good.stop()
             bad.stop()
         out = tuieval(self.ws, "verdict").stdout
+        summary, out = out.split("Details", 1)
+        self.assertIn("good-mock: ready for", summary)
+        self.assertIn("bad-mock: not ready for", summary)
         good_part, bad_part = out.split("bad-mock")[0], out.split("bad-mock")[1]
         self.assertGreaterEqual(good_part.count("PASS"), len(GRADERS), out)
         self.assertNotIn("FAIL", good_part, out)
@@ -225,6 +228,19 @@ class Units(unittest.TestCase):
             plain = Text.from_markup(text).plain    # raises on broken markup
             self.assertNotIn("()", plain, name)     # e.g. a [gate] swallowed as a style tag
         self.assertIn("[gate]", Text.from_markup(GLOSSARY).plain)
+
+    def test_plain_summary(self):
+        from tuieval.verdict import Verdict, plain_summary
+        ok = Verdict("PASS", ["fine"], {"certified": True})
+        crit = Verdict("FAIL", ["2 critical failures (e.g. x: y)"], {"critical_failures": 2})
+        screened = Verdict("INCONCLUSIVE", ["screened only (3/10 tests); promising, run Certify to decide"],
+                           {"certified": False, "tests_run": 3, "tests_total": 10, "repeats": 1, "want_repeat": 3})
+        table = {"m": {"Support": (ok, {"support": ok}), "Trading": (crit, {"trading": crit}),
+                       "Coding": (screened, {"coding": screened})}}
+        (label, sentence, todo), = plain_summary(table)
+        self.assertEqual(sentence, "ready for Support; not ready for Trading (2 critical failures); "
+                                   "not decided yet for Coding")
+        self.assertEqual(todo, [("Coding", "run Certify (the sample screened so far looks promising)", ["coding"])])
 
     def test_short_note(self):
         from tuieval import tui

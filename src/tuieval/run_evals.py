@@ -287,6 +287,19 @@ def cmd_verdict(argv):
     table = verdict.readiness(e, a.only.split(",") if a.only else None)
     if not table:
         sys.exit("no results yet: tuieval run first")
+    summary = verdict.plain_summary(table)
+    print(f"{BOLD}In short{RESET}")
+    certify = {}
+    for label, sentence, todo in summary:
+        print(f"  {label}: {sentence}")
+        for g, what, pending in todo:
+            print(f"     → {g}: {what}")
+            if "Certify" in what:
+                certify.setdefault(tuple(pending), []).append(label)
+    for pending, labels in certify.items():
+        print(f"  next: tuieval run --tier certify --only {','.join(labels)} --packs {','.join(pending)}")
+    print(f"\n{DIM}Details (PASS needs a Certify run, zero critical failures and an accuracy whose 95% lower bound "
+          f"clears the pack's gate):{RESET}")
     for label, groups in table.items():
         print(f"\n{BOLD}{label}{RESET}")
         lat = verdict.latency_table(e, [label], {label: groups}).get(label, {})
@@ -307,6 +320,10 @@ def report_markdown(e, labels=None):
     lines = ["# Production readiness report", "", f"Generated {time.strftime('%Y-%m-%d %H:%M')}.", "",
              "PASS needs a full certification run, zero critical failures across enough trials, and accuracy "
              "whose 95% lower bound clears the gate. See verdict.py for the rules and each pack.toml for its gate.", ""]
+    lines += ["## In short", ""]
+    for label, sentence, todo in verdict.plain_summary(table):
+        lines.append(f"- **{label}**: {sentence}" + "".join(f"; {g}: {what}" for g, what, _ in todo))
+    lines.append("")
     groups = sorted({g for t in table.values() for g in t})
     lines += ["| model | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
     for label, gs in table.items():

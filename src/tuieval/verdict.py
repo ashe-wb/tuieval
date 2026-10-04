@@ -249,6 +249,63 @@ def readiness(engine, labels=None):
     return out
 
 
+def _plain_fail(v):
+    """A FAIL's main reason in a few plain words."""
+    ev = v.evidence
+    if ev.get("critical_failures"):
+        n = ev["critical_failures"]
+        return f"{n} critical failure{'s' * (n > 1)}"
+    text = (v.reasons or ["failed"])[0]
+    if "cut off" in text:
+        return "too many answers cut off by max_tokens"
+    if "accuracy" in text and ev.get("trials"):
+        return f"{100 * ev['accuracy']:.0f}% right, under the bar"
+    return text.split(" (")[0]
+
+
+def _plain_todo(v):
+    """What it takes to decide an INCONCLUSIVE verdict, in plain words (None: not an action)."""
+    ev = v.evidence
+    if not ev:   # a use case with packs not run yet
+        return ("run " + v.reasons[0].replace(" not run yet", "")) if v.reasons else None
+    if not ev.get("certified"):
+        if ev.get("tests_run", 0) < ev.get("tests_total", 0):
+            promising = any("promising" in r for r in v.reasons)
+            return "run Certify" + (" (the sample screened so far looks promising)" if promising
+                                    else " (only a sample has been screened)")
+        return f"run Certify to finish ({ev['want_repeat'] - ev['repeats']} more round(s) of every question)"
+    if any("critical trials" in r for r in v.reasons):
+        return "needs more answers to rule out rare critical failures: more tests that can fail critically, or more repeats"
+    return "needs more tests or repeats to be sure"
+
+
+def plain_summary(table):
+    """[(label, sentence, [(use case, what to do, [packs])])] per model: what it's ready for, what it
+    isn't, and what's undecided with the step that decides it."""
+    out = []
+    for label, groups in table.items():
+        ready = [g for g, (v, _) in groups.items() if v.status == "PASS"]
+        not_ready = []
+        todo = []
+        for g, (v, packs) in groups.items():
+            if v.status == "FAIL":
+                bad = next((pv for pv in packs.values() if pv.status == "FAIL"), v)
+                not_ready.append(f"{g} ({_plain_fail(bad)})")
+            elif v.status == "INCONCLUSIVE":
+                pending = {n: pv for n, pv in packs.items() if pv.status in ("INCONCLUSIVE", "NO DATA")}
+                first = next((pv for pv in pending.values() if pv.status == "INCONCLUSIVE"), v)
+                todo.append((g, _plain_todo(first) or "; ".join(v.reasons), list(pending)))
+        parts = []
+        if ready:
+            parts.append("ready for " + ", ".join(ready))
+        if not_ready:
+            parts.append("not ready for " + ", ".join(not_ready))
+        if todo:
+            parts.append("not decided yet for " + ", ".join(g for g, _, _ in todo))
+        out.append((label, "; ".join(parts) or "no verdicts yet", todo))
+    return out
+
+
 def combine(verdicts):
     """A use case (all packs in a group) is as good as its worst pack."""
     if not verdicts:
