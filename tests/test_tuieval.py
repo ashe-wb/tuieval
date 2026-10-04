@@ -463,6 +463,61 @@ class Detect(unittest.TestCase):
         self.assertIn("Next:", out)
 
 
+class FirstPack(unittest.TestCase):
+    """Ways to a first pack without writing YAML by hand: a spreadsheet, a drafting prompt, prompt files."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_from_csv(self):
+        csv_path = os.path.join(self.tmp.name, "q.csv")
+        write(csv_path, 'Question,Answer,Difficulty,Wrong\n"What is 15% of 80?",12,easy,1200|5.33\n'
+                        'Capital of Peru?,Lima,easy,Cusco\nRevenue in Q3?,NOT_AVAILABLE,hard,\n')
+        out = tuieval(self.ws, "new-pack", "quiz", "--from", csv_path).stdout
+        self.assertIn("3 tests from", out)
+        self.assertIn(" ok", tuieval(self.ws, "selftest", "quiz").stdout)     # gate fitted to 3 tests
+        write(csv_path, "prompt_text,result\nhi,1\n")
+        p = tuieval(self.ws, "new-pack", "bad", "--from", csv_path, check=False)
+        self.assertIn("needs a question column", p.stderr)
+
+    def test_about_writes_a_drafting_prompt(self):
+        out = tuieval(self.ws, "new-pack", "support", "--grader", "reply", "--about", "refunds at a shoe store").stdout
+        self.assertIn("DRAFT-PROMPT.md", out)
+        text = read(os.path.join(self.ws, "packs", "support", "DRAFT-PROMPT.md"))
+        self.assertIn("Topic: refunds at a shoe store", text)
+        self.assertIn("must_include", text)                    # the grader's rules and example format
+        self.assertIn(" ok", tuieval(self.ws, "selftest", "support").stdout)   # the .md isn't read as tests
+
+    def test_input_file(self):
+        from tuieval import packs
+        d = os.path.join(self.ws, "packs", "files")
+        os.makedirs(os.path.join(d, "prompts"))
+        write(os.path.join(d, "prompts", "a.txt"), "What is 2 + 2?\n")
+        write(os.path.join(d, "pack.toml"), 'label = "Files"\n')
+        write(os.path.join(d, "tests.yaml"), "- {id: a, input_file: prompts/a.txt, expected: 4}\n")
+        p = packs.load_pack(d)
+        self.assertEqual(p.tests[0]["input"], "What is 2 + 2?")
+        before = p.fingerprint
+        write(os.path.join(d, "prompts", "a.txt"), "What is 3 + 3?\n")
+        self.assertNotEqual(packs.load_pack(d).fingerprint, before)    # editing the file reruns the pack
+        write(os.path.join(d, "tests.yaml"), "- {id: a, input_file: ../../models.toml, expected: 4}\n")
+        with self.assertRaises(packs.PackError):
+            packs.load_pack(d)
+
+    def test_selftest_says_how_to_fix(self):
+        tuieval(self.ws, "new-pack", "p")
+        path = os.path.join(self.ws, "packs", "p", "tests.yaml")
+        write(path, read(path).replace("expected: 12", "expected: 13", 1))
+        out = tuieval(self.ws, "selftest", "p", check=False).stdout
+        self.assertIn("reference answer fails", out)
+        self.assertIn("→ fix the expected answer", out)
+
+
 def fake_gguf(path, embedding=5120, size=0, kv_heads=4):
     """A GGUF header with just the keys machines.read_gguf reads, padded to size bytes. kv_heads: a
     number, or one per layer (a list, as some GGUFs store it)."""

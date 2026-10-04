@@ -177,9 +177,15 @@ def load_pack(path):
     for tf in test_files:
         tpath = os.path.join(path, tf)
         for i, t in enumerate(_read_tests(tpath)):
-            if not isinstance(t, dict) or "input" not in t:
-                raise PackError(f"{tpath}: test #{i + 1} has no `input`")
+            if not isinstance(t, dict) or ("input" not in t and "input_file" not in t):
+                raise PackError(f"{tpath}: test #{i + 1} has no `input` (or `input_file`)")
             t = dict(t)
+            if "input" not in t:   # the prompt lives in its own file, relative to the pack
+                src = os.path.normpath(os.path.join(path, str(t["input_file"])))
+                if not src.startswith(os.path.normpath(path) + os.sep) or not os.path.isfile(src):
+                    raise PackError(f"{tpath}: test #{i + 1}: input_file {t['input_file']!r} isn't a file in the pack")
+                with open(src) as f:
+                    t["input"] = f.read().strip()
             t.setdefault("description", str(t.get("id") or t["input"])[:80])
             t.setdefault("id", _slug(t["description"]) or f"{tf}-{i + 1}")
             if t["id"] in seen:

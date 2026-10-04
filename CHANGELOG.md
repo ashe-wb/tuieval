@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- First packs without hand-written YAML: `tuieval new-pack <name> --from questions.csv` (question and answer columns) and `--about "<topic>"` (writes a prompt for a strong model to draft the tests). A test can take its prompt from a file (`input_file`). `tuieval selftest` errors say how to fix them.
 - `tuieval init` in a terminal is a guided setup: it finds models on servers already running (LM Studio, Ollama, llama-server, vLLM), adds the ones you pick, creates a starter pack and runs a Smoke check (`--yes` for no questions).
 - `tuieval add` without a model lists the models on running servers to pick from; `tuieval add <id>` finds the server that has it and adds that server to models.toml. The TUI's add dialog lists them too, with rarely needed options folded away.
 - `?` on any TUI screen explains what it's for, its keys, and the words tuieval uses (tiers, verdicts, critical failures, gates).
