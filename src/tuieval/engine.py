@@ -677,6 +677,15 @@ class Engine:
                 raise ConfigError(f"couldn't read {name}'s model list ({e})") from None
         return self._catalogues[name]
 
+    def has_results(self):
+        """Has any model run anything yet (smoke runs included)?"""
+        for base in (self.results_dir, os.path.join(self.results_dir, "smoke")):
+            for label in os.listdir(base) if os.path.isdir(base) else []:
+                d = os.path.join(base, label)
+                if os.path.isdir(d) and any(f.endswith(".json") for f in os.listdir(d)):
+                    return True
+        return False
+
     def _add_remote_models(self):
         """Add the models named at run time this session, and ones that have results from an
         earlier session (their result files record the model), to cfg["models"]."""

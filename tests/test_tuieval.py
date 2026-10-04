@@ -372,6 +372,24 @@ class FirstRun(unittest.TestCase):
         self.assertIn("no-such-server-xyz isn't installed", p.stdout)
         self.assertNotIn("FileNotFoundError", p.stdout)
 
+    def test_first_tui_screen_is_ready_to_start(self):
+        tuieval(self.ws, "add", "my-model", "--server", "local")
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval.tui import EvalsApp
+            from textual.widgets import SelectionList
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(140, 40)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    print(s.query_one("#suites", SelectionList).selected, sorted(s.selected_models), s.tier())
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws), timeout=60).stdout.strip()
+        self.assertEqual(out, "['first'] ['my-model'] smoke")
+
     def test_doctor(self):
         tuieval(self.ws, "add", "mock", "--server", "local", "--label", "wanted")
         p = tuieval(self.ws, "doctor", check=False)

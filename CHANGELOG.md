@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The setup screen is ready on first open: the only pack and model are ticked, the tier is Smoke until something has run, and ticked boxes are clearly marked (unticked ones are empty).
 - First runs fail fast with the fix instead of hanging: a server that isn't running fails in seconds (it used to wait up to 20 minutes), a missing `llama-server` says how to install it, and `tuieval run` with no models says how to add one.
 - `tuieval doctor` checks servers, models, packs and API keys, and says what to fix.
 - Run only some tests of a pack: `e` in the TUI, or `tuieval run --tests`. Runs add up; `--force` reruns just the picked tests. Presets keep the pick.

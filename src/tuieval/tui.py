@@ -461,8 +461,24 @@ class SetupScreen(Screen):
         self.refresh_machine()
         self.refresh_packs()
         self.refresh_models()
-        self.apply_selection(self.app.load_state(), quiet=True)
+        state = self.app.load_state()
+        self.apply_selection(state, quiet=True)
+        if not state:
+            self.first_time_defaults()
         self.query_one("#suites", SelectionList).focus()
+
+    def first_time_defaults(self):
+        """With nothing chosen before: tick the only pack and the only local model, and start on
+        Smoke until something has run (a 3-question check of the setup)."""
+        e = self.app.engine
+        if len(e.packs) == 1:
+            self.query_one("#suites", SelectionList).select(next(iter(e.packs)))
+        local = [m["label"] for m in e.cfg["models"] if not m.get("remote")]
+        if len(local) == 1:
+            self.selected_models.add(local[0])
+            self.refresh_models()
+        if not e.has_results():
+            self.query_one("#tier-smoke", RadioButton).value = True
 
     def refresh_machine(self):
         e = self.app.engine
@@ -696,7 +712,8 @@ class SetupScreen(Screen):
                        "a running server, or openrouter:<model id>).[/dim]")
             return
         if not labels or not suites:
-            est.update("[dim]Select at least one eval pack and one model.[/dim]" + self.queue_hint())
+            est.update("Tick at least one [b]pack[/b] (left) and one [b]model[/b] (right) with space, then press "
+                       "[b]s[/b] to start." + self.queue_hint())
             return
         picks = self.current_picks(suites)
         jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks)
@@ -713,6 +730,8 @@ class SetupScreen(Screen):
                 f"[b]{reps_text}[/b] repeat(s) = "
                 f"[b]{todo:,}[/b] answers · about [b]{fmt_secs(secs)}[/b]"
                 + (f" [dim](rough: {'; '.join(notes)})[/dim]" if notes else ""))
+        if tier == "smoke" and not e.has_results():
+            text += "\n[green]First run: Smoke asks 3 questions per pack to check the setup works. Press s.[/green]"
         if picks:
             text += f"\n[cyan]Picked tests only in {', '.join(e.packs[p].label for p in picks)}[/cyan]" \
                     "[dim] (e changes; a pack with picked tests can't PASS until all its tests have run)[/dim]"
@@ -2521,6 +2540,14 @@ class EvalsApp(App):
     StreamView { height: 1fr; border: none; padding: 0; }
     #tabs { height: 12; }
     AddModelScreen, ConfirmScreen { align: center middle; }
+    SelectionList > .selection-list--button, SelectionList > .selection-list--button-highlighted {
+        color: $panel; background: $panel;
+    }
+    SelectionList > .selection-list--button-selected, SelectionList > .selection-list--button-selected-highlighted {
+        color: $success; background: $panel; text-style: bold;
+    }
+    Checkbox > .toggle--button { color: $panel; }
+    Checkbox.-on > .toggle--button { color: $success; text-style: bold; }
     #dialog { width: 80; height: auto; max-height: 90%; padding: 1 2; border: thick $primary; background: $surface; }
     #dialog.wide { width: 120; }
     #dialog SelectionList, #dialog OptionList { height: auto; max-height: 20; }
