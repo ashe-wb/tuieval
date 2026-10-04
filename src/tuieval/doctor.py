@@ -83,9 +83,10 @@ def check(models_path=None):
             r.line(OK, f"{name}: {url} answers, serving {len(ids)} model(s)" + (f": {', '.join(ids[:5])}" if ids else ""))
         else:
             elsewhere = [f for f in found if f["url"] != url]
-            fix = (f"start the server at {url}" + (", or point url at one that's running: " + ", ".join(
-                f"{f['url']}" + (f" ({f['usual']}'s usual port)" if f["usual"] else "") for f in elsewhere)
-                if elsewhere else "") + f"  (url under [servers.{name}] in models.toml)")
+            fix = (f"start the server at {url}, or "
+                   + ("run `tuieval add` to add the models of the one running at " + ", ".join(
+                       f"{f['url']}" + (f" ({f['usual']})" if f["usual"] else "") for f in elsewhere)
+                      if elsewhere else engine.url_fix(e.cfg, name)))
             r.line(BAD if name in used else WARN,
                    f"{name}: nothing answers at {url}" + ("" if name in used else " (no model uses it yet)"), fix)
     known = {s.get("url", "").rstrip("/").removesuffix("/v1") for s in e.cfg["servers"].values()}
@@ -93,7 +94,7 @@ def check(models_path=None):
         if f["url"] not in known:
             r.line(WARN, f"found a server at {f['url']}" + (f" ({f['usual']}'s usual port)" if f["usual"] else "")
                    + f" serving {len(f['models'])} model(s), not in models.toml",
-                   "add its models with: tuieval add <model id> --server <name>, after setting that server's url")
+                   "add its models with: tuieval add")
 
     r.head("Models")
     if not e.cfg["models"]:

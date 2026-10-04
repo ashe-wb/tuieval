@@ -1,6 +1,6 @@
 # Models, servers and machines
 
-Everything about models lives in your workspace's `models.toml`. `tuieval init` writes one with three servers ready to use:
+Everything about models lives in your workspace's `models.toml`. `tuieval init` writes a short one; three servers are built in and ready to use (their full definitions are at the end of this page, under [Built-in servers and defaults](#built-in-servers-and-defaults)):
 
 | server | what it is |
 |---|---|
@@ -14,7 +14,8 @@ Everything about models lives in your workspace's `models.toml`. `tuieval init` 
 tuieval add ~/models/Some-Model-Q4_K_M.gguf --tags 9b,dense,q4      # GGUF -> llama
 tuieval add ~/models/Some-Model-Q4_K_M.gguf --no-think              # same model, thinking off (label …-nothink)
 tuieval add ~/models/VL-Q4.gguf --mmproj ~/models/VL-mmproj.gguf    # vision model
-tuieval add qwen3:8b --server local                                  # a model your running server serves
+tuieval add                                                          # pick from the models on servers already running
+tuieval add qwen3:8b                                                 # finds the running server that has it
 tuieval scan --add                                                   # every new GGUF under model_dirs
 tuieval list                                                         # models; hidden ones listed separately
 tuieval remove --hidden                                              # clean up every hidden model
@@ -142,3 +143,117 @@ On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM,
 | `api_key_env` | environment variable holding the API key |
 | `thinking_param` | `reasoning` to send `[sampling] enable_thinking` as OpenRouter's `reasoning.enabled` |
 | `headers` | extra HTTP headers |
+
+## Built-in servers and defaults
+
+A workspace's `models.toml` only needs what differs from these. `[defaults]` fill in key by key. `[sampling]` applies only when `models.toml` has no `[sampling]` section at all, because sampling is part of every result's fingerprint. A server you define replaces the built-in one with the same name; to change one setting, copy the whole block into `models.toml` and edit it. `tuieval add` adds a `[servers.<name>]` block with just a `url` when it finds a model on a server that's already running.
+
+```toml
+[defaults] fill in key by key; [sampling] only when models.toml has no [sampling] at all (it's part of
+# every result's fingerprint); a server here is replaced whole by one of the same name in models.toml.
+
+[defaults]
+repeat = 3
+request_timeout_ms = 1800000   # per request; long thinking runs need it
+ready_timeout_s = 1200         # how long a model may take to load before giving up
+model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
+
+# Sent with every request. A model may override it (see `thinking` / `sampling` below); results
+# record the settings each model actually ran with, and the scorecard shows any difference.
+[sampling]
+temperature = 0.7
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+max_tokens = 16384
+enable_thinking = true         # test every model in the SAME mode
+
+# llama.cpp's server (https://github.com/ggml-org/llama.cpp), started for each GGUF model.
+[servers.llama]
+# Output-affecting flags only. Anything here must be identical wherever results are compared,
+# so it's part of each result's fingerprint. Speed-only flags live in `perf` and `tune` below.
+cmd = [
+  "llama-server",
+  "-m", "{model}",
+  "--alias", "{served_name}",
+  "--host", "127.0.0.1", "--port", "{port}",
+  "--jinja",
+  "--metrics",
+  "-np", "1",
+  "-ctk", "{kv_type}", "-ctv", "{kv_type}",
+  "-c", "{ctx}",
+  "--reasoning-format", "auto",
+]
+port = 8080
+model_is_path = true           # check the GGUF exists and fits before starting
+vision_args = ["--mmproj", "{mmproj}"]   # appended only for models that set mmproj
+kv_type = "f16"                # a model's own `kv_type` (e.g. "q8_0") makes it a different model entry
+max_ctx = 65536                # upper bound; the fit check lowers it per machine (see machines.py)
+version_cmd = ["llama-server", "--version"]   # recorded with every result
+# Added to every request. cache_prompt = false: each answer is computed from scratch, so a repeat of
+# the same question reuses nothing from the last time it was asked (and its TTFT is honest).
+# Answers record any prompt tokens the server reused.
+request = { cache_prompt = false }
+
+# Speed-only flags, always applied (not tuned).
+perf = ["-ngl", "99"]
+
+# Speed-only knobs `tuieval tune` tries, one at a time from the best so far. The first option of
+# each knob is the default for models not tuned on this machine yet. Placeholders: {p} P-cores,
+# {p_minus_2}, {all} all cores. Options that stop the server from starting are skipped.
+# Check the flags against `llama-server --help` for your build.
+[servers.llama.tune]
+threads = [["-t", "{p}", "-tb", "{p}"], ["-t", "{p_minus_2}", "-tb", "{p}"], ["-t", "{all}", "-tb", "{all}"]]
+ubatch = [["-ub", "512"], ["-ub", "256"], ["-ub", "1024"]]
+batch = [["-b", "2048"], ["-b", "4096"]]
+flash_attn = [["-fa", "on"], ["-fa", "off"]]
+
+# A server that's already running (LM Studio, Ollama, vLLM, a remote box): give its URL and no cmd.
+# Its models are added with `tuieval add <model id> --server local`.
+[servers.local]
+url = "http://127.0.0.1:1234"   # LM Studio's default; Ollama is http://127.0.0.1:11434, vLLM :8000
+
+# OpenRouter: ANY model it serves, with no [[models]] entry. Name it when you run:
+#     tuieval run --tier smoke --only openrouter:qwen/qwen3-235b-a22b-2507
+#     TUI: tick "+ openrouter: any model" in the model list, or press "a" and type openrouter:<model id>
+# Results go to results/or-<id>/ and the model stays listed once it has results. A plain
+# `tuieval run` never includes OpenRouter models (they cost money); name them.
+# Needs OPENROUTER_API_KEY in the environment of the shell that starts tuieval.
+# pin_endpoint: every answer of a model comes from one provider endpoint (the closest to the released
+# weights), with no fallback, since providers run different quantizations.
+# To keep providers that store or train on prompts (and could learn your tests) out entirely, add
+#   request = { provider = { data_collection = "deny" } }
+[servers.openrouter]
+url = "https://openrouter.ai/api/v1"
+any_model = true
+label_prefix = "or"
+pin_endpoint = true
+api_key_env = "OPENROUTER_API_KEY"
+thinking_param = "reasoning"     # [sampling] enable_thinking -> OpenRouter's reasoning.enabled
+headers = { "X-Title" = "tuieval" }
+```
+
+`[defaults] detect_ports` (default `[1234, 11434, 8080, 8000]`, the usual LM Studio, Ollama, llama-server and vLLM ports) is where `tuieval add`, `tuieval init` and `tuieval doctor` look for servers that are already running. `TUIEVAL_DETECT_PORTS` (comma-separated; empty means none) overrides it.
+
+Optional sections:
+
+```toml
+# Optional tuner settings.
+# [tune]
+# guard_similarity = 0.6       # greedy answers under a candidate flag must stay this similar to the defaults'
+# request_timeout_s = 600      # a tuning request that takes longer fails that candidate
+# warm_start = true            # start from a tuned model with the same architecture and shapes (a fine-tune)
+# warm_retest = ["spec", "ubatch"]   # the knobs a warm start re-tries; the rest are inherited
+# answer_tokens = 1024         # answer length options are scored for (projected objective)
+# swap_limit_mb = 500          # reject options that swap more than this beyond the defaults (default: report only)
+
+# Optional: llama-bench for the tuner's fast first stage (found on PATH as llama-bench otherwise).
+# [bench]
+# cmd = ["~/llama.cpp/build/bin/llama-bench"]
+
+# Optional per-machine settings, by machine id (tuieval machines shows the ids).
+# [machines.m3max-64gb]
+# memory_headroom_gb = 3       # GPU memory kept free for macOS and other apps (default 4)
+# gpu_residency_gb = 12        # GPU memory the driver keeps resident before churning (default: half of RAM)
+```
+

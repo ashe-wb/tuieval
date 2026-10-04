@@ -367,9 +367,8 @@ class FirstRun(unittest.TestCase):
         tuieval(self.tmp.name, "init", self.ws)
         tuieval(self.ws, "new-pack", "first")
         self.port = free_port()
-        text = read(os.path.join(self.ws, "models.toml"))
-        write(os.path.join(self.ws, "models.toml"),
-              text.replace('url = "http://127.0.0.1:1234"', f'url = "http://127.0.0.1:{free_port()}"'))
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:   # never the machine's real LM Studio port
+            f.write(f'\n[servers.local]\nurl = "http://127.0.0.1:{free_port()}"\n')
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -424,7 +423,7 @@ class FirstRun(unittest.TestCase):
         mock = Mock(os.path.join(self.ws, "packs"), "oracle", port=self.port)   # a server on a detected port
         try:
             out = tuieval(self.ws, "doctor", check=False, ports=self.port).stdout
-            self.assertIn(f"point url at one that's running: http://127.0.0.1:{self.port}", out)
+            self.assertIn(f"run `tuieval add` to add the models of the one running at http://127.0.0.1:{self.port}", out)
             text = read(os.path.join(self.ws, "models.toml"))
             write(os.path.join(self.ws, "models.toml"),
                   re.sub(r'(\[servers\.local\]\nurl = )"[^"]+"', rf'\1"http://127.0.0.1:{self.port}"', text))

@@ -73,10 +73,26 @@ def slug(model):
     return re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-.")
 
 
+BUILTIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builtin.toml")
+
+
+def builtin_config():
+    with open(BUILTIN_PATH, "rb") as f:
+        return tomllib.load(f)
+
+
 def load_config(path):
-    """Read models.toml and fill in each model's defaults."""
+    """Read models.toml, fill in the built-ins it leaves out (builtin.toml) and each model's defaults.
+    [defaults] are filled key by key; [sampling] only when models.toml has none (sampling is part of
+    every result's fingerprint, so a workspace's own keys are never added to); servers by name."""
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
+    builtin = builtin_config()
+    cfg["defaults"] = {**builtin["defaults"], **cfg.get("defaults", {})}
+    cfg.setdefault("sampling", builtin["sampling"])
+    own = cfg.get("servers", {})
+    cfg["servers"] = {**builtin["servers"], **own}
+    cfg["builtin_servers"] = sorted(set(builtin["servers"]) - set(own))   # not defined in models.toml
     cfg.setdefault("models", [])
     seen = set()
     for m in cfg["models"]:
@@ -219,6 +235,8 @@ def infer_server(cfg, model):
     is_file = model.lower().endswith(".gguf")
     choices = [n for n, s in cfg["servers"].items()
                if bool(s.get("model_is_path")) == is_file and not s.get("any_model")]
+    own = [n for n in choices if n not in cfg.get("builtin_servers", ())]   # the workspace's own come first
+    choices = own or choices
     return choices[0] if len(choices) == 1 else None
 
 
@@ -587,6 +605,13 @@ def ensure_server(models_path, url, port=None):
             f.write(original)
         raise
     return name
+
+
+def url_fix(cfg, name):
+    """How to point a server at another URL in models.toml (a built-in one has no section there yet)."""
+    if name in cfg.get("builtin_servers", ()):
+        return f'add [servers.{name}] with url = "http://127.0.0.1:<port>" to models.toml'
+    return f"fix `url` under [servers.{name}] in models.toml"
 
 
 def find_running(cfg, model):
@@ -1560,9 +1585,9 @@ class Engine:
                 time.sleep(3)
                 if probe_models(base_url, 5, self.request_headers(m)) is None:
                     raise ModelFailed(
-                        f"nothing is answering at {base_url}. Start that server, or fix `url` under "
-                        f"[servers.{m['server']}] in models.toml (common local ports: LM Studio 1234, "
-                        "Ollama 11434, llama-server 8080, vLLM 8000); `tuieval doctor` checks them all")
+                        f"nothing is answering at {base_url}. Start that server, or {url_fix(self.cfg, m['server'])} "
+                        "(common local ports: LM Studio 1234, Ollama 11434, llama-server 8080, vLLM 8000); "
+                        "`tuieval doctor` checks them all")
             while True:
                 self._check()
                 if srv is not None and srv.poll() is not None:

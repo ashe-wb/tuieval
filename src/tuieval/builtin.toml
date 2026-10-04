@@ -1,0 +1,83 @@
+# Built-in defaults and servers, used when a workspace's models.toml doesn't define them.
+# [defaults] fill in key by key; [sampling] only when models.toml has no [sampling] at all (it's part of
+# every result's fingerprint); a server here is replaced whole by one of the same name in models.toml.
+
+[defaults]
+repeat = 3
+request_timeout_ms = 1800000   # per request; long thinking runs need it
+ready_timeout_s = 1200         # how long a model may take to load before giving up
+model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
+
+# Sent with every request. A model may override it (see `thinking` / `sampling` below); results
+# record the settings each model actually ran with, and the scorecard shows any difference.
+[sampling]
+temperature = 0.7
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+max_tokens = 16384
+enable_thinking = true         # test every model in the SAME mode
+
+# llama.cpp's server (https://github.com/ggml-org/llama.cpp), started for each GGUF model.
+[servers.llama]
+# Output-affecting flags only. Anything here must be identical wherever results are compared,
+# so it's part of each result's fingerprint. Speed-only flags live in `perf` and `tune` below.
+cmd = [
+  "llama-server",
+  "-m", "{model}",
+  "--alias", "{served_name}",
+  "--host", "127.0.0.1", "--port", "{port}",
+  "--jinja",
+  "--metrics",
+  "-np", "1",
+  "-ctk", "{kv_type}", "-ctv", "{kv_type}",
+  "-c", "{ctx}",
+  "--reasoning-format", "auto",
+]
+port = 8080
+model_is_path = true           # check the GGUF exists and fits before starting
+vision_args = ["--mmproj", "{mmproj}"]   # appended only for models that set mmproj
+kv_type = "f16"                # a model's own `kv_type` (e.g. "q8_0") makes it a different model entry
+max_ctx = 65536                # upper bound; the fit check lowers it per machine (see machines.py)
+version_cmd = ["llama-server", "--version"]   # recorded with every result
+# Added to every request. cache_prompt = false: each answer is computed from scratch, so a repeat of
+# the same question reuses nothing from the last time it was asked (and its TTFT is honest).
+# Answers record any prompt tokens the server reused.
+request = { cache_prompt = false }
+
+# Speed-only flags, always applied (not tuned).
+perf = ["-ngl", "99"]
+
+# Speed-only knobs `tuieval tune` tries, one at a time from the best so far. The first option of
+# each knob is the default for models not tuned on this machine yet. Placeholders: {p} P-cores,
+# {p_minus_2}, {all} all cores. Options that stop the server from starting are skipped.
+# Check the flags against `llama-server --help` for your build.
+[servers.llama.tune]
+threads = [["-t", "{p}", "-tb", "{p}"], ["-t", "{p_minus_2}", "-tb", "{p}"], ["-t", "{all}", "-tb", "{all}"]]
+ubatch = [["-ub", "512"], ["-ub", "256"], ["-ub", "1024"]]
+batch = [["-b", "2048"], ["-b", "4096"]]
+flash_attn = [["-fa", "on"], ["-fa", "off"]]
+
+# A server that's already running (LM Studio, Ollama, vLLM, a remote box): give its URL and no cmd.
+# Its models are added with `tuieval add <model id> --server local`.
+[servers.local]
+url = "http://127.0.0.1:1234"   # LM Studio's default; Ollama is http://127.0.0.1:11434, vLLM :8000
+
+# OpenRouter: ANY model it serves, with no [[models]] entry. Name it when you run:
+#     tuieval run --tier smoke --only openrouter:qwen/qwen3-235b-a22b-2507
+#     TUI: tick "+ openrouter: any model" in the model list, or press "a" and type openrouter:<model id>
+# Results go to results/or-<id>/ and the model stays listed once it has results. A plain
+# `tuieval run` never includes OpenRouter models (they cost money); name them.
+# Needs OPENROUTER_API_KEY in the environment of the shell that starts tuieval.
+# pin_endpoint: every answer of a model comes from one provider endpoint (the closest to the released
+# weights), with no fallback, since providers run different quantizations.
+# To keep providers that store or train on prompts (and could learn your tests) out entirely, add
+#   request = { provider = { data_collection = "deny" } }
+[servers.openrouter]
+url = "https://openrouter.ai/api/v1"
+any_model = true
+label_prefix = "or"
+pin_endpoint = true
+api_key_env = "OPENROUTER_API_KEY"
+thinking_param = "reasoning"     # [sampling] enable_thinking -> OpenRouter's reasoning.enabled
+headers = { "X-Title" = "tuieval" }

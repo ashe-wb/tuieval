@@ -22,7 +22,15 @@ tuieval init my-evals          # guided: finds models already running (LM Studio
 cd my-evals && tuieval         # open the TUI (? explains any screen)
 ```
 
-No server running? `tuieval add ~/models/Some-Model-Q4_K_M.gguf` (tuieval starts llama.cpp for it), or any OpenRouter model with `tuieval run --only openrouter:<model id>`. `tuieval doctor` says what's missing.
+Whatever runs your models, the first steps are short:
+
+| You have | Do this |
+|---|---|
+| **LM Studio, Ollama or vLLM** | Start its server and load a model, then `tuieval init my-evals`: it finds the model. Later: `tuieval add` lists new ones. |
+| **GGUF files** | Install llama.cpp (`brew install llama.cpp`), then `tuieval add ~/models/Some-Model-Q4_K_M.gguf`. tuieval starts `llama-server` for it, sized to your machine. |
+| **An OpenRouter key** | `export OPENROUTER_API_KEY=…`, then `tuieval run --tier smoke --only openrouter:<model id>`. |
+
+Stuck? `tuieval doctor` checks servers, models, packs and keys, and says what to fix.
 
 `pip install tuieval` gets the latest release. Every change on `main` is also published as a dev build (`X.Y.0.devN`); get it with `pipx install --pip-args=--pre tuieval` or `pip install --pre tuieval`.
 
