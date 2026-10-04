@@ -10,6 +10,11 @@ tuieval new-pack support-bot --grader reply      # answer | rag | reply | tool_c
 
 Edit `packs/support-bot/tests.yaml`, replace the examples with your own questions, and run `tuieval selftest support-bot` after every change.
 
+Two shortcuts to a first set of real questions:
+
+- **From a spreadsheet:** `tuieval new-pack quiz --from questions.csv` makes one test per row from a `question` and an `answer` column (optional: `id`, `category`, `difficulty`, `tolerance`, and `wrong` with known-wrong answers separated by `|`). Numbers are checked with the tolerance, words case-insensitively, and `NOT_AVAILABLE` means the right answer is "the question doesn't say".
+- **Drafted by a model:** `tuieval new-pack support-bot --grader reply --about "refund questions for a shoe store"` also writes `DRAFT-PROMPT.md`. Paste it into the strongest model you have, save the YAML it writes as `tests.yaml`, and run `tuieval selftest`: it catches drafted tests whose expected answer is wrong or whose grader can't tell a mistake from the right answer. Read the questions anyway; you know your domain better than the model.
+
 To try a different set of questions, copy a pack (`cp -r packs/support-bot packs/support-bot-v2`), edit the copy, and pick whichever you want in the TUI.
 
 ## Fingerprints
@@ -55,6 +60,7 @@ min_consistency = 0.95           # share of variant groups where every variant p
   input: |                         # the user message
     A customer bought shoes 20 days ago …
   image: images/receipt.png        # optional: sent as an image (needs vision)
+  input_file: prompts/refund.txt   # optional, instead of input: the user message from a file in the pack
   grader: answer                   # optional: override the pack's grader
   group: refund-window-2           # optional: variants of one case share a group (consistency gate)
   critical: true                   # optional: any failure of this test is critical (disqualifying)

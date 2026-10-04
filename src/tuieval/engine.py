@@ -73,10 +73,26 @@ def slug(model):
     return re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-.")
 
 
+BUILTIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builtin.toml")
+
+
+def builtin_config():
+    with open(BUILTIN_PATH, "rb") as f:
+        return tomllib.load(f)
+
+
 def load_config(path):
-    """Read models.toml and fill in each model's defaults."""
+    """Read models.toml, fill in the built-ins it leaves out (builtin.toml) and each model's defaults.
+    [defaults] are filled key by key; [sampling] only when models.toml has none (sampling is part of
+    every result's fingerprint, so a workspace's own keys are never added to); servers by name."""
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
+    builtin = builtin_config()
+    cfg["defaults"] = {**builtin["defaults"], **cfg.get("defaults", {})}
+    cfg.setdefault("sampling", builtin["sampling"])
+    own = cfg.get("servers", {})
+    cfg["servers"] = {**builtin["servers"], **own}
+    cfg["builtin_servers"] = sorted(set(builtin["servers"]) - set(own))   # not defined in models.toml
     cfg.setdefault("models", [])
     seen = set()
     for m in cfg["models"]:
@@ -219,6 +235,8 @@ def infer_server(cfg, model):
     is_file = model.lower().endswith(".gguf")
     choices = [n for n, s in cfg["servers"].items()
                if bool(s.get("model_is_path")) == is_file and not s.get("any_model")]
+    own = [n for n in choices if n not in cfg.get("builtin_servers", ())]   # the workspace's own come first
+    choices = own or choices
     return choices[0] if len(choices) == 1 else None
 
 
@@ -512,6 +530,115 @@ def server_error(log, start):
         return line.split("]: ", 1)[-1]
     return line.removeprefix("error: ")
 
+def missing_program(cmd, cwd=None):
+    """The program a server command runs, if it isn't installed (not on PATH, or no such file); else None."""
+    exe = next((a for a in cmd if a != "env" and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)), None)
+    if not exe:
+        return None
+    if "/" in exe:
+        return None if os.path.isfile(os.path.join(cwd or "", expand(exe))) else exe
+    return None if shutil.which(exe) else exe
+
+
+def install_hint(program):
+    """How to get a server program, for the ones tuieval's templates use."""
+    if os.path.basename(program) == "llama-server":
+        return ("install llama.cpp (macOS: brew install llama.cpp; others: a release from "
+                "https://github.com/ggml-org/llama.cpp/releases) so llama-server is on PATH")
+    return "install it, or fix the server's cmd in models.toml"
+
+
+def probe_models(base_url, timeout=2.0, headers=None):
+    """The model ids an OpenAI-compatible server lists at base_url, or None when nothing answers."""
+    req = urllib.request.Request(base_url.rstrip("/").removesuffix("/v1") + "/v1/models", headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return [str(x.get("id", "")) for x in json.load(r).get("data", []) if isinstance(x, dict)]
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+# Where local OpenAI-compatible servers usually listen. models.toml [defaults] detect_ports
+# replaces the list (e.g. a server on a custom port, or [] to never look).
+DETECT_PORTS = {1234: "LM Studio", 11434: "Ollama", 8080: "llama-server", 8000: "vLLM"}
+
+
+SERVER_NAMES = {1234: "lmstudio", 11434: "ollama", 8080: "llamacpp", 8000: "vllm"}   # for new [servers.*] entries
+
+
+def detect_ports(cfg=None):
+    """Ports to look for running servers on: $TUIEVAL_DETECT_PORTS (comma-separated, empty = none),
+    else models.toml [defaults] detect_ports, else the usual ones."""
+    env = os.environ.get("TUIEVAL_DETECT_PORTS")
+    if env is not None:
+        return [int(p) for p in env.replace(" ", "").split(",") if p]
+    return [int(p) for p in ((cfg or {}).get("defaults") or {}).get("detect_ports", list(DETECT_PORTS))]
+
+
+def _norm_url(url):
+    return (url or "").rstrip("/").removesuffix("/v1").replace("localhost", "127.0.0.1")
+
+
+def server_for_url(cfg, url):
+    """The models.toml server already pointing at url (a server tuieval doesn't start), or None."""
+    return next((n for n, s in cfg["servers"].items() if not s.get("cmd") and _norm_url(s.get("url")) == _norm_url(url)),
+                None)
+
+
+def ensure_server(models_path, url, port=None):
+    """The name of a models.toml server for an already-running server at url, adding a
+    [servers.<name>] block when there's none (named after the app that usually uses the port)."""
+    cfg = load_config(models_path)
+    name = server_for_url(cfg, url)
+    if name:
+        return name
+    base = SERVER_NAMES.get(port, f"local-{port}" if port else "local-server")
+    name = base if base not in cfg["servers"] else f"{base}-{port}"
+    with open(models_path) as f:
+        original = f.read()
+    with open(models_path, "w") as f:
+        f.write(original.rstrip("\n") + f'\n\n[servers.{name}]\nurl = "{_norm_url(url)}"\n')
+    try:
+        load_config(models_path)
+    except BaseException:
+        with open(models_path, "w") as f:
+            f.write(original)
+        raise
+    return name
+
+
+def url_fix(cfg, name):
+    """How to point a server at another URL in models.toml (a built-in one has no section there yet)."""
+    if name in cfg.get("builtin_servers", ()):
+        return f'add [servers.{name}] with url = "http://127.0.0.1:<port>" to models.toml'
+    return f"fix `url` under [servers.{name}] in models.toml"
+
+
+def find_running(cfg, model):
+    """Running servers (detect_servers) that list this model id, best match first."""
+    found = detect_servers(detect_ports(cfg))
+    exact = [f for f in found if model in f["models"]]
+    return exact or [f for f in found if serves(f["models"], model)]
+
+
+def detect_servers(ports, timeout=1.0):
+    """[{url, port, usual, models}] for each local port with an OpenAI-compatible server answering.
+    usual: the app that normally uses that port (a hint, not a check)."""
+    found = []
+    for port in ports:
+        url = f"http://127.0.0.1:{port}"
+        ids = probe_models(url, timeout)
+        if ids is not None:
+            found.append({"url": url, "port": port, "usual": DETECT_PORTS.get(port), "models": ids})
+    return found
+
+
+def serves(ids, name):
+    """Does a server listing these model ids serve this model (names match loosely: aliases, paths)?"""
+    want = name.lower()
+    return any(want == i.lower() or want in i.lower() or (i and i.lower() in want) for i in ids)
+
+
 def pack_min_context(pack):
     """Rough context a pack needs: its longest prompt (~4 chars/token) plus room to answer."""
     return max(len(t["input"]) for t in pack.tests) // 4 + 4096
@@ -621,6 +748,15 @@ class Engine:
             except (OSError, ValueError) as e:
                 raise ConfigError(f"couldn't read {name}'s model list ({e})") from None
         return self._catalogues[name]
+
+    def has_results(self):
+        """Has any model run anything yet (smoke runs included)?"""
+        for base in (self.results_dir, os.path.join(self.results_dir, "smoke")):
+            for label in os.listdir(base) if os.path.isdir(base) else []:
+                d = os.path.join(base, label)
+                if os.path.isdir(d) and any(f.endswith(".json") for f in os.listdir(d)):
+                    return True
+        return False
 
     def _add_remote_models(self):
         """Add the models named at run time this session, and ones that have results from an
@@ -1407,6 +1543,9 @@ class Engine:
                     raise ModelFailed(f"mmproj file not found: {expand(m['mmproj'])}")
                 if cwd and not os.path.isdir(cwd):
                     raise ModelFailed(f"server directory not found: {cwd}")
+                missing = missing_program(cmd, cwd)
+                if missing:
+                    raise ModelFailed(f"{missing} isn't installed: {install_hint(missing)}")
                 if port_in_use(port):
                     raise ModelFailed(f"port {port} is already in use; stop the server running there")
                 os.makedirs(os.path.join(self.log_dir, "server"), exist_ok=True)
@@ -1431,7 +1570,7 @@ class Engine:
                 key_env = server.get("api_key_env")
                 if key_env and not os.environ.get(key_env):
                     raise ModelFailed(f"{key_env} is not set; export it in the shell you start tuieval from")
-                where = f"already running at {base_url}"
+                where = f"using the server at {base_url}"
                 if server.get("pin_endpoint"):
                     ep = self.endpoint(m)
                     if not ep or not ep.get("tag"):
@@ -1441,6 +1580,14 @@ class Engine:
                 self.emit("model_loading", label=m["label"], command=[f"({where})"], log="")
                 t0 = time.time()
             deadline = time.time() + defaults["ready_timeout_s"]
+            if srv is None and not server.get("health") and probe_models(base_url, 5, self.request_headers(m)) is None:
+                # a server we don't start: if nothing answers now, waiting won't help
+                time.sleep(3)
+                if probe_models(base_url, 5, self.request_headers(m)) is None:
+                    raise ModelFailed(
+                        f"nothing is answering at {base_url}. Start that server, or {url_fix(self.cfg, m['server'])} "
+                        "(common local ports: LM Studio 1234, Ollama 11434, llama-server 8080, vLLM 8000); "
+                        "`tuieval doctor` checks them all")
             while True:
                 self._check()
                 if srv is not None and srv.poll() is not None:
@@ -1462,9 +1609,8 @@ class Engine:
                     raise ModelFailed(f"server not ready after {defaults['ready_timeout_s']}s")
                 time.sleep(0.5)
             info["load_s"] = time.time() - t0 if srv is not None else None
-            want = m["served_name"].lower()
             # A health-checked server we started ourselves serves exactly the model we gave it.
-            if not (server.get("health") and srv is not None) and not any(want == i.lower() or want in i.lower() or (i and i.lower() in want) for i in ids):
+            if not (server.get("health") and srv is not None) and not serves(ids, m["served_name"]):
                 raise ModelFailed(f"server reports {ids}, expected {m['served_name']!r}; "
                                   "not running to avoid mislabelled results")
             if log and server.get("log_facts"):

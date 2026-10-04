@@ -30,7 +30,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input, Label, Log, OptionList,
+from textual.widgets import (Button, Checkbox, Collapsible, DataTable, Footer, Header, Input, Label, Log, OptionList,
                              ProgressBar, RadioButton, RadioSet, Select, SelectionList, Static, TabbedContent,
                              TabPane, TextArea)
 from textual.widgets.option_list import Option
@@ -127,9 +127,10 @@ def quant_text(ep):
     return "quantization undeclared by provider" if q in (None, "unknown") else q
 
 
-def serving_badge(e, m):
+def serving_badge(e, m, newcomer=False):
     """One-line markup: how the model fits and is tuned on this machine; for a hosted model, the
-    provider endpoint and quantization its answers come from."""
+    provider endpoint and quantization its answers come from. newcomer (nothing has run yet): only
+    what stops a run (doesn't fit), not context sizes and tuning."""
     try:
         ep = e.endpoint(m)
         if ep:
@@ -141,6 +142,8 @@ def serving_badge(e, m):
         return ""
     if not sv.fits:
         return "  [bold red]doesn't fit here[/bold red]"
+    if newcomer:
+        return ""
     ctx = f"{sv.ctx // 1024}k" if sv.ctx else ""
     src = {"tuned": "[green]tuned[/green]", "seeded": "[green]hand-tuned[/green]",
            "untuned": "[yellow]untuned[/yellow]"}.get(sv.perf_source, "[yellow]retune[/yellow]")
@@ -266,6 +269,97 @@ class BlockDumper(yaml.SafeDumper):
 
 BlockDumper.add_representer(str, lambda d, v: d.represent_scalar("tag:yaml.org,2002:str", v,
                                                                    style="|" if "\n" in v else None))
+
+
+GLOSSARY = """[b]Words tuieval uses[/b]
+  [b]pack[/b]        a folder of your own questions with checkable answers (packs/<name>/)
+  [b]use case[/b]    a pack's group; a model PASSES a use case when all its packs pass
+  [b]Smoke[/b]       3 questions per pack, once: checks the model and server work (minutes)
+  [b]Screen[/b]      a sample of each pack, once: drops weak models fast; can say FAIL, not PASS
+  [b]Certify[/b]     every question, with repeats: the only tier that can say PASS
+  [b]PASS[/b]        enough answers right, with zero critical failures, to trust the model for this
+  [b]FAIL[/b]        it got too much wrong, or broke a hard rule (a critical failure)
+  [b]INCONCLUSIVE[/b] not enough answers yet to decide; the verdict says what's missing
+  [b]critical[/b]    a failure that disqualifies on its own (a forbidden action, an invented answer)
+  [b]gate[/b]        what PASS means for a pack (pack.toml \\[gate]); docs/writing-packs.md explains it"""
+
+HELP = {
+    "SetupScreen": """[b]Setup: choose what to run[/b]
+
+1. Tick [b]packs[/b] on the left and [b]models[/b] on the right (space; type to filter models).
+2. Pick a [b]tier[/b]: Smoke first to check the setup, then Screen, then Certify for finalists.
+3. Press [b]s[/b]. The line above the buttons says how many answers that is and roughly how long.
+
+[b]Keys[/b]
+  s  start (or queue it behind a run that's going)     r  results
+  a  add a model (a GGUF, a model id, openrouter:<id>)  m  scan model folders for new GGUFs
+  e  pick which tests of the highlighted pack run       p  save or load a selection (preset)
+  t  tune the ticked models' speed flags here (after   x  hide or unhide a model
+     a first run)
+  w  runs and queue of this session                     q  quit
+
+Something not working? In a terminal: [b]tuieval doctor[/b] checks servers, models and keys.""",
+    "RunScreen": """[b]A run in progress[/b]
+
+The top shows progress, ETA and the live score per model and pack. Below: the current question
+with the model's reasoning and answer as they stream, then recent results with the grader's reason
+(enter on one opens it in full).
+
+[b]Keys[/b]
+  k  skip the current model          c  cancel everything (finished answers are kept; it resumes next time)
+  f  pause or resume auto-scroll     r  results     n  set up a new run (this one keeps going)
+  w  runs and queue                  esc  back to Setup (the run keeps going)""",
+    "ResultsScreen": """[b]Results[/b]
+
+Start with [b]Production readiness[/b]: one verdict per model and use case, and what's missing when
+it's INCONCLUSIVE. The other tabs are the evidence:
+  Scorecard              accuracy, critical failures and truncation per model and pack
+  Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
+  Per question           every question, model by model
+  Is the difference real? whether one model is really better than another, or it's noise
+  Tests that separate    the questions that tell models apart
+  Failures               every wrong answer with the grader's reason; enter opens it in full
+  Test quality           tests nobody fails, everybody fails, or that look broken
+
+[b]Keys[/b]  esc back · ctrl+r refresh · w runs""",
+    "TuneScreen": """[b]Tuning speed flags[/b]
+
+tuieval tries speed-only server flags (batch sizes, flash attention, speculative decoding …) on this
+machine and keeps the fastest set. A guard rejects any flag that changes the model's answers, so
+tuning never changes results, only speed. It takes several minutes per model.
+
+[b]Keys[/b]  c cancel · esc back to Setup · w runs""",
+    "AnswerScreen": """[b]One answer in full[/b]
+
+The grade and the grader's reason at the top, then tabs: the model's reasoning and answer, the
+question as sent, and what the grader checked.
+
+[b]Keys[/b]  [ and ] previous / next answer · esc close""",
+    "PickTestsScreen": """[b]Pick tests[/b]
+
+Tick the tests of this pack to run (space). Type to filter by id, description or category, enter to
+go back to the list, and [b]a[/b] ticks every test the filter shows. With none ticked the tier's usual
+tests run. Runs of different tests add up; the pack can PASS once all its tests have run.""",
+}
+
+
+class HelpScreen(ModalScreen):
+    """What the screen underneath is for, its keys, and the words tuieval uses."""
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("question_mark", "close", "Close", show=False),
+                Binding("q", "close", "Close", show=False)]
+
+    def __init__(self, screen_name):
+        super().__init__()
+        self.text = HELP.get(screen_name, "[b]Help[/b]\n\nesc closes this dialog.")
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="wide"):
+            with VerticalScroll(id="help-body"):
+                yield Static(self.text + "\n\n" + GLOSSARY)
+            yield Label("[dim]esc closes · docs: README.md and docs/ in the tuieval repository[/dim]")
+
+    def action_close(self):
+        self.dismiss()
 
 
 class AnswerScreen(ModalScreen):
@@ -398,17 +492,21 @@ class SetupScreen(Screen):
         Binding("s", "start", "Start"),
         Binding("a", "add_model", "Add model"),
         Binding("m", "scan", "Scan for models"),
-        Binding("p", "presets", "Presets"),
+        Binding("p", "presets", "Presets", show=False),
         Binding("e", "pick_tests", "Pick tests"),
         Binding("t", "tune", "Tune speed"),
         Binding("r", "results", "Results"),
-        Binding("x", "hide_model", "Hide/unhide"),
+        Binding("x", "hide_model", "Hide/unhide", show=False),
         Binding("w", "runs", "Runs"),
         Binding("q", "quit", "Quit"),
     ]
 
     def check_action(self, action, parameters):
-        return bool(self.app.sessions) if action == "runs" else True
+        if action == "runs":
+            return bool(self.app.sessions)
+        if action == "tune":   # speed tuning matters once a model runs; ? lists it, and tuieval tune works
+            return self.app.engine.has_results()
+        return True
 
     def action_quit(self):
         # q means "back" everywhere else, so a q too many shouldn't silently drop this session's runs
@@ -461,15 +559,32 @@ class SetupScreen(Screen):
         self.refresh_machine()
         self.refresh_packs()
         self.refresh_models()
-        self.apply_selection(self.app.load_state(), quiet=True)
+        state = self.app.load_state()
+        self.apply_selection(state, quiet=True)
+        if not state:
+            self.first_time_defaults()
         self.query_one("#suites", SelectionList).focus()
+
+    def first_time_defaults(self):
+        """With nothing chosen before: tick the only pack and the only local model, and start on
+        Smoke until something has run (a 3-question check of the setup)."""
+        e = self.app.engine
+        if len(e.packs) == 1:
+            self.query_one("#suites", SelectionList).select(next(iter(e.packs)))
+        local = [m["label"] for m in e.cfg["models"] if not m.get("remote")]
+        if len(local) == 1:
+            self.selected_models.add(local[0])
+            self.refresh_models()
+        if not e.has_results():
+            self.query_one("#tier-smoke", RadioButton).value = True
 
     def refresh_machine(self):
         e = self.app.engine
         here, others = e.machines()[0], [mc.id for mc in e.machines()[1:]]
         self.query_one("#machine", Static).update(
             f"[b]Machine[/b] {here.id}  [dim]{here.summary}"
-            + (f" · also known: {', '.join(others)}" if others else "") + " · t tunes the ticked models here[/dim]")
+            + (f" · also known: {', '.join(others)}" if others else "")
+            + (" · t tunes the ticked models here" if e.has_results() else "") + "[/dim]")
 
     def refresh_packs(self):
         e = self.app.engine
@@ -505,6 +620,7 @@ class SetupScreen(Screen):
         keep = models.highlighted_option.value if models.highlighted_option else None
         keep_at = models.highlighted
         hidden = e.hidden()
+        newcomer = not e.has_results()   # nothing run yet: leave out context sizes and tuning
         try:
             self.verdicts = model_verdicts(e)
         except Exception as err:  # a broken results file must not hide the model list
@@ -538,7 +654,7 @@ class SetupScreen(Screen):
                 extra = ("  [magenta]vision[/magenta]" if m["vision"] else "") + \
                         ("  [yellow]no-think[/yellow]" if m.get("thinking") is False else "") + \
                         ("  [dim italic]hidden[/dim italic]" if label in hidden else "")
-                where = "" if m.get("remote") else f"  [dim]{m['server']}[/dim]{serving_badge(e, m)}"
+                where = "" if m.get("remote") else f"  [dim]{m['server']}[/dim]{serving_badge(e, m, newcomer)}"
                 rows = self.verdicts.get(label, [])
                 vcodes = verdict_codes(rows, codes) if rows else f"[dim]{'not run':<{len(verdict_codes([], codes))}}[/dim]"
                 # a Selection shows one line only: keep it short, the detail line has the rest
@@ -584,7 +700,7 @@ class SetupScreen(Screen):
         tags = [t for t in m["tags"] if t != m["server"]]
         hidden = (f"  [cyan]{' '.join(tags)}[/cyan]" if tags else "") + hidden
         detail.update(f"[b]{label}[/b]  [dim]{m['server']} · {m.get('model') or ''}[/dim]"
-                      f"{serving_badge(e, m)}{hidden}\n{verdicts}\n"
+                      f"{serving_badge(e, m, not e.has_results())}{hidden}\n{verdicts}\n"
                       + ("[dim]results (✓ certified ◐ screened ~ outdated … partial):[/dim] " + "  ".join(packs)
                          if packs else "[dim]no results yet[/dim]"))
 
@@ -696,7 +812,8 @@ class SetupScreen(Screen):
                        "a running server, or openrouter:<model id>).[/dim]")
             return
         if not labels or not suites:
-            est.update("[dim]Select at least one eval pack and one model.[/dim]" + self.queue_hint())
+            est.update("Tick at least one [b]pack[/b] (left) and one [b]model[/b] (right) with space, then press "
+                       "[b]s[/b] to start." + self.queue_hint())
             return
         picks = self.current_picks(suites)
         jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks)
@@ -713,6 +830,8 @@ class SetupScreen(Screen):
                 f"[b]{reps_text}[/b] repeat(s) = "
                 f"[b]{todo:,}[/b] answers · about [b]{fmt_secs(secs)}[/b]"
                 + (f" [dim](rough: {'; '.join(notes)})[/dim]" if notes else ""))
+        if tier == "smoke" and not e.has_results():
+            text += "\n[green]First run: Smoke asks 3 questions per pack to check the setup works. Press s.[/green]"
         if picks:
             text += f"\n[cyan]Picked tests only in {', '.join(e.packs[p].label for p in picks)}[/cyan]" \
                     "[dim] (e changes; a pack with picked tests can't PASS until all its tests have run)[/dim]"
@@ -1001,6 +1120,8 @@ class AddModelScreen(ModalScreen):
         servers = [("Auto (.gguf → llama)", "")] + [(n, n) for n in e.cfg["servers"]]
         with Vertical(id="dialog"):
             yield Label("[b]Add a model[/b]")
+            yield Static("[dim]Looking for servers running on this machine…[/dim]", id="detected-label")
+            yield OptionList(id="detected")
             yield Label("GGUF path or model id")
             yield Input(placeholder="~/models/Some-Tune-Q4_K_M.gguf  or  org/model-id  or  openrouter:qwen/qwen3-32b",
                         id="model")
@@ -1008,16 +1129,51 @@ class AddModelScreen(ModalScreen):
             yield Select(servers, id="server", allow_blank=False, value="")
             yield Label("Label (names the results; lowercase)")
             yield Input(placeholder="derived from the model", id="label")
-            yield Checkbox("Can read images (enables vision packs)", id="vision")
-            yield Checkbox("Thinking off (adds -nothink to the label)", id="nothink")
-            yield Label("Tags (comma-separated, e.g. 27b, moe, q4)")
-            yield Input(placeholder="optional", id="tags")
-            yield Label("mmproj file (llama vision models only)")
-            yield Input(placeholder="optional: ~/models/…-mmproj.gguf", id="mmproj")
+            with Collapsible(title="More options: vision, thinking, tags", collapsed=True, id="more"):
+                yield Checkbox("Can read images (enables vision packs)", id="vision")
+                yield Checkbox("Thinking off (adds -nothink to the label)", id="nothink")
+                yield Label("Tags (comma-separated, e.g. 27b, moe, q4)")
+                yield Input(placeholder="optional", id="tags")
+                yield Label("mmproj file (llama vision models only)")
+                yield Input(placeholder="optional: ~/models/…-mmproj.gguf", id="mmproj")
             yield Static(id="error")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Save", id="save", variant="success")
                 yield Button("Cancel", id="cancel")
+
+    def on_mount(self):
+        self.found = {}    # model id -> the running server listing it
+        self.query_one("#detected", OptionList).display = False
+        threading.Thread(target=self._detect, daemon=True).start()
+
+    def _detect(self):
+        e = self.app.engine
+        try:
+            found = engine.detect_servers(engine.detect_ports(e.cfg))
+        except Exception:   # detection is a convenience; the dialog works without it
+            found = []
+        self.app.call_from_thread(self._show_detected, found)
+
+    def _show_detected(self, found):
+        from . import onboard
+        items = onboard.unregistered(self.app.engine.cfg, found)
+        label, ol = self.query_one("#detected-label", Static), self.query_one("#detected", OptionList)
+        if not items:
+            label.update("[dim]No new models on running servers (LM Studio, Ollama, vLLM…). "
+                         "Type a GGUF path, a model id, or openrouter:<model id>.[/dim]" if not found else
+                         "[dim]Every model on the running servers is already added.[/dim]")
+            return
+        self.found = {mid: f for mid, f in items}
+        label.update("[b]Running now[/b] [dim](enter picks one)[/dim]")
+        ol.add_options([Option(f"{rich_escape(mid)}  [dim]{rich_escape(onboard.where(f))}[/dim]", id=mid)
+                        for mid, f in items])
+        ol.display = True
+
+    @on(OptionList.OptionSelected, "#detected")
+    def detected_picked(self, event):
+        self.query_one("#model", Input).value = event.option.id
+        self.query_one("#server", Select).value = ""
+        self.query_one("#label", Input).focus()
 
     @on(Input.Changed, "#model")
     def suggest_label(self, event):
@@ -1040,9 +1196,16 @@ class AddModelScreen(ModalScreen):
                 return
             self.dismiss(label)
             return
+        server = self.query_one("#server", Select).value or None
+        model = get("#model").strip()
+        if not server and not model.lower().endswith(".gguf") and not os.path.exists(os.path.expanduser(model)):
+            f = self.found.get(model) or next(iter(engine.find_running(e.cfg, model)), None) if model else None
+            if f:   # the running server that lists it (added to models.toml if it isn't there yet)
+                server = engine.ensure_server(e.models_path, f["url"], f["port"])
+                e.reload()
         try:
             label, warnings = engine.add_model(
-                self.app.engine.models_path, get("#model"), self.query_one("#server", Select).value or None,
+                self.app.engine.models_path, get("#model"), server,
                 get("#label") or None, self.query_one("#vision", Checkbox).value, get("#mmproj") or None,
                 False if self.query_one("#nothink", Checkbox).value else None,
                 [t.strip() for t in get("#tags").split(",")])
@@ -2058,6 +2221,7 @@ class ResultsScreen(Screen):
                 yield Button("Show this Smoke run's results", id="toggle-smoke")
         with TabbedContent():
             with TabPane("Production readiness"):
+                yield Static(id="readiness-short")
                 yield Static(self.READINESS_HELP, id="readiness-help")
                 yield DataTable(id="readiness", zebra_stripes=True)
                 yield Static("[b]Fast enough?[/b] [dim]p90 seconds per answer against the pack's limit, per machine: "
@@ -2463,6 +2627,14 @@ class ResultsScreen(Screen):
             return
         help_text.update(self.READINESS_HELP)
         table = verdict.readiness(self.app.engine)
+        short = ["[b]In short[/b]"]
+        for label, sentence, todo in verdict.plain_summary(table):
+            short.append(f"  [b]{rich_escape(label)}[/b]: {rich_escape(sentence)}")
+            short += [f"     → {rich_escape(g)}: {rich_escape(what)}" for g, what, _ in todo]
+        if any("Certify" in what for _, _, todo in verdict.plain_summary(table) for _, what, _ in todo):
+            short.append("  [dim]To run Certify: in Setup tick the model and pack, choose Certify, press s.[/dim]")
+        self.query_one("#readiness-short", Static).update("\n".join(short) if table else
+                                                          "[dim]No verdicts yet: run something from Setup.[/dim]")
         groups = sorted({g for t in table.values() for g in t})
         matrix.add_columns("Model", *groups)
         detail.add_columns("Model", "Use case", "Pack", "Verdict", "Why")
@@ -2521,14 +2693,24 @@ class EvalsApp(App):
     StreamView { height: 1fr; border: none; padding: 0; }
     #tabs { height: 12; }
     AddModelScreen, ConfirmScreen { align: center middle; }
+    SelectionList > .selection-list--button, SelectionList > .selection-list--button-highlighted {
+        color: $panel; background: $panel;
+    }
+    SelectionList > .selection-list--button-selected, SelectionList > .selection-list--button-selected-highlighted {
+        color: $success; background: $panel; text-style: bold;
+    }
+    Checkbox > .toggle--button { color: $panel; }
+    Checkbox.-on > .toggle--button { color: $success; text-style: bold; }
     #dialog { width: 80; height: auto; max-height: 90%; padding: 1 2; border: thick $primary; background: $surface; }
     #dialog.wide { width: 120; }
     #dialog SelectionList, #dialog OptionList { height: auto; max-height: 20; }
-    PresetsScreen, ScanScreen, SessionsScreen, ChoiceScreen, PickTestsScreen { align: center middle; }
+    PresetsScreen, ScanScreen, SessionsScreen, ChoiceScreen, PickTestsScreen, HelpScreen { align: center middle; }
+    #help-body { height: auto; max-height: 30; }
     #dialog Input, #dialog Select { margin-bottom: 1; }
     .dialog-buttons { height: 3; margin-top: 1; }
     .dialog-buttons Button { margin-right: 2; }
     #results-info { padding: 0 1; height: auto; }
+    #readiness-short { padding: 0 1 1 1; height: auto; }
     #machine { padding: 0 1; height: auto; }
     #tune-status { padding: 0 1; height: auto; min-height: 2; background: $boost; }
     #tune-log { height: 1fr; }
@@ -2564,7 +2746,11 @@ class EvalsApp(App):
     #answer-tabs TextArea { height: 1fr; border: none; }
     #answer-reasoning { color: $text-muted; }
     """
-    BINDINGS = [Binding("ctrl+q", "quit_app", "Quit", show=False)]
+    BINDINGS = [Binding("ctrl+q", "quit_app", "Quit", show=False), Binding("question_mark", "help", "Help")]
+
+    def action_help(self):
+        if not isinstance(self.screen, HelpScreen):
+            self.push_screen(HelpScreen(type(self.screen).__name__))
 
     def __init__(self, engine_kwargs):
         super().__init__()

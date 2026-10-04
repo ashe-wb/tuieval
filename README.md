@@ -17,11 +17,20 @@ Then you get an answer to the questions that matter:
 
 ```bash
 pipx install tuieval          # or: uv tool install tuieval, or pip install tuieval   (Python 3.11+)
-tuieval init my-evals && cd my-evals
-tuieval new-pack my-first-pack # a pack of example questions to edit
-tuieval add ~/models/Some-Model-Q4_K_M.gguf
-tuieval                        # open the TUI
+tuieval init my-evals          # guided: finds models already running (LM Studio, Ollama, vLLM…),
+                               # adds a starter pack and runs a 3-question check
+cd my-evals && tuieval         # open the TUI (? explains any screen)
 ```
+
+Whatever runs your models, the first steps are short:
+
+| You have | Do this |
+|---|---|
+| **LM Studio, Ollama or vLLM** | Start its server and load a model, then `tuieval init my-evals`: it finds the model. Later: `tuieval add` lists new ones. |
+| **GGUF files** | Install llama.cpp (`brew install llama.cpp`), then `tuieval add ~/models/Some-Model-Q4_K_M.gguf`. tuieval starts `llama-server` for it, sized to your machine. |
+| **An OpenRouter key** | `export OPENROUTER_API_KEY=…`, then `tuieval run --tier smoke --only openrouter:<model id>`. |
+
+Stuck? `tuieval doctor` checks servers, models, packs and keys, and says what to fix.
 
 `pip install tuieval` gets the latest release. Every change on `main` is also published as a dev build (`X.Y.0.devN`); get it with `pipx install --pip-args=--pre tuieval` or `pip install --pre tuieval`.
 
@@ -91,7 +100,8 @@ tuieval uses the current folder, or `--workspace DIR` / `TUIEVAL_HOME`. Keep it 
 ```bash
 tuieval add ~/models/Some-Model-Q4_K_M.gguf --tags 9b,dense,q4     # llama.cpp (llama-server on PATH)
 tuieval add ~/models/VL-Q4.gguf --mmproj ~/models/VL-mmproj.gguf   # vision
-tuieval add qwen3:8b --server local                                 # an already-running server (set its url)
+tuieval add                                                         # pick from the models on running servers
+tuieval add qwen3:8b                                                # finds the running server that has it
 tuieval run --tier smoke --only openrouter:qwen/qwen3-32b           # any OpenRouter model, no config needed
 ```
 
@@ -104,7 +114,7 @@ See **[docs/models.md](docs/models.md)** for servers, OpenRouter endpoint pinnin
 3. **Watch the run:** progress with ETA, live score, tok/s, TTFT and memory, the current test with reasoning and answer side by side, recent results with the grader's reason. `k` skips a model, `c` cancels (finished work is kept and resumes next time). Runs started while one is going are queued.
 4. **Press `r` for results:** production readiness, verdict history, scorecard, speed & tokens (★ marks models nothing beats on both accuracy and time), per question, is the difference real?, tests that separate models, by difficulty, failures, and test quality.
 
-Other keys: `t` tunes the ticked models' speed flags, `a` adds a model, `m` scans for GGUFs, `p` saves or loads a preset, `x` hides a model.
+Other keys: `t` tunes the ticked models' speed flags, `a` adds a model, `m` scans for GGUFs, `p` saves or loads a preset, `x` hides a model. `?` explains any screen.
 
 ## Command line
 
@@ -113,6 +123,7 @@ tuieval run                                   # Screen every model on every pack
 tuieval run --tier certify --only a,b --packs support-bot,coding
 tuieval run --packs coding --tests parse-dates,fix-bug   # only these tests (or --tests coding:parse-dates)
 tuieval run --dry-run                         # the plan and server commands
+tuieval doctor                                # check servers, models, packs and keys, and what to fix
 tuieval verdict                               # PASS / FAIL / INCONCLUSIVE per model and use case
 tuieval report                                # the same with evidence, as a markdown file
 tuieval history                               # every verdict change over time

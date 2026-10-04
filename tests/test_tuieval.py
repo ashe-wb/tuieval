@@ -4,6 +4,7 @@ Uses a temporary workspace and tests/mock_server.py on a free local port; no mod
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -17,8 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GRADERS = ("answer", "rag", "reply", "tool_call", "code")
 
 
-def tuieval(ws, *args, check=True):
-    env = dict(os.environ, TUIEVAL_HOME=ws, NO_COLOR="1")
+def tuieval(ws, *args, check=True, ports=""):
+    """Run the CLI. ports: where it may look for running servers (never the machine's real ones)."""
+    env = dict(os.environ, TUIEVAL_HOME=ws, NO_COLOR="1", TUIEVAL_DETECT_PORTS=str(ports))
     p = subprocess.run([sys.executable, "-m", "tuieval", *args], capture_output=True, text=True, env=env,
                        timeout=300)
     if check and p.returncode:
@@ -131,6 +133,9 @@ class Starters(unittest.TestCase):
             good.stop()
             bad.stop()
         out = tuieval(self.ws, "verdict").stdout
+        summary, out = out.split("Details", 1)
+        self.assertIn("good-mock: ready for", summary)
+        self.assertIn("bad-mock: not ready for", summary)
         good_part, bad_part = out.split("bad-mock")[0], out.split("bad-mock")[1]
         self.assertGreaterEqual(good_part.count("PASS"), len(GRADERS), out)
         self.assertNotIn("FAIL", good_part, out)
@@ -215,6 +220,27 @@ class Units(unittest.TestCase):
                                     "description": "normal entry #1, compact JSON, shuffled keys"}), "compact JSON, shuffled keys")
         self.assertEqual(test_note({"id": "stale-quote", "description": "stale quote", "category": "data"}), "data")
         self.assertEqual(test_note({"id": "todo", "description": "To-do list app", "category": ""}), "To-do list app")
+
+    def test_help_text_renders(self):
+        from rich.text import Text
+        from tuieval.tui import GLOSSARY, HELP
+        for name, text in {**HELP, "glossary": GLOSSARY}.items():
+            plain = Text.from_markup(text).plain    # raises on broken markup
+            self.assertNotIn("()", plain, name)     # e.g. a [gate] swallowed as a style tag
+        self.assertIn("[gate]", Text.from_markup(GLOSSARY).plain)
+
+    def test_plain_summary(self):
+        from tuieval.verdict import Verdict, plain_summary
+        ok = Verdict("PASS", ["fine"], {"certified": True})
+        crit = Verdict("FAIL", ["2 critical failures (e.g. x: y)"], {"critical_failures": 2})
+        screened = Verdict("INCONCLUSIVE", ["screened only (3/10 tests); promising, run Certify to decide"],
+                           {"certified": False, "tests_run": 3, "tests_total": 10, "repeats": 1, "want_repeat": 3})
+        table = {"m": {"Support": (ok, {"support": ok}), "Trading": (crit, {"trading": crit}),
+                       "Coding": (screened, {"coding": screened})}}
+        (label, sentence, todo), = plain_summary(table)
+        self.assertEqual(sentence, "ready for Support; not ready for Trading (2 critical failures); "
+                                   "not decided yet for Coding")
+        self.assertEqual(todo, [("Coding", "run Certify (the sample screened so far looks promising)", ["coding"])])
 
     def test_short_note(self):
         from tuieval import tui
@@ -330,6 +356,182 @@ class PickTests(unittest.TestCase):
         tuieval(self.ws, "run", "--preset", "quick")
         self.assertEqual(self.rows(), {"b": True, "d": True})
         self.assertEqual(len(self.rows("other")), 1)     # no pick: the Screen sample (screen = 1)
+
+
+class FirstRun(unittest.TestCase):
+    """A new user's first run fails fast with the fix, never hangs or shows a bare Python error."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        tuieval(self.ws, "new-pack", "first")
+        self.port = free_port()
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:   # never the machine's real LM Studio port
+            f.write(f'\n[servers.local]\nurl = "http://127.0.0.1:{free_port()}"\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_run_without_models_says_how_to_add_one(self):
+        p = tuieval(self.ws, "run", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("tuieval add", p.stderr)
+
+    def test_a_server_that_isnt_running_fails_fast(self):
+        tuieval(self.ws, "add", "some-model", "--server", "local")
+        t = time.time()
+        p = tuieval(self.ws, "run", "--tier", "smoke", check=False)
+        self.assertLess(time.time() - t, 30)
+        self.assertIn("nothing is answering at", p.stdout)
+        self.assertIn("tuieval doctor", p.stdout)
+
+    def test_a_missing_server_program_is_named(self):
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write('\n[servers.gone]\ncmd = ["no-such-server-xyz", "-m", "{model}", "--port", "{port}"]\nport = 18599\n'
+                    'model_is_path = true\n')
+        write(os.path.join(self.tmp.name, "m.gguf"), "x")
+        tuieval(self.ws, "add", os.path.join(self.tmp.name, "m.gguf"), "--server", "gone", "--label", "g")
+        p = tuieval(self.ws, "run", "--tier", "smoke", check=False)
+        self.assertIn("no-such-server-xyz isn't installed", p.stdout)
+        self.assertNotIn("FileNotFoundError", p.stdout)
+
+    def test_first_tui_screen_is_ready_to_start(self):
+        tuieval(self.ws, "add", "my-model", "--server", "local")
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval.tui import EvalsApp
+            from textual.widgets import SelectionList
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(140, 40)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    print(s.query_one("#suites", SelectionList).selected, sorted(s.selected_models), s.tier(),
+                          s.check_action("tune", ()))
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
+        self.assertEqual(out, "['first'] ['my-model'] smoke False")   # tuning shows once something has run
+
+    def test_doctor(self):
+        tuieval(self.ws, "add", "mock", "--server", "local", "--label", "wanted")
+        p = tuieval(self.ws, "doctor", check=False, ports=self.port)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("✗ local: nothing answers at", p.stdout)
+        mock = Mock(os.path.join(self.ws, "packs"), "oracle", port=self.port)   # a server on a detected port
+        try:
+            out = tuieval(self.ws, "doctor", check=False, ports=self.port).stdout
+            self.assertIn(f"run `tuieval add` to add the models of the one running at http://127.0.0.1:{self.port}", out)
+            text = read(os.path.join(self.ws, "models.toml"))
+            write(os.path.join(self.ws, "models.toml"),
+                  re.sub(r'(\[servers\.local\]\nurl = )"[^"]+"', rf'\1"http://127.0.0.1:{self.port}"', text))
+            p = tuieval(self.ws, "doctor", check=False, ports=self.port)
+        finally:
+            mock.stop()
+        self.assertIn("✓ local: http://127.0.0.1", p.stdout)
+        self.assertIn("✓ wanted (local): served", p.stdout)
+        self.assertIn("Ready", p.stdout)
+
+
+class Detect(unittest.TestCase):
+    """Models on servers already running are found: tuieval add, and the guided tuieval init."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.port = free_port()
+        empty = os.path.join(self.tmp.name, "nopacks")
+        os.makedirs(empty)
+        self.mock = Mock(empty, "fixed", port=self.port)    # lists one model, "mock"
+
+    def tearDown(self):
+        self.mock.stop()
+        self.tmp.cleanup()
+
+    def test_add_finds_the_server_that_has_the_model(self):
+        ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", ws)
+        out = tuieval(ws, "add", "mock", ports=self.port).stdout
+        self.assertIn(f"found mock on the server at http://127.0.0.1:{self.port}", out)
+        text = read(os.path.join(ws, "models.toml"))
+        self.assertIn(f'[servers.local-{self.port}]\nurl = "http://127.0.0.1:{self.port}"', text)
+        self.assertIn(f'server = "local-{self.port}"', text)
+        out = tuieval(ws, "add", ports=self.port).stdout                  # nothing new to add
+        self.assertIn("already added", out)
+
+    def test_add_without_a_model_lists_and_adds(self):
+        ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", ws)
+        out = tuieval(ws, "add", "--yes", ports=self.port).stdout
+        self.assertIn("1) mock", out)
+        self.assertIn("added mock", out)
+        out = tuieval(ws, "add", ports=free_port()).stdout                 # nothing running
+        self.assertIn("No model server is running", out)
+        self.assertIn("tuieval add ~/path/to/model.gguf", out)
+
+    def test_guided_init_reaches_a_first_result(self):
+        ws = os.path.join(self.tmp.name, "ws")
+        out = tuieval(self.tmp.name, "init", ws, "--yes", ports=self.port).stdout
+        self.assertIn("added mock", out)
+        self.assertIn("created packs/starter/", out)
+        self.assertTrue(os.path.isfile(os.path.join(ws, "results", "smoke", "mock", "starter.json")), out)
+        self.assertIn("Next:", out)
+
+
+class FirstPack(unittest.TestCase):
+    """Ways to a first pack without writing YAML by hand: a spreadsheet, a drafting prompt, prompt files."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_from_csv(self):
+        csv_path = os.path.join(self.tmp.name, "q.csv")
+        write(csv_path, 'Question,Answer,Difficulty,Wrong\n"What is 15% of 80?",12,easy,1200|5.33\n'
+                        'Capital of Peru?,Lima,easy,Cusco\nRevenue in Q3?,NOT_AVAILABLE,hard,\n')
+        out = tuieval(self.ws, "new-pack", "quiz", "--from", csv_path).stdout
+        self.assertIn("3 tests from", out)
+        self.assertIn(" ok", tuieval(self.ws, "selftest", "quiz").stdout)     # gate fitted to 3 tests
+        write(csv_path, "prompt_text,result\nhi,1\n")
+        p = tuieval(self.ws, "new-pack", "bad", "--from", csv_path, check=False)
+        self.assertIn("needs a question column", p.stderr)
+
+    def test_about_writes_a_drafting_prompt(self):
+        out = tuieval(self.ws, "new-pack", "support", "--grader", "reply", "--about", "refunds at a shoe store").stdout
+        self.assertIn("DRAFT-PROMPT.md", out)
+        text = read(os.path.join(self.ws, "packs", "support", "DRAFT-PROMPT.md"))
+        self.assertIn("Topic: refunds at a shoe store", text)
+        self.assertIn("must_include", text)                    # the grader's rules and example format
+        self.assertIn(" ok", tuieval(self.ws, "selftest", "support").stdout)   # the .md isn't read as tests
+
+    def test_input_file(self):
+        from tuieval import packs
+        d = os.path.join(self.ws, "packs", "files")
+        os.makedirs(os.path.join(d, "prompts"))
+        write(os.path.join(d, "prompts", "a.txt"), "What is 2 + 2?\n")
+        write(os.path.join(d, "pack.toml"), 'label = "Files"\n')
+        write(os.path.join(d, "tests.yaml"), "- {id: a, input_file: prompts/a.txt, expected: 4}\n")
+        p = packs.load_pack(d)
+        self.assertEqual(p.tests[0]["input"], "What is 2 + 2?")
+        before = p.fingerprint
+        write(os.path.join(d, "prompts", "a.txt"), "What is 3 + 3?\n")
+        self.assertNotEqual(packs.load_pack(d).fingerprint, before)    # editing the file reruns the pack
+        write(os.path.join(d, "tests.yaml"), "- {id: a, input_file: ../../models.toml, expected: 4}\n")
+        with self.assertRaises(packs.PackError):
+            packs.load_pack(d)
+
+    def test_selftest_says_how_to_fix(self):
+        tuieval(self.ws, "new-pack", "p")
+        path = os.path.join(self.ws, "packs", "p", "tests.yaml")
+        write(path, read(path).replace("expected: 12", "expected: 13", 1))
+        out = tuieval(self.ws, "selftest", "p", check=False).stdout
+        self.assertIn("reference answer fails", out)
+        self.assertIn("→ fix the expected answer", out)
 
 
 def fake_gguf(path, embedding=5120, size=0, kv_heads=4):

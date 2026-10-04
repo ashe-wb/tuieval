@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A new workspace's `models.toml` is 23 lines: the llama, local and OpenRouter servers and the defaults are built in (docs/models.md lists them in full; a server defined in `models.toml` replaces the built-in one with that name). Existing workspaces keep their settings; built-in servers they don't define become available, and adding a model still prefers the workspace's own servers.
+- Less to take in at first: until something has run, the setup screen leaves out context sizes, tuning state and the Tune key; Presets and Hide are off the footer (`?` lists every key); `tuieval help` groups commands into Start here, Day to day and Advanced.
+- Results lead with a plain summary per model ("ready for Support; not decided yet for Coding → run Certify to finish"), in the TUI, `tuieval verdict` (with the command to run next) and the report; the statistics follow.
+- First packs without hand-written YAML: `tuieval new-pack <name> --from questions.csv` (question and answer columns) and `--about "<topic>"` (writes a prompt for a strong model to draft the tests). A test can take its prompt from a file (`input_file`). `tuieval selftest` errors say how to fix them.
+- `tuieval init` in a terminal is a guided setup: it finds models on servers already running (LM Studio, Ollama, llama-server, vLLM), adds the ones you pick, creates a starter pack and runs a Smoke check (`--yes` for no questions).
+- `tuieval add` without a model lists the models on running servers to pick from; `tuieval add <id>` finds the server that has it and adds that server to models.toml. The TUI's add dialog lists them too, with rarely needed options folded away.
+- `?` on any TUI screen explains what it's for, its keys, and the words tuieval uses (tiers, verdicts, critical failures, gates).
+- The setup screen is ready on first open: the only pack and model are ticked, the tier is Smoke until something has run, and ticked boxes are clearly marked (unticked ones are empty).
+- First runs fail fast with the fix instead of hanging: a server that isn't running fails in seconds (it used to wait up to 20 minutes), a missing `llama-server` says how to install it, and `tuieval run` with no models says how to add one.
+- `tuieval doctor` checks servers, models, packs and API keys, and says what to fix.
 - Run only some tests of a pack: `e` in the TUI, or `tuieval run --tests`. Runs add up; `--force` reruns just the picked tests. Presets keep the pick.
 - `tuieval tune` scores options on projected full-length answers (`[tune] answer_tokens`, default 1024), so generation speed counts as in real runs.
 - `tuieval tune` reports an option's memory cost instead of rejecting it; it rejects only on critical memory pressure or over `[tune] swap_limit_mb`.

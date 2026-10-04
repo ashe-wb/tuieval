@@ -51,7 +51,8 @@ def check_gate(pack, default_repeat=DEFAULT_REPEAT):
     lo = verdict.wilson(trials, trials)[0]
     if lo < pack.gate.get("min_accuracy", 0.8):
         errors.append(f"gate unreachable: even {trials}/{trials} correct gives a 95% lower bound of {100 * lo:.1f}%, "
-                      f"under min_accuracy {pack.gate['min_accuracy']}; add tests or repeats")
+                      f"under min_accuracy {pack.gate['min_accuracy']} → add tests, raise [certify] repeat, or lower "
+                      f"min_accuracy to {int(lo * 100) / 100:.2f} in pack.toml")
     return errors
 
 
@@ -76,7 +77,7 @@ def check_pack(pack):
         seen[(" ".join(str(t["input"]).split()), img)].append(t["id"])
         tid = t["id"]
         if "TODO" in json.dumps({k: v for k, v in t.items() if k not in ("input", "reference", "wrong")}):
-            errors.append(f"{tid}: still has TODO placeholders")
+            errors.append(f"{tid}: still has TODO placeholders → fill them in")
             continue
         if t.get("grader") == "tool_call" and t.get("expect_tool"):
             exp = t["expect_tool"]
@@ -93,21 +94,24 @@ def check_pack(pack):
                 errors.append(f"{tid}: the expected tool call itself fails: {r['reason'][:100]}")
         ref = t.get("reference")
         if t.get("difficulty", "unrated") == "unrated":
-            warnings.append(f"{tid}: no difficulty label (easy, medium or hard)")
+            warnings.append(f"{tid}: no difficulty label → add difficulty: easy, medium or hard")
         if ref is None:
             if not (t.get("grader") == "tool_call" and t.get("expect_tool")):
-                warnings.append(f"{tid}: no reference answer")
+                warnings.append(f"{tid}: no reference answer → add reference: a correct answer, so selftest can "
+                                "check the test")
         else:
             r = graders.grade(t, ref, {"finish": "stop", "tool_calls": t.get("reference_tool_calls", [])})
             if not r["pass"] or r["score"] < 1.0:
-                errors.append(f"{tid}: reference answer fails: {r['reason'][:140]}")
+                errors.append(f"{tid}: reference answer fails: {r['reason'][:140]} → fix the expected answer, or the "
+                              "reference if that's what is wrong")
         for i, w in enumerate(t.get("wrong", [])):
             r = graders.grade(t, w, {"finish": "stop", "tool_calls": []})
             if r["pass"]:
-                errors.append(f"{tid}: wrong[{i}] passes the grader, so the test can't catch that mistake")
+                errors.append(f"{tid}: wrong[{i}] passes the grader, so the test can't catch that mistake → make the "
+                              "expected answer stricter, or drop it from wrong if it's actually right")
     for (_, _), ids in seen.items():
         if len(ids) > 1:
-            errors.append(f"tests {', '.join(ids)} send the same prompt")
+            errors.append(f"tests {', '.join(ids)} send the same prompt → reword one, or remove the duplicate")
     return errors, warnings
 
 
