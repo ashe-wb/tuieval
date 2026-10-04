@@ -30,7 +30,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, Checkbox, DataTable, Footer, Header, Input, Label, Log, OptionList,
+from textual.widgets import (Button, Checkbox, Collapsible, DataTable, Footer, Header, Input, Label, Log, OptionList,
                              ProgressBar, RadioButton, RadioSet, Select, SelectionList, Static, TabbedContent,
                              TabPane, TextArea)
 from textual.widgets.option_list import Option
@@ -1110,6 +1110,8 @@ class AddModelScreen(ModalScreen):
         servers = [("Auto (.gguf → llama)", "")] + [(n, n) for n in e.cfg["servers"]]
         with Vertical(id="dialog"):
             yield Label("[b]Add a model[/b]")
+            yield Static("[dim]Looking for servers running on this machine…[/dim]", id="detected-label")
+            yield OptionList(id="detected")
             yield Label("GGUF path or model id")
             yield Input(placeholder="~/models/Some-Tune-Q4_K_M.gguf  or  org/model-id  or  openrouter:qwen/qwen3-32b",
                         id="model")
@@ -1117,16 +1119,51 @@ class AddModelScreen(ModalScreen):
             yield Select(servers, id="server", allow_blank=False, value="")
             yield Label("Label (names the results; lowercase)")
             yield Input(placeholder="derived from the model", id="label")
-            yield Checkbox("Can read images (enables vision packs)", id="vision")
-            yield Checkbox("Thinking off (adds -nothink to the label)", id="nothink")
-            yield Label("Tags (comma-separated, e.g. 27b, moe, q4)")
-            yield Input(placeholder="optional", id="tags")
-            yield Label("mmproj file (llama vision models only)")
-            yield Input(placeholder="optional: ~/models/…-mmproj.gguf", id="mmproj")
+            with Collapsible(title="More options: vision, thinking, tags", collapsed=True, id="more"):
+                yield Checkbox("Can read images (enables vision packs)", id="vision")
+                yield Checkbox("Thinking off (adds -nothink to the label)", id="nothink")
+                yield Label("Tags (comma-separated, e.g. 27b, moe, q4)")
+                yield Input(placeholder="optional", id="tags")
+                yield Label("mmproj file (llama vision models only)")
+                yield Input(placeholder="optional: ~/models/…-mmproj.gguf", id="mmproj")
             yield Static(id="error")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Save", id="save", variant="success")
                 yield Button("Cancel", id="cancel")
+
+    def on_mount(self):
+        self.found = {}    # model id -> the running server listing it
+        self.query_one("#detected", OptionList).display = False
+        threading.Thread(target=self._detect, daemon=True).start()
+
+    def _detect(self):
+        e = self.app.engine
+        try:
+            found = engine.detect_servers(engine.detect_ports(e.cfg))
+        except Exception:   # detection is a convenience; the dialog works without it
+            found = []
+        self.app.call_from_thread(self._show_detected, found)
+
+    def _show_detected(self, found):
+        from . import onboard
+        items = onboard.unregistered(self.app.engine.cfg, found)
+        label, ol = self.query_one("#detected-label", Static), self.query_one("#detected", OptionList)
+        if not items:
+            label.update("[dim]No new models on running servers (LM Studio, Ollama, vLLM…). "
+                         "Type a GGUF path, a model id, or openrouter:<model id>.[/dim]" if not found else
+                         "[dim]Every model on the running servers is already added.[/dim]")
+            return
+        self.found = {mid: f for mid, f in items}
+        label.update("[b]Running now[/b] [dim](enter picks one)[/dim]")
+        ol.add_options([Option(f"{rich_escape(mid)}  [dim]{rich_escape(onboard.where(f))}[/dim]", id=mid)
+                        for mid, f in items])
+        ol.display = True
+
+    @on(OptionList.OptionSelected, "#detected")
+    def detected_picked(self, event):
+        self.query_one("#model", Input).value = event.option.id
+        self.query_one("#server", Select).value = ""
+        self.query_one("#label", Input).focus()
 
     @on(Input.Changed, "#model")
     def suggest_label(self, event):
@@ -1149,9 +1186,16 @@ class AddModelScreen(ModalScreen):
                 return
             self.dismiss(label)
             return
+        server = self.query_one("#server", Select).value or None
+        model = get("#model").strip()
+        if not server and not model.lower().endswith(".gguf") and not os.path.exists(os.path.expanduser(model)):
+            f = self.found.get(model) or next(iter(engine.find_running(e.cfg, model)), None) if model else None
+            if f:   # the running server that lists it (added to models.toml if it isn't there yet)
+                server = engine.ensure_server(e.models_path, f["url"], f["port"])
+                e.reload()
         try:
             label, warnings = engine.add_model(
-                self.app.engine.models_path, get("#model"), self.query_one("#server", Select).value or None,
+                self.app.engine.models_path, get("#model"), server,
                 get("#label") or None, self.query_one("#vision", Checkbox).value, get("#mmproj") or None,
                 False if self.query_one("#nothink", Checkbox).value else None,
                 [t.strip() for t in get("#tags").split(",")])

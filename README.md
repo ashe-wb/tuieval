@@ -17,11 +17,12 @@ Then you get an answer to the questions that matter:
 
 ```bash
 pipx install tuieval          # or: uv tool install tuieval, or pip install tuieval   (Python 3.11+)
-tuieval init my-evals && cd my-evals
-tuieval new-pack my-first-pack # a pack of example questions to edit
-tuieval add ~/models/Some-Model-Q4_K_M.gguf
-tuieval                        # open the TUI
+tuieval init my-evals          # guided: finds models already running (LM Studio, Ollama, vLLM…),
+                               # adds a starter pack and runs a 3-question check
+cd my-evals && tuieval         # open the TUI (? explains any screen)
 ```
+
+No server running? `tuieval add ~/models/Some-Model-Q4_K_M.gguf` (tuieval starts llama.cpp for it), or any OpenRouter model with `tuieval run --only openrouter:<model id>`. `tuieval doctor` says what's missing.
 
 `pip install tuieval` gets the latest release. Every change on `main` is also published as a dev build (`X.Y.0.devN`); get it with `pipx install --pip-args=--pre tuieval` or `pip install --pre tuieval`.
 
@@ -91,7 +92,8 @@ tuieval uses the current folder, or `--workspace DIR` / `TUIEVAL_HOME`. Keep it 
 ```bash
 tuieval add ~/models/Some-Model-Q4_K_M.gguf --tags 9b,dense,q4     # llama.cpp (llama-server on PATH)
 tuieval add ~/models/VL-Q4.gguf --mmproj ~/models/VL-mmproj.gguf   # vision
-tuieval add qwen3:8b --server local                                 # an already-running server (set its url)
+tuieval add                                                         # pick from the models on running servers
+tuieval add qwen3:8b                                                # finds the running server that has it
 tuieval run --tier smoke --only openrouter:qwen/qwen3-32b           # any OpenRouter model, no config needed
 ```
 

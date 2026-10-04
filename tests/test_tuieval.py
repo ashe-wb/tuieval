@@ -18,8 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GRADERS = ("answer", "rag", "reply", "tool_call", "code")
 
 
-def tuieval(ws, *args, check=True):
-    env = dict(os.environ, TUIEVAL_HOME=ws, NO_COLOR="1")
+def tuieval(ws, *args, check=True, ports=""):
+    """Run the CLI. ports: where it may look for running servers (never the machine's real ones)."""
+    env = dict(os.environ, TUIEVAL_HOME=ws, NO_COLOR="1", TUIEVAL_DETECT_PORTS=str(ports))
     p = subprocess.run([sys.executable, "-m", "tuieval", *args], capture_output=True, text=True, env=env,
                        timeout=300)
     if check and p.returncode:
@@ -350,9 +351,9 @@ class FirstRun(unittest.TestCase):
         tuieval(self.tmp.name, "init", self.ws)
         tuieval(self.ws, "new-pack", "first")
         self.port = free_port()
-        text = read(os.path.join(self.ws, "models.toml"))   # never look at the machine's real ports
-        write(os.path.join(self.ws, "models.toml"), text.replace("[defaults]\n", f"[defaults]\ndetect_ports = [{self.port}]\n", 1)
-              .replace('url = "http://127.0.0.1:1234"', f'url = "http://127.0.0.1:{free_port()}"'))
+        text = read(os.path.join(self.ws, "models.toml"))
+        write(os.path.join(self.ws, "models.toml"),
+              text.replace('url = "http://127.0.0.1:1234"', f'url = "http://127.0.0.1:{free_port()}"'))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -395,27 +396,71 @@ class FirstRun(unittest.TestCase):
             asyncio.run(go())
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                             env=dict(os.environ, TUIEVAL_HOME=self.ws), timeout=60).stdout.strip()
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
         self.assertEqual(out, "['first'] ['my-model'] smoke")
 
     def test_doctor(self):
         tuieval(self.ws, "add", "mock", "--server", "local", "--label", "wanted")
-        p = tuieval(self.ws, "doctor", check=False)
+        p = tuieval(self.ws, "doctor", check=False, ports=self.port)
         self.assertEqual(p.returncode, 1)
         self.assertIn("✗ local: nothing answers at", p.stdout)
         mock = Mock(os.path.join(self.ws, "packs"), "oracle", port=self.port)   # a server on a detected port
         try:
-            out = tuieval(self.ws, "doctor", check=False).stdout
+            out = tuieval(self.ws, "doctor", check=False, ports=self.port).stdout
             self.assertIn(f"point url at one that's running: http://127.0.0.1:{self.port}", out)
             text = read(os.path.join(self.ws, "models.toml"))
             write(os.path.join(self.ws, "models.toml"),
                   re.sub(r'(\[servers\.local\]\nurl = )"[^"]+"', rf'\1"http://127.0.0.1:{self.port}"', text))
-            p = tuieval(self.ws, "doctor", check=False)
+            p = tuieval(self.ws, "doctor", check=False, ports=self.port)
         finally:
             mock.stop()
         self.assertIn("✓ local: http://127.0.0.1", p.stdout)
         self.assertIn("✓ wanted (local): served", p.stdout)
         self.assertIn("Ready", p.stdout)
+
+
+class Detect(unittest.TestCase):
+    """Models on servers already running are found: tuieval add, and the guided tuieval init."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.port = free_port()
+        empty = os.path.join(self.tmp.name, "nopacks")
+        os.makedirs(empty)
+        self.mock = Mock(empty, "fixed", port=self.port)    # lists one model, "mock"
+
+    def tearDown(self):
+        self.mock.stop()
+        self.tmp.cleanup()
+
+    def test_add_finds_the_server_that_has_the_model(self):
+        ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", ws)
+        out = tuieval(ws, "add", "mock", ports=self.port).stdout
+        self.assertIn(f"found mock on the server at http://127.0.0.1:{self.port}", out)
+        text = read(os.path.join(ws, "models.toml"))
+        self.assertIn(f'[servers.local-{self.port}]\nurl = "http://127.0.0.1:{self.port}"', text)
+        self.assertIn(f'server = "local-{self.port}"', text)
+        out = tuieval(ws, "add", ports=self.port).stdout                  # nothing new to add
+        self.assertIn("already added", out)
+
+    def test_add_without_a_model_lists_and_adds(self):
+        ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", ws)
+        out = tuieval(ws, "add", "--yes", ports=self.port).stdout
+        self.assertIn("1) mock", out)
+        self.assertIn("added mock", out)
+        out = tuieval(ws, "add", ports=free_port()).stdout                 # nothing running
+        self.assertIn("No model server is running", out)
+        self.assertIn("tuieval add ~/path/to/model.gguf", out)
+
+    def test_guided_init_reaches_a_first_result(self):
+        ws = os.path.join(self.tmp.name, "ws")
+        out = tuieval(self.tmp.name, "init", ws, "--yes", ports=self.port).stdout
+        self.assertIn("added mock", out)
+        self.assertIn("created packs/starter/", out)
+        self.assertTrue(os.path.isfile(os.path.join(ws, "results", "smoke", "mock", "starter.json")), out)
+        self.assertIn("Next:", out)
 
 
 def fake_gguf(path, embedding=5120, size=0, kv_heads=4):

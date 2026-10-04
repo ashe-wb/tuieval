@@ -71,15 +71,21 @@ def new_pack(name, grader="answer", label=None, group=None, packs_dir=None):
 def cmd_init(argv):
     p = argparse.ArgumentParser(prog="tuieval init", description="Create a workspace: models.toml, packs/, graders/.")
     p.add_argument("folder", nargs="?", default=None, help="default: the workspace (current folder or --workspace)")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="guided setup without questions: add every running model, a starter pack, run Smoke")
     a = p.parse_args(argv)
-    folder = a.folder or workspace.root()
+    folder = os.path.abspath(os.path.expanduser(a.folder or workspace.root()))
     created = init(folder)
-    shown = os.path.relpath(folder) if os.path.abspath(folder).startswith(os.getcwd()) else folder
+    shown = os.path.relpath(folder) if folder.startswith(os.getcwd()) else folder
     if created:
         print(f"workspace ready in {shown}: created {', '.join(created)}")
     else:
         print(f"{shown} is already a workspace; nothing changed")
-    cd = "" if os.path.abspath(folder) == os.getcwd() else f"cd {shown}\n  "
+    if a.yes or (sys.stdin.isatty() and sys.stdout.isatty()):
+        from . import onboard
+        onboard.guided_init(folder, a.yes)
+        return
+    cd = "" if folder == os.getcwd() else f"cd {shown}\n  "
     print(f"next:\n  {cd}tuieval new-pack my-first-pack       # a pack of example questions to edit\n"
           "  tuieval add ~/models/Some-Model.gguf   # or press a in the TUI\n"
           "  tuieval                                # open the TUI")

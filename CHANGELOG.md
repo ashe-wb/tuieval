@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `tuieval init` in a terminal is a guided setup: it finds models on servers already running (LM Studio, Ollama, llama-server, vLLM), adds the ones you pick, creates a starter pack and runs a Smoke check (`--yes` for no questions).
+- `tuieval add` without a model lists the models on running servers to pick from; `tuieval add <id>` finds the server that has it and adds that server to models.toml. The TUI's add dialog lists them too, with rarely needed options folded away.
 - `?` on any TUI screen explains what it's for, its keys, and the words tuieval uses (tiers, verdicts, critical failures, gates).
 - The setup screen is ready on first open: the only pack and model are ticked, the tier is Smoke until something has run, and ticked boxes are clearly marked (unticked ones are empty).
 - First runs fail fast with the fix instead of hanging: a server that isn't running fails in seconds (it used to wait up to 20 minutes), a missing `llama-server` says how to install it, and `tuieval run` with no models says how to add one.

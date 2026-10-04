@@ -127,8 +127,9 @@ def models_file(path):
 
 
 def cmd_add(argv):
-    p = argparse.ArgumentParser(prog="tuieval add", description="Register a model in models.toml.")
-    p.add_argument("model", help="GGUF path (llama) or model id (other servers)")
+    p = argparse.ArgumentParser(prog="tuieval add", description="Register a model in models.toml. Without a "
+                                "model, lists the models on servers running on this machine to choose from.")
+    p.add_argument("model", nargs="?", help="GGUF path (llama) or model id (other servers)")
     p.add_argument("--server", help="server from models.toml; default: llama for .gguf, else the other one")
     p.add_argument("--label", help="name for results/<label>/; default: derived from the model")
     p.add_argument("--vision", action="store_true", help="model can read images (enables vision packs)")
@@ -136,9 +137,28 @@ def cmd_add(argv):
     p.add_argument("--no-think", action="store_true", help="run with thinking off (label gets -nothink)")
     p.add_argument("--tags", help="comma-separated, e.g. 27b,moe,q4")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
+    p.add_argument("--yes", "-y", action="store_true", help="without a model: add every one found, no questions")
     a = p.parse_args(argv)
+    path = models_file(a.models)
+    if not a.model:
+        from . import onboard
+        labels = onboard.add_detected(path, a.yes)
+        if labels:
+            print(f"next: tuieval run --tier smoke --only {','.join(labels)}   (or open the TUI: tuieval)")
+        return
+    server = a.server
+    if not server and not a.model.lower().endswith(".gguf") and not os.path.exists(os.path.expanduser(a.model)):
+        cfg = engine.load_config(path)
+        hits = engine.find_running(cfg, a.model)
+        if hits:   # the server that has it, added to models.toml if it isn't there yet
+            server = engine.ensure_server(path, hits[0]["url"], hits[0]["port"])
+            print(f"found {a.model} on the server at {hits[0]['url']} ([servers.{server}])")
+        elif engine.infer_server(cfg, a.model):
+            s = engine.infer_server(cfg, a.model)
+            print(f"note: no running server lists {a.model}; it's set to [servers.{s}] at "
+                  f"{cfg['servers'][s].get('url')}. Start that server before running (tuieval doctor checks).")
     try:
-        label, warnings = engine.add_model(models_file(a.models), a.model, a.server, a.label, a.vision, a.mmproj,
+        label, warnings = engine.add_model(path, a.model, server, a.label, a.vision, a.mmproj,
                                            False if a.no_think else None, (a.tags or "").split(","))
     except engine.ConfigError as e:
         sys.exit(str(e))
@@ -647,6 +667,7 @@ def main(argv=None):
                    help="smoke: 3 tests; screen (default): a spread sample; certify: everything, with repeats")
     p.add_argument("--smoke", action="store_const", const="smoke", dest="tier", help="same as --tier smoke")
     p.add_argument("--dry-run", action="store_true", help="print the plan and commands without running")
+    p.add_argument("--brief", action="store_true", help="end with one line per model instead of the scorecards")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
     p.add_argument("--packs-dir")
     p.add_argument("--results-dir")
@@ -731,7 +752,15 @@ def main(argv=None):
         secs = (j.finished - j.started) if j.started and j.finished else 0
         print(f"  {color}{j.status:<8}{RESET} {j.key:<{width}} {secs / 60:6.0f} min  {j.note}", flush=True)
     results = sorted({j.out_path for j in jobs if os.path.isfile(j.out_path)})
-    if results:
+    if results and args.brief:
+        print()
+        for label in dict.fromkeys(j.label for j in jobs):
+            mine = [j for j in jobs if j.label == label and j.done]
+            if mine:
+                right, asked = sum(j.passed for j in mine), sum(j.done for j in mine)
+                print(f"{label}: {right} of {asked} answers right"
+                      + (" (a setup check, not a verdict)" if args.tier == "smoke" else ""))
+    elif results:
         print()
         from . import compare
         compare.main([*results, "--speed"])

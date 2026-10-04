@@ -545,8 +545,55 @@ def probe_models(base_url, timeout=2.0, headers=None):
 DETECT_PORTS = {1234: "LM Studio", 11434: "Ollama", 8080: "llama-server", 8000: "vLLM"}
 
 
-def detect_ports(cfg):
-    return [int(p) for p in (cfg.get("defaults") or {}).get("detect_ports", list(DETECT_PORTS))]
+SERVER_NAMES = {1234: "lmstudio", 11434: "ollama", 8080: "llamacpp", 8000: "vllm"}   # for new [servers.*] entries
+
+
+def detect_ports(cfg=None):
+    """Ports to look for running servers on: $TUIEVAL_DETECT_PORTS (comma-separated, empty = none),
+    else models.toml [defaults] detect_ports, else the usual ones."""
+    env = os.environ.get("TUIEVAL_DETECT_PORTS")
+    if env is not None:
+        return [int(p) for p in env.replace(" ", "").split(",") if p]
+    return [int(p) for p in ((cfg or {}).get("defaults") or {}).get("detect_ports", list(DETECT_PORTS))]
+
+
+def _norm_url(url):
+    return (url or "").rstrip("/").removesuffix("/v1").replace("localhost", "127.0.0.1")
+
+
+def server_for_url(cfg, url):
+    """The models.toml server already pointing at url (a server tuieval doesn't start), or None."""
+    return next((n for n, s in cfg["servers"].items() if not s.get("cmd") and _norm_url(s.get("url")) == _norm_url(url)),
+                None)
+
+
+def ensure_server(models_path, url, port=None):
+    """The name of a models.toml server for an already-running server at url, adding a
+    [servers.<name>] block when there's none (named after the app that usually uses the port)."""
+    cfg = load_config(models_path)
+    name = server_for_url(cfg, url)
+    if name:
+        return name
+    base = SERVER_NAMES.get(port, f"local-{port}" if port else "local-server")
+    name = base if base not in cfg["servers"] else f"{base}-{port}"
+    with open(models_path) as f:
+        original = f.read()
+    with open(models_path, "w") as f:
+        f.write(original.rstrip("\n") + f'\n\n[servers.{name}]\nurl = "{_norm_url(url)}"\n')
+    try:
+        load_config(models_path)
+    except BaseException:
+        with open(models_path, "w") as f:
+            f.write(original)
+        raise
+    return name
+
+
+def find_running(cfg, model):
+    """Running servers (detect_servers) that list this model id, best match first."""
+    found = detect_servers(detect_ports(cfg))
+    exact = [f for f in found if model in f["models"]]
+    return exact or [f for f in found if serves(f["models"], model)]
 
 
 def detect_servers(ports, timeout=1.0):
