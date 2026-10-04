@@ -209,6 +209,13 @@ class Units(unittest.TestCase):
             write(log, "ok\nerror: runtime bootstrap failed [x]: context does not fit\n")
             self.assertEqual(engine.server_error(log, 0), "context does not fit")
 
+    def test_test_note_skips_what_the_id_says(self):
+        from tuieval.tui import test_note
+        self.assertEqual(test_note({"id": "normal-entry-1-v2", "category": "normal entry",
+                                    "description": "normal entry #1, compact JSON, shuffled keys"}), "compact JSON, shuffled keys")
+        self.assertEqual(test_note({"id": "stale-quote", "description": "stale quote", "category": "data"}), "data")
+        self.assertEqual(test_note({"id": "todo", "description": "To-do list app", "category": ""}), "To-do list app")
+
     def test_short_note(self):
         from tuieval import tui
         self.assertEqual(tui.short_note("server exited with code 1 while loading: bad file"), "didn't start: bad file")

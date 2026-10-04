@@ -21,6 +21,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import threading
 import time
 
@@ -1347,21 +1348,48 @@ class ConfirmScreen(ModalScreen):
         self.dismiss(event.button.id == "yes")
 
 
+def _words(text):
+    return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def test_note(t):
+    """What a test's row shows after its id: the description's words the id doesn't already say,
+    and the category unless the id or description already names it."""
+    desc, ids = str(t.get("description") or ""), [w for w in _words(t["id"]) if not re.fullmatch(r"v\d+", w)]
+    note = desc
+    tokens = list(re.finditer(r"[a-z0-9]+", desc.lower()))
+    if set(w.group() for w in tokens) <= set(_words(t["id"])):
+        note = ""                                   # the id in other words
+    elif len(ids) > 1:                              # "normal entry #1, pretty JSON" for normal-entry-1-v1
+        n = 0
+        while n < len(tokens) and n < len(ids) and tokens[n].group() == ids[n]:
+            n += 1
+        if n == len(ids):
+            note = desc[tokens[n - 1].end():].strip(" ,;:·-#")
+    cat = str(t.get("category") or "")
+    said = " ".join(_words(t["id"]) + _words(note))
+    if cat and " ".join(_words(cat)) not in said:
+        note = f"{note} · {cat}" if note else cat
+    return note
+
+
 class PickTestsScreen(ModalScreen):
     """Pick which tests of one pack run. Dismisses with the ticked ids in pack order (empty = the
     tier's usual tests), or None to keep the current pick."""
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel"),
+                Binding("space", "toggle", "Tick", show=False),
+                Binding("a", "toggle_shown", "Tick all shown")]
 
     def __init__(self, pack, chosen):
         super().__init__()
-        self.pack, self.chosen = pack, set(chosen)
+        self.pack, self.chosen, self.shown = pack, set(chosen), []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog", classes="wide"):
-            yield Label(f"[b]Pick tests: {rich_escape(self.pack.label)}[/b]  "
-                        "[dim]space ticks · type to filter · none ticked = the tier's usual tests[/dim]")
+            yield Label(f"[b]Pick tests: {rich_escape(self.pack.label)}[/b]\n[dim]space ticks · a ticks all shown · "
+                        "type to filter, enter to go to the list · none ticked = the tier's usual tests[/dim]")
             yield Input(placeholder="filter by id, description or category", id="pick-filter")
-            yield SelectionList(id="pick-tests")
+            yield OptionList(id="pick-tests")
             yield Static(id="pick-count")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Use these", id="pick-apply", variant="success")
@@ -1372,36 +1400,74 @@ class PickTestsScreen(ModalScreen):
         self.fill("")
         self.query_one("#pick-tests").focus()
 
+    def row(self, t):
+        on = t["id"] in self.chosen
+        mark = "[b green]\\[✓][/]" if on else "[dim]\\[ ][/dim]"
+        tid = f"[b]{rich_escape(t['id'])}[/b]" if on else rich_escape(t["id"])
+        note = test_note(t)
+        return f"{mark} {diff_badge(t.get('difficulty', 'unrated'))} {tid}" + (f"  [dim]{rich_escape(note)}[/dim]" if note else "")
+
     def fill(self, text):
-        sl = self.query_one("#pick-tests", SelectionList)
-        sl.clear_options()
+        ol = self.query_one("#pick-tests", OptionList)
+        ol.clear_options()
         text = text.lower()
-        for t in self.pack.tests:
-            if text in " ".join(str(t.get(k, "")) for k in ("id", "description", "category")).lower():
-                cat = f" · {t['category']}" if t.get("category") else ""
-                sl.add_option(Selection(f"{diff_badge(t.get('difficulty', 'unrated'))} {rich_escape(t['id'])}  "
-                                        f"[dim]{rich_escape(t['description'])}{rich_escape(cat)}[/dim]",
-                                        t["id"], t["id"] in self.chosen))
-        if sl.option_count:
-            sl.highlighted = 0  # otherwise the first space press does nothing
+        self.shown = [t for t in self.pack.tests
+                      if text in " ".join(str(t.get(k, "")) for k in ("id", "description", "category")).lower()]
+        ol.add_options([Option(self.row(t), id=t["id"]) for t in self.shown])
+        if self.shown:
+            ol.highlighted = 0
         self.count()
 
     def count(self):
+        shown = f"  [dim]({len(self.shown)} shown)[/dim]" if len(self.shown) != len(self.pack.tests) else ""
         self.query_one("#pick-count", Static).update(
-            f"[b]{len(self.chosen)}[/b] of {len(self.pack.tests)} ticked" if self.chosen
-            else "[dim]None ticked: the tier's usual tests run.[/dim]")
+            (f"[b]{len(self.chosen)}[/b] of {len(self.pack.tests)} ticked" if self.chosen
+             else "[dim]None ticked: the tier's usual tests run.[/dim]") + shown)
+
+    def redraw(self, indexes):
+        ol = self.query_one("#pick-tests", OptionList)
+        for i in indexes:
+            ol.replace_option_prompt_at_index(i, self.row(self.shown[i]))
+        self.count()
+
+    def action_toggle(self):
+        ol = self.query_one("#pick-tests", OptionList)
+        if not ol.has_focus or ol.highlighted is None:
+            return
+        self.chosen.symmetric_difference_update({self.shown[ol.highlighted]["id"]})
+        self.redraw([ol.highlighted])
+
+    @on(OptionList.OptionSelected, "#pick-tests")
+    def selected(self, event):   # enter on a row ticks it too
+        self.chosen.symmetric_difference_update({event.option.id})
+        self.redraw([event.option_index])
+
+    def action_toggle_shown(self):
+        """Tick every shown test, or untick them all when they're all ticked."""
+        if self.query_one("#pick-filter", Input).has_focus:
+            return
+        ids = {t["id"] for t in self.shown}
+        if ids <= self.chosen:
+            self.chosen -= ids
+        else:
+            self.chosen |= ids
+        self.redraw(range(len(self.shown)))
+
+    def check_action(self, action, parameters):
+        # while typing in the filter, space and a are text
+        if action in ("toggle", "toggle_shown") and self.query_one("#pick-filter", Input).has_focus:
+            return None
+        return True
 
     @on(Input.Changed, "#pick-filter")
     def filter_changed(self, event):
         self.fill(event.value)
 
-    @on(SelectionList.SelectionToggled, "#pick-tests")
-    def toggled(self, event):
-        self.chosen.symmetric_difference_update({event.selection.value})
-        self.count()
+    @on(Input.Submitted, "#pick-filter")
+    def to_list(self):
+        self.query_one("#pick-tests").focus()
 
     @on(Button.Pressed, "#pick-apply")
-    @on(Input.Submitted, "#pick-filter")
     def apply(self):
         self.dismiss([t["id"] for t in self.pack.tests if t["id"] in self.chosen])
 
