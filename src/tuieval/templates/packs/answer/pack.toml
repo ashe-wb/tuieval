@@ -6,6 +6,7 @@ grader = "answer"                # how answers are scored (answer, rag, reply, t
 system = "system.txt"            # the system prompt sent with every question
 order = 100                      # position in the list
 screen = 6                       # tests in a Screen run
+# max_tokens = 32768             # this pack's output budget, instead of models.toml [sampling] max_tokens
 
 [certify]
 repeat = 3                       # times each question is asked in a Certify run

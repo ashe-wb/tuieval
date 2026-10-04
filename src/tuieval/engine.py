@@ -646,8 +646,9 @@ def serves(ids, name):
 
 
 def pack_min_context(pack):
-    """Rough context a pack needs: its longest prompt (~4 chars/token) plus room to answer."""
-    return max(len(t["input"]) for t in pack.tests) // 4 + 4096
+    """Rough context a pack needs: its longest prompt (~4 chars/token) plus room to answer (the
+    pack's own max_tokens when it sets one)."""
+    return max(len(t["input"]) for t in pack.tests) // 4 + (pack.max_tokens or 4096)
 
 
 class Cancelled(Exception):
@@ -872,7 +873,8 @@ class Engine:
                 needs_tools = m.get("tools") is not False and any("tools" in p.needs for p in self.packs.values())
                 ep = choose_endpoint(eps, m["model"], effective_sampling(self.cfg, m), needs_tools, previous)
                 ep = ep and {"tag": ep["tag"], "provider": ep.get("provider_name"),
-                             "quantization": ep.get("quantization") or "unknown"}
+                             "quantization": ep.get("quantization") or "unknown",
+                             "max_output": ep.get("max_completion_tokens")}
             except (OSError, ValueError):
                 # offline: assume the endpoint earlier results used (the run itself will need the network)
                 ep = {"tag": previous, "provider": None, "quantization": previous_quant} if previous else None
@@ -1196,6 +1198,9 @@ class Engine:
                 elif (sv.ctx or 10**9) < pack_min_context(pack):
                     job.status, job.note = "skipped", \
                         f"needs ~{pack_min_context(pack) // 1024}k context, {sv.ctx // 1024}k fits on {sv.machine.id}"
+                elif pack.max_tokens and pack.max_tokens > ((self.endpoint(m) or {}).get("max_output") or 10**9):
+                    job.status, job.note = "skipped", \
+                        f"needs {pack.max_tokens:,} output tokens, endpoint allows {self.endpoint(m)['max_output']:,}"
                 elif missing:
                     job.status, job.note = "skipped", f"{', '.join(missing)} not installed in tuieval's Python"
                 elif status and status.startswith("outdated"):
@@ -2037,7 +2042,8 @@ class Engine:
     def _body(self, job, test, rep=0):
         s = job.sampling
         body = {"model": job.model["served_name"], "messages": self._messages(job, test),
-                "temperature": s["temperature"], "top_p": s["top_p"], "max_tokens": s["max_tokens"]}
+                "temperature": s["temperature"], "top_p": s["top_p"],
+                "max_tokens": job.pack.max_tokens or s["max_tokens"]}
         for k in ("top_k", "min_p", "presence_penalty", "repeat_penalty", "seed", "reasoning_effort"):
             if k in s:
                 body[k] = s[k]
@@ -2380,7 +2386,8 @@ class Engine:
             "model": {**{k: m.get(k) for k in ("label", "served_name", "server", "model", "tags", "vision", "mmproj")},
                       **{k: m[k] for k in ("tools", "max_context", "thinking") if k in m}},
             "pack": {"name": job.pack.name, "label": job.pack.label, "group": job.pack.group,
-                     "fingerprint": job.pack.fingerprint, "tests": len(job.pack.tests)},
+                     "fingerprint": job.pack.fingerprint, "tests": len(job.pack.tests),
+                     **({"max_tokens": job.pack.max_tokens} if job.pack.max_tokens else {})},
             "settings": job.sampling,
             "serving": job.settings.get("serving"),
             "settings_fingerprint": settings_fingerprint(job.settings),

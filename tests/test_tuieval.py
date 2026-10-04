@@ -49,10 +49,11 @@ def free_port():
 
 
 class Mock:
-    def __init__(self, packs, mode, port=None, delay=0.0):
+    def __init__(self, packs, mode, port=None, delay=0.0, *args):
         self.port = port or free_port()
         self.proc = subprocess.Popen([sys.executable, os.path.join(HERE, "mock_server.py"), "--port", str(self.port),
-                                      "--packs", packs, "--mode", mode, "--delay", str(delay)], stdout=subprocess.DEVNULL)
+                                      "--packs", packs, "--mode", mode, "--delay", str(delay), *args],
+                                     stdout=subprocess.DEVNULL)
         for _ in range(100):
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{self.port}/v1/models", timeout=1)
@@ -1813,6 +1814,109 @@ class FirstPack(unittest.TestCase):
         out = tuieval(self.ws, "selftest", "p", check=False).stdout
         self.assertIn("reference answer fails", out)
         self.assertIn("→ fix the expected answer", out)
+
+
+class PackMaxTokens(unittest.TestCase):
+    """A pack's own max_tokens: sent with its requests, part of its fingerprint only, and packs that
+    can't fit it (context, a hosted endpoint's output limit) are skipped."""
+    LONG = " ".join(["word"] * 40) + "\nANSWER: 7"     # ~42 tokens at the mock's one token per word
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        for name, extra in (("short", "max_tokens = 20\n"), ("roomy", "max_tokens = 100\n"), ("plain", "")):
+            self.pack(name, extra)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def pack(self, name, extra):
+        d = os.path.join(self.ws, "packs", name)
+        os.makedirs(d, exist_ok=True)
+        write(os.path.join(d, "pack.toml"), f'label = "{name}"\n{extra}[gate]\nmin_accuracy = 0.1\n')
+        write(os.path.join(d, "tests.yaml"), f"- id: q\n  input: {name} question\n  expected: 7\n"
+                                             f"  difficulty: easy\n  reference: {json.dumps(self.LONG)}\n")
+
+    def engine(self, code):
+        return subprocess.run([sys.executable, "-c", "from tuieval import engine, packs; e = engine.Engine(); " + code],
+                              capture_output=True, text=True, env=dict(os.environ, TUIEVAL_HOME=self.ws))
+
+    def result(self, label, pack):
+        path = os.path.join(self.ws, "results", label, f"{pack}.json")
+        return json.loads(read(path)) if os.path.isfile(path) else None
+
+    def test_load_and_fingerprint(self):
+        from tuieval import packs
+        d = os.path.join(self.ws, "packs", "plain")
+        before = packs.load_pack(d)
+        self.assertEqual(before.max_tokens, 0)
+        self.pack("plain", "")    # rewritten unchanged: same fingerprint as before the feature
+        self.assertEqual(packs.load_pack(d).fingerprint, before.fingerprint)
+        self.pack("plain", "max_tokens = 4096\n")
+        p = packs.load_pack(d)
+        self.assertEqual(p.max_tokens, 4096)
+        self.assertNotEqual(p.fingerprint, before.fingerprint)
+        self.pack("plain", "max_tokens = 8192\n")
+        self.assertNotEqual(packs.load_pack(d).fingerprint, p.fingerprint)
+        for bad in ("0", "-5", '"lots"', "1.5", "true"):
+            self.pack("plain", f"max_tokens = {bad}\n")
+            with self.assertRaises(packs.PackError, msg=bad):
+                packs.load_pack(d)
+        self.assertIn("max_tokens must be", tuieval(self.ws, "selftest", check=False).stdout)
+
+    def test_requests_use_the_packs_budget(self):
+        mock = Mock(os.path.join(self.ws, "packs"), "oracle")
+        try:
+            with open(os.path.join(self.ws, "models.toml"), "a") as f:
+                f.write(f'\n[servers.m]\nurl = "http://127.0.0.1:{mock.port}"\n')
+            tuieval(self.ws, "add", "mock", "--server", "m", "--label", "m")
+            tuieval(self.ws, "run", "--tier", "certify")
+            res = {p: self.result("m", p) for p in ("short", "roomy", "plain")}
+            self.assertEqual(res["short"]["results"][0]["finish"], "length")   # 42 tokens > 20
+            self.assertIn("TRUNCATED", res["short"]["results"][0]["reason"])
+            self.assertTrue(res["roomy"]["results"][0]["pass"])
+            self.assertTrue(res["plain"]["results"][0]["pass"])               # [sampling] max_tokens
+            self.assertEqual(res["short"]["pack"]["max_tokens"], 20)
+            self.assertNotIn("max_tokens", res["plain"]["pack"])
+            self.assertEqual(res["short"]["settings"], res["plain"]["settings"])   # model settings untouched
+
+            # changing one pack's budget makes only that pack's results outdated
+            self.pack("short", "max_tokens = 50\n")
+            out = self.engine("print(e.result_status('m', 'short')); print(e.result_status('m', 'plain'))").stdout
+            self.assertEqual(out.splitlines(), ["outdated: questions changed", "certified"])
+            tuieval(self.ws, "run", "--tier", "certify")
+            self.assertTrue(self.result("m", "short")["results"][0]["pass"])
+        finally:
+            mock.stop()
+
+    def test_skipped_when_the_context_is_too_small(self):
+        self.pack("short", "max_tokens = 16000\n")
+        mock = Mock(os.path.join(self.ws, "packs"), "oracle")
+        try:
+            with open(os.path.join(self.ws, "models.toml"), "a") as f:
+                f.write(f'\n[servers.m]\nurl = "http://127.0.0.1:{mock.port}"\n'
+                        '\n[[models]]\nlabel = "small"\nserver = "m"\nmodel = "mock"\nmax_context = 8192\n')
+            out = tuieval(self.ws, "run", "--tier", "certify").stdout
+        finally:
+            mock.stop()
+        self.assertIsNone(self.result("small", "short"))
+        self.assertIn("needs ~15k context", out)
+        self.assertIsNotNone(self.result("small", "plain"))
+
+    def test_skipped_when_the_endpoint_allows_fewer_output_tokens(self):
+        mock = Mock(os.path.join(self.ws, "packs"), "oracle", None, 0.0, "--max-output", "50")
+        try:
+            with open(os.path.join(self.ws, "models.toml"), "a") as f:
+                f.write(f'\n[servers.hosted]\nurl = "http://127.0.0.1:{mock.port}/v1"\npin_endpoint = true\n'
+                        '\n[[models]]\nlabel = "h"\nserver = "hosted"\nmodel = "mock"\n')
+            out = tuieval(self.ws, "run", "--tier", "certify").stdout
+        finally:
+            mock.stop()
+        self.assertIsNone(self.result("h", "roomy"))
+        self.assertIn("needs 100 output tokens, endpoint allows 50", out)
+        self.assertIsNotNone(self.result("h", "short"))
+        self.assertIsNotNone(self.result("h", "plain"))
 
 
 def fake_gguf(path, embedding=5120, size=0, kv_heads=4):

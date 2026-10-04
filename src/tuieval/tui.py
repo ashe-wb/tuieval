@@ -531,7 +531,8 @@ class AnswerScreen(ModalScreen):
         partial = "  [cyan](pack still running or unfinished: not in scores yet)[/cyan]" if entry.get("partial") else ""
         quant = f"  [magenta]{rec['quantization']}[/magenta]" if rec.get("quantization") else ""
         finish = rec.get("finish") or "?"
-        finish = f"[bold red]{finish} (cut off at max_tokens)[/]" if finish == "length" else finish
+        limit = f"this pack's max_tokens, {pack.max_tokens:,}" if pack and pack.max_tokens else "max_tokens"
+        finish = f"[bold red]{finish} (cut off at {limit})[/]" if finish == "length" else finish
         toks = rec.get("completion_tokens")
         split = ", ".join(f"{k} {rec[k + '_tokens']:,}" for k in ("reasoning", "answer")
                           if rec.get(k + "_tokens") is not None)
@@ -709,6 +710,8 @@ class SetupScreen(Screen):
             count = (f"[b cyan]{len(picked)}/{len(pk.tests)} tests picked[/]" if picked
                      else f"[dim]{len(pk.tests)} tests[/dim]")
             needs = f"  [magenta]{', '.join(pk.needs)}[/magenta]" if pk.needs else ""
+            if pk.max_tokens:
+                needs += f"  [dim]max_tokens {pk.max_tokens:,}[/dim]"
             mix = {lvl: sum(t.get("difficulty") == lvl for t in pk.tests) for lvl in ("easy", "medium", "hard")}
             mixed = " ".join(f"[{DIFF_STYLE[l]}]{n}{l[0].upper()}[/]" for l, n in mix.items() if n)
             packs.add_option(Selection(f"[dim]{pk.group} ·[/dim] {pk.label}  {count} {mixed}{needs}",

@@ -35,6 +35,7 @@ order = 30                       # position in the list
 tests = ["tests.yaml"]           # optional; default: tests.* first, then every other .yaml/.csv file
 screen = 20                      # tests in a Screen run (spread across categories, one variant per group)
 stop_early = true                # stop a run of this pack once its FAIL is certain (default false; see below)
+max_tokens = 32768               # optional: this pack's output budget, instead of models.toml [sampling] max_tokens
 
 [certify]
 repeat = 3                       # repeats in a Certify run (default: models.toml [defaults] repeat)
@@ -52,6 +53,8 @@ min_consistency = 0.95           # share of variant groups where every variant p
 `stop_early` suits packs a weak model fails quickly, like a regression set of routine cases: a run stops the pack at the first critical failure, or once the accuracy or truncation bar is out of reach even if every remaining answer passes, saves what it has (the verdict is FAIL) and moves on. It asks first the questions models have failed most often. `tuieval run --stop-early` (or **Stop a pack once it fails** in Setup) does this for every pack in the run. A later Certify fills in the rest.
 
 `needs` entries other than `vision`, `tools` and `long_context` name Python modules the pack's grading needs (for example `pandas`, when your hidden tests use it). The pack is skipped, with a note, where that module isn't installed in tuieval's Python environment.
+
+`max_tokens` suits packs whose answers are much longer (or shorter) than the rest. Thinking counts toward it. It's part of the pack's fingerprint, so changing it reruns only this pack. A model is skipped for the pack, with a note, when its context can't hold the longest prompt plus `max_tokens`, or when its pinned provider endpoint allows fewer output tokens.
 
 ## Tests (YAML)
 
