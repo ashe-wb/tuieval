@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Run only some tests of a pack: `e` in the TUI, or `tuieval run --tests`. Runs add up; `--force` reruns just the picked tests. Presets keep the pick.
 - `tuieval tune` scores options on projected full-length answers (`[tune] answer_tokens`, default 1024), so generation speed counts as in real runs.
 - `tuieval tune` reports an option's memory cost instead of rejecting it; it rejects only on critical memory pressure or over `[tune] swap_limit_mb`.
 - Warm-start tuning recognises fine-tunes whose GGUF describes the MTP draft layer differently (e.g. listing KV heads per layer) as the same model shape, so they start from an already-tuned sibling instead of tuning in full.

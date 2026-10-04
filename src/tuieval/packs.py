@@ -55,6 +55,15 @@ class Pack:
         """Python modules the pack needs (the `needs` entries that aren't capabilities)."""
         return [n for n in self.needs if n not in CAPABILITIES]
 
+    def pick(self, ids):
+        """The tests with these ids, in the pack's order. Unknown ids raise PackError."""
+        known = {t["id"] for t in self.tests}
+        bad = [i for i in ids if i not in known]
+        if bad:
+            raise PackError(f"pack {self.name!r} has no test {', '.join(map(repr, bad))}; "
+                            f"its tests are: {', '.join(t['id'] for t in self.tests)}")
+        return [t for t in self.tests if t["id"] in set(ids)]
+
     def select(self, tier):
         """The tests a tier runs: smoke = first 3; screen = `screen` tests spread evenly over
         categories (one variant per group); certify = all."""

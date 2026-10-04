@@ -38,6 +38,7 @@ import mimetypes
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import statistics
@@ -358,6 +359,7 @@ def load_presets(path):
         tags = ["moe"]            # models with any of these tags …
         models = ["foo", "bar"]   # … and/or these labels (omit both for every model)
         repeat = 3
+        tests = { coding = ["parse-dates"] }   # optional: only these tests of a pack
     """
     if not os.path.isfile(path):
         return {}
@@ -366,19 +368,24 @@ def load_presets(path):
 
 
 def resolve_preset(cfg, preset, pack_names):
-    """(labels, packs, repeat) for a preset; unknown names are dropped."""
+    """(labels, packs, repeat, tests) for a preset; unknown names are dropped. tests: {pack: [test
+    ids]} for packs where only some tests run."""
     labels = [m["label"] for m in cfg["models"]]
     if preset.get("models") or preset.get("tags"):
         want, tags = set(preset.get("models", [])), set(preset.get("tags", []))
         labels = [m["label"] for m in cfg["models"] if m["label"] in want or tags & set(m["tags"])]
     packs = [p for p in preset.get("packs", pack_names) if p in pack_names]
-    return labels, packs, preset.get("repeat")
+    tests = {p: list(ids) for p, ids in (preset.get("tests") or {}).items() if p in packs and ids}
+    return labels, packs, preset.get("repeat"), tests
 
 
-def save_preset(path, name, labels, packs, repeat):
+def save_preset(path, name, labels, packs, repeat, tests=None):
     """Add or replace one preset, keeping the rest of the file as written."""
+    tests = {p: ids for p, ids in (tests or {}).items() if p in packs and ids}
     block = (f"[{name}]\nmodels = [{', '.join(json.dumps(l) for l in labels)}]\n"
-             f"packs = [{', '.join(json.dumps(p) for p in packs)}]\n" + (f"repeat = {int(repeat)}\n" if repeat else ""))
+             f"packs = [{', '.join(json.dumps(p) for p in packs)}]\n" + (f"repeat = {int(repeat)}\n" if repeat else "")
+             + ("tests = { " + ", ".join(f"{json.dumps(p)} = [{', '.join(json.dumps(i) for i in ids)}]"
+                                         for p, ids in tests.items()) + " }\n" if tests else ""))
     text = open(path).read() if os.path.isfile(path) else \
         "# Saved selections for the TUI (p) and tuieval run --preset <name>. See engine.load_presets.\n"
     pattern = re.compile(rf"^\[{re.escape(name)}\]\n(?:(?!\[).*\n?)*", re.MULTILINE)
@@ -394,12 +401,13 @@ class Job:
     model: dict
     pack: packs_mod.Pack
     repeat: int
-    tests: list             # the tests this tier runs
+    tests: list             # the tests this tier runs (or the ones picked)
     out_path: str
     sampling: dict
     tier: str = "certify"
     settings: dict = dataclasses.field(default_factory=dict)  # sampling + serving identity (fingerprinted)
     merge: bool = True      # keep matching earlier results and only run what's missing
+    redo: bool = False      # rerun the picked tests, keeping the pack's other answers
     status: str = "waiting"  # waiting, loading, running, done, failed, skipped
     note: str = ""
     discards: list = dataclasses.field(default_factory=list)  # [(what, answers, why)] set aside on start
@@ -868,7 +876,7 @@ class Engine:
         if job.merge:
             data = self._result(job.out_path)
             if data and data["pack"]["fingerprint"] == job.pack.fingerprint and settings_match(data, job.settings):
-                kept = data["results"]
+                kept = self._kept(job, data["results"])
                 if kept:
                     earlier = self._file_sittings(data["run"])
         head, new = self._partial_lines(job.out_path + ".partial.jsonl")
@@ -876,6 +884,14 @@ class Engine:
             return kept, [], earlier
         saved = self._saved_sittings(job)
         return kept, new, earlier + saved + self._rebuild_sittings(new, saved + earlier)
+
+    @staticmethod
+    def _kept(job, rows):
+        """A finished file's rows that stay: all of them, less the picked tests' when redoing them."""
+        if not job.redo:
+            return rows
+        redo = {t["id"] for t in job.tests}
+        return [r for r in rows if r["test"] not in redo]
 
     def _fill_progress(self, job):
         """Set a job's done/passed/failed and earlier sittings from what's stored."""
@@ -927,11 +943,13 @@ class Engine:
         return not current and header_matches(head, pack.fingerprint, settings)
 
     # ---- planning
-    def plan(self, labels, pack_names, repeat=None, tier="screen", force=False):
+    def plan(self, labels, pack_names, repeat=None, tier="screen", force=False, tests=None):
         """Jobs for models x packs. tier: smoke (3 tests), screen (a spread sample), certify (all
         tests). repeat: times each question is asked; None = the tier default (1 for smoke and
-        screen, the pack's certification repeats for certify). Earlier matching results are kept
-        and only missing answers are run, unless force."""
+        screen, the pack's certification repeats for certify). tests: {pack: [test ids]} runs just
+        those tests of a pack instead of the tier's sample (unknown ids raise PackError). Earlier
+        matching results are kept and only missing answers are run, unless force; force with
+        picked tests reruns those and keeps the pack's other answers."""
         if tier not in TIERS:
             raise ValueError(f"tier must be one of {TIERS}")
         jobs = []
@@ -940,8 +958,10 @@ class Engine:
             for name in pack_names:
                 pack = self.packs[name]
                 reps = repeat or self.default_repeat(pack, tier)
-                job = Job(m, pack, reps, pack.select(tier), self.result_path(label, name, tier),
-                          effective_sampling(self.cfg, m), tier=tier, merge=not force, settings=self.settings(m))
+                picked = (tests or {}).get(name)
+                job = Job(m, pack, reps, pack.pick(picked) if picked else pack.select(tier),
+                          self.result_path(label, name, tier), effective_sampling(self.cfg, m), tier=tier,
+                          merge=not force or bool(picked), redo=force and bool(picked), settings=self.settings(m))
                 sv = self.serving(m)
                 status = self.result_status(label, name, tier)
                 job.discards = self._discards(job)
@@ -958,7 +978,7 @@ class Engine:
                 elif missing:
                     job.status, job.note = "skipped", f"{', '.join(missing)} not installed in tuieval's Python"
                 elif status and status.startswith("outdated"):
-                    job.merge, job.note = False, status.split(": ", 1)[-1] + ", rerunning"
+                    job.merge, job.redo, job.note = False, False, status.split(": ", 1)[-1] + ", rerunning"
                     if not force:   # a rerun under the new settings already under way resumes
                         self._fill_progress(job)
                         if job.done:
@@ -1656,7 +1676,7 @@ class Engine:
             data = self._result(job.out_path)
             if data and data["pack"]["fingerprint"] == job.pack.fingerprint and \
                     settings_match(data, job.settings):
-                kept = data["results"]
+                kept = self._kept(job, data["results"])
                 if kept:
                     job.earlier = self._file_sittings(data["run"])
         new = []
@@ -1789,18 +1809,19 @@ class Engine:
         job.note = f"{job.passed}/{job.done} passed"
         self.emit("job_done", job=job)
 
-    def _archive(self, job):
-        """Keep a result file that is about to be replaced (rerun or outdated) in history/."""
+    def _archive(self, job, keep=False):
+        """Keep a result file that is about to be replaced (rerun or outdated) in history/; keep:
+        copy it (some of its answers stay in the new file)."""
         if job.tier == "smoke" or not os.path.isfile(job.out_path):
             return
         hist = os.path.join(os.path.dirname(job.out_path), "history")
         os.makedirs(hist, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(job.out_path)))
-        os.replace(job.out_path, os.path.join(hist, f"{job.pack.name}-{stamp}.json"))
+        (shutil.copy2 if keep else os.replace)(job.out_path, os.path.join(hist, f"{job.pack.name}-{stamp}.json"))
 
     def _write_result(self, job, records, run_info):
-        if not job.merge:
-            self._archive(job)
+        if not job.merge or job.redo:
+            self._archive(job, keep=job.redo)
         m = job.model
         data = {
             "format": RESULT_FORMAT,

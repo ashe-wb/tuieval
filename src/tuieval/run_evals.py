@@ -10,6 +10,7 @@
     tuieval capture logs/live/<file> --pack X     # turn a real failure into a new test
     tuieval run --only my-model --packs my-pack,other-pack
     tuieval run --tags moe --packs my-pack        # models tagged "moe"
+    tuieval run --packs my-pack --tests a,b       # only these tests of a pack (or --tests my-pack:a,other:b)
     tuieval run --preset nightly                  # a selection saved in the TUI (presets.toml)
     tuieval run --tier smoke --only my-model      # 3 tests per pack, 1 repeat: check paths and flags
     tuieval run --tier smoke --only openrouter:qwen/qwen3-32b   # any OpenRouter model, no models.toml edit
@@ -36,6 +37,7 @@ import sys
 import threading
 
 from . import engine
+from . import packs as packs_mod
 from . import workspace
 
 BOLD, DIM, RED, GREEN, CYAN, YELLOW, RESET = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[36m", "\033[33m", "\033[0m"
@@ -605,6 +607,27 @@ COMMANDS = {"add": cmd_add, "list": cmd_list, "scan": cmd_scan, "regrade": cmd_r
             "export": cmd_export, "remove": cmd_remove}
 
 
+def parse_tests(text, pack_names, known):
+    """({pack: [test ids]}, packs to run) from --tests. A bare id needs exactly one pack chosen;
+    pack:id names its pack, and without --packs the packs named are the ones that run."""
+    tests = {}
+    for item in filter(None, (x.strip() for x in text.split(","))):
+        pack, _, tid = item.rpartition(":")
+        if not pack:
+            if not pack_names or len(pack_names) != 1:
+                sys.exit(f"--tests {item}: say which pack, as pack:{item} (or choose one pack with --packs)")
+            pack = pack_names[0]
+        if pack not in known:
+            sys.exit(f"--tests {item}: unknown pack {pack!r}; packs are {', '.join(known)}")
+        tests.setdefault(pack, []).append(tid)
+    if pack_names is None:
+        pack_names = list(tests)
+    missing = [p for p in tests if p not in pack_names]
+    if missing:
+        sys.exit(f"--tests names pack(s) {missing} that aren't in --packs")
+    return tests, pack_names
+
+
 def main(argv=None):
     """tuieval run [options] (argv without the "run")."""
     argv = sys.argv[1:] if argv is None else argv
@@ -615,7 +638,9 @@ def main(argv=None):
     p.add_argument("--tags", help="comma-separated tags; models having any of them")
     p.add_argument("--preset", help="a saved selection from presets.toml")
     p.add_argument("--packs", help="comma-separated packs (default: all)")
-    p.add_argument("--force", action="store_true", help="rerun packs that already have current results")
+    p.add_argument("--tests", help="comma-separated test ids to run instead of the tier's sample: id with one "
+                                   "pack in --packs, else pack:id (and --packs defaults to those packs)")
+    p.add_argument("--force", action="store_true", help="rerun packs (or the --tests) that already have current results")
     p.add_argument("--repeat", type=int, help="times each question is asked, any tier (default: 1 for smoke and "
                                                   "screen, the pack's certification count for certify)")
     p.add_argument("--tier", choices=engine.TIERS, default="screen",
@@ -642,7 +667,7 @@ def main(argv=None):
         labels = [l for l in labels if want & set(e.model(l)["tags"])]
         if not labels:
             sys.exit(f"no models tagged {sorted(want)}")
-    pack_names = list(e.packs)
+    pack_names, tests = list(e.packs), {}
     if not pack_names:
         sys.exit("no packs in this workspace yet: tuieval new-pack <name> creates one (see docs/writing-packs.md)")
     if args.preset:
@@ -650,14 +675,19 @@ def main(argv=None):
                                                    "presets.toml"))
         if args.preset not in presets:
             sys.exit(f"unknown preset {args.preset!r}; presets: {', '.join(presets) or 'none (save one in the TUI with p)'}")
-        labels, pack_names, preset_repeat = engine.resolve_preset(e.cfg, presets[args.preset], list(e.packs))
+        labels, pack_names, preset_repeat, tests = engine.resolve_preset(e.cfg, presets[args.preset], list(e.packs))
         args.repeat = args.repeat or preset_repeat
     if args.packs:
         pack_names = [x.strip() for x in args.packs.split(",")]
         bad = [x for x in pack_names if x not in e.packs]
         if bad:
             sys.exit(f"unknown pack(s) {bad}; packs are {', '.join(e.packs)}")
-    jobs = e.plan(labels, pack_names, args.repeat, args.tier, args.force)
+    if args.tests:
+        tests, pack_names = parse_tests(args.tests, pack_names if (args.packs or args.preset) else None, e.packs)
+    try:
+        jobs = e.plan(labels, pack_names, args.repeat, args.tier, args.force, tests)
+    except packs_mod.PackError as err:
+        sys.exit(str(err))
 
     if args.dry_run:
         seen = set()

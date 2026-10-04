@@ -43,8 +43,8 @@ def free_port():
 
 
 class Mock:
-    def __init__(self, packs, mode):
-        self.port = free_port()
+    def __init__(self, packs, mode, port=None):
+        self.port = port or free_port()
         self.proc = subprocess.Popen([sys.executable, os.path.join(HERE, "mock_server.py"), "--port", str(self.port),
                                       "--packs", packs, "--mode", mode], stdout=subprocess.DEVNULL)
         for _ in range(100):
@@ -223,6 +223,106 @@ class Units(unittest.TestCase):
             write(os.path.join(d, "tests.yaml"), "- {input: hi, expected: 1}\n")
             p = packs.load_pack(d)
             self.assertEqual(p.modules, ["some_missing_module"])
+
+
+class PickTests(unittest.TestCase):
+    """Running only some tests of a pack: partial runs add up, --force redoes just the picked ones."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        for name in ("apps", "other"):
+            d = os.path.join(self.ws, "packs", name)
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), f'label = "{name}"\nscreen = 1\n[certify]\nrepeat = 1\n'
+                                                '[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"), "".join(
+                f"- {{id: {t}, input: {name} question {t}, expected: 1, reference: 'ANSWER: 1', wrong: ['ANSWER: 2'], "
+                "difficulty: easy}\n" for t in ("a", "b", "c", "d")))
+        self.mock, self.port = None, free_port()
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f'\n[servers.m]\nurl = "http://127.0.0.1:{self.port}"\n')
+
+    def tearDown(self):
+        if self.mock:
+            self.mock.stop()
+        self.tmp.cleanup()
+
+    def server(self, mode):
+        """(Re)start the mock on the same port: oracle answers right, wrong answers wrong."""
+        first = self.mock is None
+        if self.mock:
+            self.mock.stop()
+        self.mock = Mock(os.path.join(self.ws, "packs"), mode, port=self.port)
+        if first:
+            tuieval(self.ws, "add", "mock", "--server", "m", "--label", "m")
+
+    def rows(self, pack="apps"):
+        path = os.path.join(self.ws, "results", "m", f"{pack}.json")
+        if not os.path.isfile(path):
+            return {}
+        return {r["test"]: r["pass"] for r in json.loads(read(path))["results"]}
+
+    def status(self, pack="apps"):
+        code = f"from tuieval import engine; print(engine.Engine().result_status('m', '{pack}'))"
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                              env=dict(os.environ, TUIEVAL_HOME=self.ws)).stdout.strip()
+
+    def test_pick(self):
+        from tuieval import packs
+        p = packs.load_pack(os.path.join(self.ws, "packs", "apps"))
+        self.assertEqual([t["id"] for t in p.pick(["c", "a"])], ["a", "c"])   # the pack's order
+        with self.assertRaises(packs.PackError) as cm:
+            p.pick(["a", "zz"])
+        self.assertIn("'zz'", str(cm.exception))
+        self.assertIn("a, b, c, d", str(cm.exception))
+
+    def test_partial_runs_add_up_and_force_redoes_only_the_picked(self):
+        self.server("oracle")
+        tuieval(self.ws, "run", "--packs", "apps", "--tests", "b")
+        self.assertEqual(self.rows(), {"b": True})
+        self.assertEqual(self.rows("other"), {})
+        tuieval(self.ws, "run", "--tests", "apps:a,apps:c", "--tier", "certify")   # --packs from --tests
+        self.assertEqual(self.rows(), {"a": True, "b": True, "c": True})
+        self.assertEqual(self.status(), "screened")
+        out = tuieval(self.ws, "run", "--tests", "apps:b").stdout
+        self.assertIn("done earlier", out)                                       # nothing missing: not re-asked
+        tuieval(self.ws, "run", "--tests", "apps:d", "--tier", "certify")
+        self.assertEqual(self.status(), "certified")
+
+        self.server("wrong")
+        tuieval(self.ws, "run", "--tests", "apps:b", "--force")
+        self.assertEqual(self.rows(), {"a": True, "b": False, "c": True, "d": True})
+        hist = os.listdir(os.path.join(self.ws, "results", "m", "history"))
+        self.assertTrue(any(f.startswith("apps-") for f in hist), hist)
+        self.assertEqual(self.status(), "certified")
+
+    def test_cli_errors(self):
+        self.server("oracle")
+        for args, msg in ((["--tests", "a"], "say which pack"),
+                          (["--packs", "apps,other", "--tests", "a"], "say which pack"),
+                          (["--tests", "nope:a"], "unknown pack 'nope'"),
+                          (["--packs", "apps", "--tests", "zz"], "has no test 'zz'"),
+                          (["--packs", "other", "--tests", "apps:a"], "aren't in --packs")):
+            p = tuieval(self.ws, "run", *args, check=False)
+            self.assertNotEqual(p.returncode, 0, args)
+            self.assertIn(msg, p.stderr, args)
+        self.assertEqual(self.rows(), {})
+
+    def test_presets_keep_picked_tests(self):
+        from tuieval import engine
+        path = os.path.join(self.ws, "presets.toml")
+        engine.save_preset(path, "quick", ["m"], ["apps", "other"], None, {"apps": ["b", "d"], "gone": ["x"]})
+        presets = engine.load_presets(path)
+        self.assertEqual(presets["quick"]["tests"], {"apps": ["b", "d"]})
+        cfg = {"models": [{"label": "m", "tags": []}]}
+        self.assertEqual(engine.resolve_preset(cfg, presets["quick"], ["apps", "other"]),
+                         (["m"], ["apps", "other"], None, {"apps": ["b", "d"]}))
+        self.server("oracle")
+        tuieval(self.ws, "run", "--preset", "quick")
+        self.assertEqual(self.rows(), {"b": True, "d": True})
+        self.assertEqual(len(self.rows("other")), 1)     # no pick: the Screen sample (screen = 1)
 
 
 def fake_gguf(path, embedding=5120, size=0, kv_heads=4):
