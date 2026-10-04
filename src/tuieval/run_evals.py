@@ -670,6 +670,10 @@ def main(argv=None):
     pack_names, tests = list(e.packs), {}
     if not pack_names:
         sys.exit("no packs in this workspace yet: tuieval new-pack <name> creates one (see docs/writing-packs.md)")
+    if not labels and not args.preset:
+        sys.exit("no models to run yet: tuieval add <GGUF path or model id>, or name a hosted one with "
+                 "--only openrouter:<model id>" if not models else
+                 "no local models; hosted ones (they cost money) run only when named: --only <label>")
     if args.preset:
         presets = engine.load_presets(os.path.join(os.path.dirname(os.path.abspath(models_file(args.models))),
                                                    "presets.toml"))

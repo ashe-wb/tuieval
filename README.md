@@ -113,6 +113,7 @@ tuieval run                                   # Screen every model on every pack
 tuieval run --tier certify --only a,b --packs support-bot,coding
 tuieval run --packs coding --tests parse-dates,fix-bug   # only these tests (or --tests coding:parse-dates)
 tuieval run --dry-run                         # the plan and server commands
+tuieval doctor                                # check servers, models, packs and keys, and what to fix
 tuieval verdict                               # PASS / FAIL / INCONCLUSIVE per model and use case
 tuieval report                                # the same with evidence, as a markdown file
 tuieval history                               # every verdict change over time

@@ -4,6 +4,7 @@ Uses a temporary workspace and tests/mock_server.py on a free local port; no mod
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -330,6 +331,65 @@ class PickTests(unittest.TestCase):
         tuieval(self.ws, "run", "--preset", "quick")
         self.assertEqual(self.rows(), {"b": True, "d": True})
         self.assertEqual(len(self.rows("other")), 1)     # no pick: the Screen sample (screen = 1)
+
+
+class FirstRun(unittest.TestCase):
+    """A new user's first run fails fast with the fix, never hangs or shows a bare Python error."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        tuieval(self.ws, "new-pack", "first")
+        self.port = free_port()
+        text = read(os.path.join(self.ws, "models.toml"))   # never look at the machine's real ports
+        write(os.path.join(self.ws, "models.toml"), text.replace("[defaults]\n", f"[defaults]\ndetect_ports = [{self.port}]\n", 1)
+              .replace('url = "http://127.0.0.1:1234"', f'url = "http://127.0.0.1:{free_port()}"'))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_run_without_models_says_how_to_add_one(self):
+        p = tuieval(self.ws, "run", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("tuieval add", p.stderr)
+
+    def test_a_server_that_isnt_running_fails_fast(self):
+        tuieval(self.ws, "add", "some-model", "--server", "local")
+        t = time.time()
+        p = tuieval(self.ws, "run", "--tier", "smoke", check=False)
+        self.assertLess(time.time() - t, 30)
+        self.assertIn("nothing is answering at", p.stdout)
+        self.assertIn("tuieval doctor", p.stdout)
+
+    def test_a_missing_server_program_is_named(self):
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write('\n[servers.gone]\ncmd = ["no-such-server-xyz", "-m", "{model}", "--port", "{port}"]\nport = 18599\n'
+                    'model_is_path = true\n')
+        write(os.path.join(self.tmp.name, "m.gguf"), "x")
+        tuieval(self.ws, "add", os.path.join(self.tmp.name, "m.gguf"), "--server", "gone", "--label", "g")
+        p = tuieval(self.ws, "run", "--tier", "smoke", check=False)
+        self.assertIn("no-such-server-xyz isn't installed", p.stdout)
+        self.assertNotIn("FileNotFoundError", p.stdout)
+
+    def test_doctor(self):
+        tuieval(self.ws, "add", "mock", "--server", "local", "--label", "wanted")
+        p = tuieval(self.ws, "doctor", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("✗ local: nothing answers at", p.stdout)
+        mock = Mock(os.path.join(self.ws, "packs"), "oracle", port=self.port)   # a server on a detected port
+        try:
+            out = tuieval(self.ws, "doctor", check=False).stdout
+            self.assertIn(f"point url at one that's running: http://127.0.0.1:{self.port}", out)
+            text = read(os.path.join(self.ws, "models.toml"))
+            write(os.path.join(self.ws, "models.toml"),
+                  re.sub(r'(\[servers\.local\]\nurl = )"[^"]+"', rf'\1"http://127.0.0.1:{self.port}"', text))
+            p = tuieval(self.ws, "doctor", check=False)
+        finally:
+            mock.stop()
+        self.assertIn("✓ local: http://127.0.0.1", p.stdout)
+        self.assertIn("✓ wanted (local): served", p.stdout)
+        self.assertIn("Ready", p.stdout)
 
 
 def fake_gguf(path, embedding=5120, size=0, kv_heads=4):

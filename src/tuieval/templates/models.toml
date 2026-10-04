@@ -20,6 +20,7 @@ repeat = 3
 request_timeout_ms = 1800000   # per request; long thinking runs need it
 ready_timeout_s = 1200         # how long a model may take to load before giving up
 model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
+# detect_ports = [1234, 11434, 8080, 8000]   # where tuieval looks for running servers (LM Studio, Ollama, llama-server, vLLM)
 
 # Sent with every request. A model may override it (see `thinking` / `sampling` below); results
 # record the settings each model actually ran with, and the scorecard shows any difference.

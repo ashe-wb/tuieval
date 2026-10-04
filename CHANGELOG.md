@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- First runs fail fast with the fix instead of hanging: a server that isn't running fails in seconds (it used to wait up to 20 minutes), a missing `llama-server` says how to install it, and `tuieval run` with no models says how to add one.
+- `tuieval doctor` checks servers, models, packs and API keys, and says what to fix.
 - Run only some tests of a pack: `e` in the TUI, or `tuieval run --tests`. Runs add up; `--force` reruns just the picked tests. Presets keep the pick.
 - `tuieval tune` scores options on projected full-length answers (`[tune] answer_tokens`, default 1024), so generation speed counts as in real runs.
 - `tuieval tune` reports an option's memory cost instead of rejecting it; it rejects only on critical memory pressure or over `[tune] swap_limit_mb`.

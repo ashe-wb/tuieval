@@ -4,6 +4,7 @@ Usage: tuieval [--workspace DIR] [command] [options]
 
   tuieval                     open the TUI
   tuieval init [DIR]          create a workspace (models.toml, packs/, graders/)
+  tuieval doctor              check servers, models, packs and API keys, and say what to fix
   tuieval new-pack NAME       a new pack from a starter template (--grader answer|rag|reply|tool_call|code)
   tuieval add PATH|ID         register a model in models.toml (a GGUF, or a model id)
   tuieval scan                list GGUFs in model_dirs that aren't in models.toml yet
@@ -67,6 +68,9 @@ def main(argv=None):
         if not workspace.is_workspace():
             sys.exit(f"{workspace.root()} isn't a tuieval workspace; run `tuieval init` first")
         return scaffold.cmd_new_pack(rest)
+    if cmd == "doctor":
+        from . import doctor
+        return doctor.cmd_doctor(rest)
     if cmd == "run":
         from . import run_evals
         return run_evals.main(rest)

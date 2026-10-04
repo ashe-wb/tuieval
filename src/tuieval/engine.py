@@ -512,6 +512,61 @@ def server_error(log, start):
         return line.split("]: ", 1)[-1]
     return line.removeprefix("error: ")
 
+def missing_program(cmd, cwd=None):
+    """The program a server command runs, if it isn't installed (not on PATH, or no such file); else None."""
+    exe = next((a for a in cmd if a != "env" and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)), None)
+    if not exe:
+        return None
+    if "/" in exe:
+        return None if os.path.isfile(os.path.join(cwd or "", expand(exe))) else exe
+    return None if shutil.which(exe) else exe
+
+
+def install_hint(program):
+    """How to get a server program, for the ones tuieval's templates use."""
+    if os.path.basename(program) == "llama-server":
+        return ("install llama.cpp (macOS: brew install llama.cpp; others: a release from "
+                "https://github.com/ggml-org/llama.cpp/releases) so llama-server is on PATH")
+    return "install it, or fix the server's cmd in models.toml"
+
+
+def probe_models(base_url, timeout=2.0, headers=None):
+    """The model ids an OpenAI-compatible server lists at base_url, or None when nothing answers."""
+    req = urllib.request.Request(base_url.rstrip("/").removesuffix("/v1") + "/v1/models", headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return [str(x.get("id", "")) for x in json.load(r).get("data", []) if isinstance(x, dict)]
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+# Where local OpenAI-compatible servers usually listen. models.toml [defaults] detect_ports
+# replaces the list (e.g. a server on a custom port, or [] to never look).
+DETECT_PORTS = {1234: "LM Studio", 11434: "Ollama", 8080: "llama-server", 8000: "vLLM"}
+
+
+def detect_ports(cfg):
+    return [int(p) for p in (cfg.get("defaults") or {}).get("detect_ports", list(DETECT_PORTS))]
+
+
+def detect_servers(ports, timeout=1.0):
+    """[{url, port, usual, models}] for each local port with an OpenAI-compatible server answering.
+    usual: the app that normally uses that port (a hint, not a check)."""
+    found = []
+    for port in ports:
+        url = f"http://127.0.0.1:{port}"
+        ids = probe_models(url, timeout)
+        if ids is not None:
+            found.append({"url": url, "port": port, "usual": DETECT_PORTS.get(port), "models": ids})
+    return found
+
+
+def serves(ids, name):
+    """Does a server listing these model ids serve this model (names match loosely: aliases, paths)?"""
+    want = name.lower()
+    return any(want == i.lower() or want in i.lower() or (i and i.lower() in want) for i in ids)
+
+
 def pack_min_context(pack):
     """Rough context a pack needs: its longest prompt (~4 chars/token) plus room to answer."""
     return max(len(t["input"]) for t in pack.tests) // 4 + 4096
@@ -1407,6 +1462,9 @@ class Engine:
                     raise ModelFailed(f"mmproj file not found: {expand(m['mmproj'])}")
                 if cwd and not os.path.isdir(cwd):
                     raise ModelFailed(f"server directory not found: {cwd}")
+                missing = missing_program(cmd, cwd)
+                if missing:
+                    raise ModelFailed(f"{missing} isn't installed: {install_hint(missing)}")
                 if port_in_use(port):
                     raise ModelFailed(f"port {port} is already in use; stop the server running there")
                 os.makedirs(os.path.join(self.log_dir, "server"), exist_ok=True)
@@ -1431,7 +1489,7 @@ class Engine:
                 key_env = server.get("api_key_env")
                 if key_env and not os.environ.get(key_env):
                     raise ModelFailed(f"{key_env} is not set; export it in the shell you start tuieval from")
-                where = f"already running at {base_url}"
+                where = f"using the server at {base_url}"
                 if server.get("pin_endpoint"):
                     ep = self.endpoint(m)
                     if not ep or not ep.get("tag"):
@@ -1441,6 +1499,14 @@ class Engine:
                 self.emit("model_loading", label=m["label"], command=[f"({where})"], log="")
                 t0 = time.time()
             deadline = time.time() + defaults["ready_timeout_s"]
+            if srv is None and not server.get("health") and probe_models(base_url, 5, self.request_headers(m)) is None:
+                # a server we don't start: if nothing answers now, waiting won't help
+                time.sleep(3)
+                if probe_models(base_url, 5, self.request_headers(m)) is None:
+                    raise ModelFailed(
+                        f"nothing is answering at {base_url}. Start that server, or fix `url` under "
+                        f"[servers.{m['server']}] in models.toml (common local ports: LM Studio 1234, "
+                        "Ollama 11434, llama-server 8080, vLLM 8000); `tuieval doctor` checks them all")
             while True:
                 self._check()
                 if srv is not None and srv.poll() is not None:
@@ -1462,9 +1528,8 @@ class Engine:
                     raise ModelFailed(f"server not ready after {defaults['ready_timeout_s']}s")
                 time.sleep(0.5)
             info["load_s"] = time.time() - t0 if srv is not None else None
-            want = m["served_name"].lower()
             # A health-checked server we started ourselves serves exactly the model we gave it.
-            if not (server.get("health") and srv is not None) and not any(want == i.lower() or want in i.lower() or (i and i.lower() in want) for i in ids):
+            if not (server.get("health") and srv is not None) and not serves(ids, m["served_name"]):
                 raise ModelFailed(f"server reports {ids}, expected {m['served_name']!r}; "
                                   "not running to avoid mislabelled results")
             if log and server.get("log_facts"):
