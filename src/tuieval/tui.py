@@ -268,6 +268,96 @@ BlockDumper.add_representer(str, lambda d, v: d.represent_scalar("tag:yaml.org,2
                                                                    style="|" if "\n" in v else None))
 
 
+GLOSSARY = """[b]Words tuieval uses[/b]
+  [b]pack[/b]        a folder of your own questions with checkable answers (packs/<name>/)
+  [b]use case[/b]    a pack's group; a model PASSES a use case when all its packs pass
+  [b]Smoke[/b]       3 questions per pack, once: checks the model and server work (minutes)
+  [b]Screen[/b]      a sample of each pack, once: drops weak models fast; can say FAIL, not PASS
+  [b]Certify[/b]     every question, with repeats: the only tier that can say PASS
+  [b]PASS[/b]        enough answers right, with zero critical failures, to trust the model for this
+  [b]FAIL[/b]        it got too much wrong, or broke a hard rule (a critical failure)
+  [b]INCONCLUSIVE[/b] not enough answers yet to decide; the verdict says what's missing
+  [b]critical[/b]    a failure that disqualifies on its own (a forbidden action, an invented answer)
+  [b]gate[/b]        what PASS means for a pack (pack.toml \\[gate]); docs/writing-packs.md explains it"""
+
+HELP = {
+    "SetupScreen": """[b]Setup: choose what to run[/b]
+
+1. Tick [b]packs[/b] on the left and [b]models[/b] on the right (space; type to filter models).
+2. Pick a [b]tier[/b]: Smoke first to check the setup, then Screen, then Certify for finalists.
+3. Press [b]s[/b]. The line above the buttons says how many answers that is and roughly how long.
+
+[b]Keys[/b]
+  s  start (or queue it behind a run that's going)     r  results
+  a  add a model (a GGUF, a model id, openrouter:<id>)  m  scan model folders for new GGUFs
+  e  pick which tests of the highlighted pack run       p  save or load a selection (preset)
+  t  tune the ticked models' speed flags here          x  hide or unhide a model
+  w  runs and queue of this session                     q  quit
+
+Something not working? In a terminal: [b]tuieval doctor[/b] checks servers, models and keys.""",
+    "RunScreen": """[b]A run in progress[/b]
+
+The top shows progress, ETA and the live score per model and pack. Below: the current question
+with the model's reasoning and answer as they stream, then recent results with the grader's reason
+(enter on one opens it in full).
+
+[b]Keys[/b]
+  k  skip the current model          c  cancel everything (finished answers are kept; it resumes next time)
+  f  pause or resume auto-scroll     r  results     n  set up a new run (this one keeps going)
+  w  runs and queue                  esc  back to Setup (the run keeps going)""",
+    "ResultsScreen": """[b]Results[/b]
+
+Start with [b]Production readiness[/b]: one verdict per model and use case, and what's missing when
+it's INCONCLUSIVE. The other tabs are the evidence:
+  Scorecard              accuracy, critical failures and truncation per model and pack
+  Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
+  Per question           every question, model by model
+  Is the difference real? whether one model is really better than another, or it's noise
+  Tests that separate    the questions that tell models apart
+  Failures               every wrong answer with the grader's reason; enter opens it in full
+  Test quality           tests nobody fails, everybody fails, or that look broken
+
+[b]Keys[/b]  esc back · ctrl+r refresh · w runs""",
+    "TuneScreen": """[b]Tuning speed flags[/b]
+
+tuieval tries speed-only server flags (batch sizes, flash attention, speculative decoding …) on this
+machine and keeps the fastest set. A guard rejects any flag that changes the model's answers, so
+tuning never changes results, only speed. It takes several minutes per model.
+
+[b]Keys[/b]  c cancel · esc back to Setup · w runs""",
+    "AnswerScreen": """[b]One answer in full[/b]
+
+The grade and the grader's reason at the top, then tabs: the model's reasoning and answer, the
+question as sent, and what the grader checked.
+
+[b]Keys[/b]  [ and ] previous / next answer · esc close""",
+    "PickTestsScreen": """[b]Pick tests[/b]
+
+Tick the tests of this pack to run (space). Type to filter by id, description or category, enter to
+go back to the list, and [b]a[/b] ticks every test the filter shows. With none ticked the tier's usual
+tests run. Runs of different tests add up; the pack can PASS once all its tests have run.""",
+}
+
+
+class HelpScreen(ModalScreen):
+    """What the screen underneath is for, its keys, and the words tuieval uses."""
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("question_mark", "close", "Close", show=False),
+                Binding("q", "close", "Close", show=False)]
+
+    def __init__(self, screen_name):
+        super().__init__()
+        self.text = HELP.get(screen_name, "[b]Help[/b]\n\nesc closes this dialog.")
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="wide"):
+            with VerticalScroll(id="help-body"):
+                yield Static(self.text + "\n\n" + GLOSSARY)
+            yield Label("[dim]esc closes · docs: README.md and docs/ in the tuieval repository[/dim]")
+
+    def action_close(self):
+        self.dismiss()
+
+
 class AnswerScreen(ModalScreen):
     """Everything about one answer: grading, timing, the question, the reasoning and the answer.
     [ and ] step through the other answers of the list it was opened from."""
@@ -2551,7 +2641,8 @@ class EvalsApp(App):
     #dialog { width: 80; height: auto; max-height: 90%; padding: 1 2; border: thick $primary; background: $surface; }
     #dialog.wide { width: 120; }
     #dialog SelectionList, #dialog OptionList { height: auto; max-height: 20; }
-    PresetsScreen, ScanScreen, SessionsScreen, ChoiceScreen, PickTestsScreen { align: center middle; }
+    PresetsScreen, ScanScreen, SessionsScreen, ChoiceScreen, PickTestsScreen, HelpScreen { align: center middle; }
+    #help-body { height: auto; max-height: 30; }
     #dialog Input, #dialog Select { margin-bottom: 1; }
     .dialog-buttons { height: 3; margin-top: 1; }
     .dialog-buttons Button { margin-right: 2; }
@@ -2591,7 +2682,11 @@ class EvalsApp(App):
     #answer-tabs TextArea { height: 1fr; border: none; }
     #answer-reasoning { color: $text-muted; }
     """
-    BINDINGS = [Binding("ctrl+q", "quit_app", "Quit", show=False)]
+    BINDINGS = [Binding("ctrl+q", "quit_app", "Quit", show=False), Binding("question_mark", "help", "Help")]
+
+    def action_help(self):
+        if not isinstance(self.screen, HelpScreen):
+            self.push_screen(HelpScreen(type(self.screen).__name__))
 
     def __init__(self, engine_kwargs):
         super().__init__()

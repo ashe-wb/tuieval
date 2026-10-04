@@ -217,6 +217,14 @@ class Units(unittest.TestCase):
         self.assertEqual(test_note({"id": "stale-quote", "description": "stale quote", "category": "data"}), "data")
         self.assertEqual(test_note({"id": "todo", "description": "To-do list app", "category": ""}), "To-do list app")
 
+    def test_help_text_renders(self):
+        from rich.text import Text
+        from tuieval.tui import GLOSSARY, HELP
+        for name, text in {**HELP, "glossary": GLOSSARY}.items():
+            plain = Text.from_markup(text).plain    # raises on broken markup
+            self.assertNotIn("()", plain, name)     # e.g. a [gate] swallowed as a style tag
+        self.assertIn("[gate]", Text.from_markup(GLOSSARY).plain)
+
     def test_short_note(self):
         from tuieval import tui
         self.assertEqual(tui.short_note("server exited with code 1 while loading: bad file"), "didn't start: bad file")

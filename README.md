@@ -104,7 +104,7 @@ See **[docs/models.md](docs/models.md)** for servers, OpenRouter endpoint pinnin
 3. **Watch the run:** progress with ETA, live score, tok/s, TTFT and memory, the current test with reasoning and answer side by side, recent results with the grader's reason. `k` skips a model, `c` cancels (finished work is kept and resumes next time). Runs started while one is going are queued.
 4. **Press `r` for results:** production readiness, verdict history, scorecard, speed & tokens (★ marks models nothing beats on both accuracy and time), per question, is the difference real?, tests that separate models, by difficulty, failures, and test quality.
 
-Other keys: `t` tunes the ticked models' speed flags, `a` adds a model, `m` scans for GGUFs, `p` saves or loads a preset, `x` hides a model.
+Other keys: `t` tunes the ticked models' speed flags, `a` adds a model, `m` scans for GGUFs, `p` saves or loads a preset, `x` hides a model. `?` explains any screen.
 
 ## Command line
 

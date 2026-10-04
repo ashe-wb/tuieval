@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `?` on any TUI screen explains what it's for, its keys, and the words tuieval uses (tiers, verdicts, critical failures, gates).
 - The setup screen is ready on first open: the only pack and model are ticked, the tier is Smoke until something has run, and ticked boxes are clearly marked (unticked ones are empty).
 - First runs fail fast with the fix instead of hanging: a server that isn't running fails in seconds (it used to wait up to 20 minutes), a missing `llama-server` says how to install it, and `tuieval run` with no models says how to add one.
 - `tuieval doctor` checks servers, models, packs and API keys, and says what to fix.
