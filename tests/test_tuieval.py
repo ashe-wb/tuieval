@@ -408,12 +408,13 @@ class FirstRun(unittest.TestCase):
                 async with app.run_test(size=(140, 40)) as pilot:
                     await pilot.pause()
                     s = app.screen
-                    print(s.query_one("#suites", SelectionList).selected, sorted(s.selected_models), s.tier())
+                    print(s.query_one("#suites", SelectionList).selected, sorted(s.selected_models), s.tier(),
+                          s.check_action("tune", ()))
             asyncio.run(go())
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
-        self.assertEqual(out, "['first'] ['my-model'] smoke")
+        self.assertEqual(out, "['first'] ['my-model'] smoke False")   # tuning shows once something has run
 
     def test_doctor(self):
         tuieval(self.ws, "add", "mock", "--server", "local", "--label", "wanted")

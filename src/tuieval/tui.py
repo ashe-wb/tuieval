@@ -127,9 +127,10 @@ def quant_text(ep):
     return "quantization undeclared by provider" if q in (None, "unknown") else q
 
 
-def serving_badge(e, m):
+def serving_badge(e, m, newcomer=False):
     """One-line markup: how the model fits and is tuned on this machine; for a hosted model, the
-    provider endpoint and quantization its answers come from."""
+    provider endpoint and quantization its answers come from. newcomer (nothing has run yet): only
+    what stops a run (doesn't fit), not context sizes and tuning."""
     try:
         ep = e.endpoint(m)
         if ep:
@@ -141,6 +142,8 @@ def serving_badge(e, m):
         return ""
     if not sv.fits:
         return "  [bold red]doesn't fit here[/bold red]"
+    if newcomer:
+        return ""
     ctx = f"{sv.ctx // 1024}k" if sv.ctx else ""
     src = {"tuned": "[green]tuned[/green]", "seeded": "[green]hand-tuned[/green]",
            "untuned": "[yellow]untuned[/yellow]"}.get(sv.perf_source, "[yellow]retune[/yellow]")
@@ -291,7 +294,8 @@ HELP = {
   s  start (or queue it behind a run that's going)     r  results
   a  add a model (a GGUF, a model id, openrouter:<id>)  m  scan model folders for new GGUFs
   e  pick which tests of the highlighted pack run       p  save or load a selection (preset)
-  t  tune the ticked models' speed flags here          x  hide or unhide a model
+  t  tune the ticked models' speed flags here (after   x  hide or unhide a model
+     a first run)
   w  runs and queue of this session                     q  quit
 
 Something not working? In a terminal: [b]tuieval doctor[/b] checks servers, models and keys.""",
@@ -488,17 +492,21 @@ class SetupScreen(Screen):
         Binding("s", "start", "Start"),
         Binding("a", "add_model", "Add model"),
         Binding("m", "scan", "Scan for models"),
-        Binding("p", "presets", "Presets"),
+        Binding("p", "presets", "Presets", show=False),
         Binding("e", "pick_tests", "Pick tests"),
         Binding("t", "tune", "Tune speed"),
         Binding("r", "results", "Results"),
-        Binding("x", "hide_model", "Hide/unhide"),
+        Binding("x", "hide_model", "Hide/unhide", show=False),
         Binding("w", "runs", "Runs"),
         Binding("q", "quit", "Quit"),
     ]
 
     def check_action(self, action, parameters):
-        return bool(self.app.sessions) if action == "runs" else True
+        if action == "runs":
+            return bool(self.app.sessions)
+        if action == "tune":   # speed tuning matters once a model runs; ? lists it, and tuieval tune works
+            return self.app.engine.has_results()
+        return True
 
     def action_quit(self):
         # q means "back" everywhere else, so a q too many shouldn't silently drop this session's runs
@@ -575,7 +583,8 @@ class SetupScreen(Screen):
         here, others = e.machines()[0], [mc.id for mc in e.machines()[1:]]
         self.query_one("#machine", Static).update(
             f"[b]Machine[/b] {here.id}  [dim]{here.summary}"
-            + (f" · also known: {', '.join(others)}" if others else "") + " · t tunes the ticked models here[/dim]")
+            + (f" · also known: {', '.join(others)}" if others else "")
+            + (" · t tunes the ticked models here" if e.has_results() else "") + "[/dim]")
 
     def refresh_packs(self):
         e = self.app.engine
@@ -611,6 +620,7 @@ class SetupScreen(Screen):
         keep = models.highlighted_option.value if models.highlighted_option else None
         keep_at = models.highlighted
         hidden = e.hidden()
+        newcomer = not e.has_results()   # nothing run yet: leave out context sizes and tuning
         try:
             self.verdicts = model_verdicts(e)
         except Exception as err:  # a broken results file must not hide the model list
@@ -644,7 +654,7 @@ class SetupScreen(Screen):
                 extra = ("  [magenta]vision[/magenta]" if m["vision"] else "") + \
                         ("  [yellow]no-think[/yellow]" if m.get("thinking") is False else "") + \
                         ("  [dim italic]hidden[/dim italic]" if label in hidden else "")
-                where = "" if m.get("remote") else f"  [dim]{m['server']}[/dim]{serving_badge(e, m)}"
+                where = "" if m.get("remote") else f"  [dim]{m['server']}[/dim]{serving_badge(e, m, newcomer)}"
                 rows = self.verdicts.get(label, [])
                 vcodes = verdict_codes(rows, codes) if rows else f"[dim]{'not run':<{len(verdict_codes([], codes))}}[/dim]"
                 # a Selection shows one line only: keep it short, the detail line has the rest
@@ -690,7 +700,7 @@ class SetupScreen(Screen):
         tags = [t for t in m["tags"] if t != m["server"]]
         hidden = (f"  [cyan]{' '.join(tags)}[/cyan]" if tags else "") + hidden
         detail.update(f"[b]{label}[/b]  [dim]{m['server']} · {m.get('model') or ''}[/dim]"
-                      f"{serving_badge(e, m)}{hidden}\n{verdicts}\n"
+                      f"{serving_badge(e, m, not e.has_results())}{hidden}\n{verdicts}\n"
                       + ("[dim]results (✓ certified ◐ screened ~ outdated … partial):[/dim] " + "  ".join(packs)
                          if packs else "[dim]no results yet[/dim]"))
 
