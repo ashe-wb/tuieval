@@ -522,6 +522,160 @@ class Parallel(unittest.TestCase):
         self.assertEqual(sum(r["pass"] for r in self.results("b")["results"]), 6)
 
 
+class AddToRun(unittest.TestCase):
+    """More evals while a run is going: added to it (they run after its other jobs) or queued after it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        for name in ("apps", "other"):
+            d = os.path.join(self.ws, "packs", name)
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), f'label = "{name}"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"), "".join(
+                f"- {{id: {t}, input: {name} question {t}, expected: 1, reference: 'ANSWER: 1', difficulty: easy}}\n"
+                for t in "abcd"))
+        mock = [sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                os.path.join(self.ws, "packs"), "--model", "{served_name}", "--delay", "0.2"]
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f"\n[servers.mk]\ncmd = {json.dumps(mock)}\nport = {free_port()}\n")
+            for label in "ab":
+                f.write(f'\n[[models]]\nlabel = "{label}"\nserver = "mk"\nmodel = "{label}"\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def finish(self, e, t, limit=480):
+        """Wait for a run thread; CI machines can take half a minute per server start. One that's
+        still going after `limit` is cancelled, so it can't run into the next test."""
+        t.join(limit)
+        if t.is_alive():
+            e.cancel()
+            t.join(120)
+            self.fail(f"the run didn't finish in {limit}s")
+
+    def test_engine_adds_jobs_to_the_run_going(self):
+        from tuieval import engine
+        events = []
+        e = engine.Engine(lambda kind, **d: events.append((kind, d)), root=self.ws)
+        jobs = e.plan(["a"], ["apps"], None, "certify", False, {})
+        self.assertEqual(e.add_jobs(e.plan(["b"], ["apps"], None, "certify", False, {})),
+                         ([], "the run is finishing"))                     # no run yet
+        t = threading.Thread(target=e.run, args=(jobs,))
+        t.start()
+        deadline = time.time() + 180   # CI machines can take long to start servers
+        while not any(k == "request_done" for k, _ in events) and time.time() < deadline:
+            time.sleep(0.05)
+        added, why = e.add_jobs(e.plan(["b", "a"], ["apps", "other"], None, "certify", False, {}))
+        self.assertIsNone(why)
+        self.assertEqual(sorted(j.key for j in added), ["a/other", "b/apps", "b/other"])   # a/apps is running
+        self.assertEqual(e.add_jobs(e.plan(["b"], ["apps"], None, "certify", False, {}))[1],
+                         "everything picked is already in the run")
+        self.finish(e, t)
+        self.assertEqual([j.status for j in jobs], ["done"] * 4)
+        self.assertEqual(jobs[0].key, "a/apps")
+        started = [d["job"].key for k, d in events if k == "job_started"]
+        self.assertEqual(started[0], "a/apps")
+        self.assertEqual(e.add_jobs(e.plan(["b"], ["apps"], None, "certify", True, {}))[1], "the run is finishing")
+        queue_done = [d for k, d in events if k == "queue_done"]
+        self.assertEqual(len(queue_done[0]["jobs"]), 4)
+
+    def test_added_models_use_a_free_lane(self):
+        from tuieval import engine
+        path = os.path.join(self.ws, "models.toml")    # slower answers: a is surely still answering when b is added
+        write(path, read(path).replace('"--delay", "0.2"', '"--delay", "1.0"'))
+        events = []
+        e = engine.Engine(lambda kind, **d: events.append((kind, d)), root=self.ws)
+        jobs = e.plan(["a"], ["apps"], None, "certify", False, {})
+        t = threading.Thread(target=e.run, args=(jobs, 2))
+        t.start()
+        deadline = time.time() + 180   # CI machines can take long to start servers
+        while not any(k == "request_done" for k, _ in events) and time.time() < deadline:
+            time.sleep(0.05)
+        added, why = e.add_jobs(e.plan(["a", "b"], ["other", "apps"], None, "certify", False, {}))
+        self.assertEqual(sorted(j.key for j in added), ["a/other", "b/apps", "b/other"])
+        self.finish(e, t)
+        self.assertEqual([j.status for j in jobs], ["done"] * 4)
+        order = [(k, d.get("label") or d["job"].key) for k, d in events if k in ("model_loading", "job_done")]
+        self.assertLess(order.index(("model_loading", "b")), order.index(("job_done", "a/apps")), order)  # next to a
+        a_other = json.loads(read(os.path.join(self.ws, "results", "a", "other.json")))["results"]
+        self.assertFalse(any("a" in (r.get("ran_alongside") or []) for r in a_other))
+        loads = [d["label"] for k, d in events if k == "model_loading"]
+        self.assertEqual(loads.count("a"), 2)                                 # a's new pack: after it ended
+
+    def test_tui_adds_or_queues_while_running(self):
+        code = textwrap.dedent("""
+            import asyncio, json, time
+            from tuieval.tui import EvalsApp, RunScreen, SetupScreen, ChoiceScreen
+            from textual.widgets import SelectionList
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    s.query_one("#suites", SelectionList).select("apps")
+                    s.selected_models = {"a"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+                    await pilot.pause()
+                    s.action_start()
+                    deadline = time.time() + 180     # CI machines can take long to start servers
+                    while time.time() < deadline:
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and app.screen.counts()[0]:
+                            break
+                    run = app.screen
+                    await pilot.press("n")                       # more evals while it runs
+                    await pilot.pause()
+                    on_setup = isinstance(app.screen, SetupScreen)
+                    app.screen.selected_models = {"b"}
+                    app.screen.refresh_models()
+                    app.screen.action_start()
+                    await pilot.pause()
+                    asked = isinstance(app.screen, ChoiceScreen)
+                    app.screen.dismiss("add")
+                    await pilot.pause()
+                    app.screen.query_one("#suites", SelectionList).deselect("apps")
+                    app.screen.query_one("#suites", SelectionList).select("other")
+                    app.screen.selected_models = {"a"}
+                    app.screen.refresh_models()
+                    app.screen.action_start()
+                    await pilot.pause()
+                    app.screen.dismiss("queue")
+                    await pilot.pause()
+                    app.screen.query_one("#tier-smoke").value = True    # another tier can't join: queued
+                    await pilot.pause()
+                    app.screen.action_start()
+                    await pilot.pause()
+                    other_tier = not isinstance(app.screen, ChoiceScreen)
+                    queued = len(app.queue)
+                    deadline = time.time() + 300
+                    while time.time() < deadline:
+                        await pilot.pause(0.2)
+                        if not run.running and not app.queue and not app.active_session:
+                            break
+                    second = app.sessions[1]
+                    print(json.dumps({"on_setup": on_setup, "asked": asked, "queued": queued, "other_tier": other_tier,
+                                      "run": [(j.key, j.status) for j in run.jobs], "total": run.total,
+                                      "sessions": len(app.sessions),
+                                      "second": [(j.key, j.status) for j in second.jobs]}))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertTrue(out["on_setup"])
+        self.assertTrue(out["asked"])
+        self.assertTrue(out["other_tier"])
+        self.assertEqual(out["queued"], 2)
+        self.assertEqual(out["run"], [["a/apps", "done"], ["b/apps", "done"]])   # added to the run going
+        self.assertEqual(out["total"], 8)
+        self.assertEqual(out["sessions"], 3)
+        self.assertEqual(out["second"], [["a/other", "done"]])                  # queued: its own run after
+
+
 class FirstRun(unittest.TestCase):
     """A new user's first run fails fast with the fix, never hangs or shows a bare Python error."""
 
