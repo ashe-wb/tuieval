@@ -242,6 +242,14 @@ class Units(unittest.TestCase):
                                    "not decided yet for Coding")
         self.assertEqual(todo, [("Coding", "run Certify (the sample screened so far looks promising)", ["coding"])])
 
+    def test_code_checks_cannot_rebind_candidate_names(self):
+        from tuieval.graders.code import grade_code
+        answer = "```python\nfrom datetime import datetime\ndef f(s):\n    return datetime.fromisoformat(s)\n```"
+        tests = ("# SETUP\nimport datetime\n# CHECK: parse\n"
+                 "assert f('2026-01-02') == datetime.datetime(2026, 1, 2)\n")
+        out = grade_code(answer, {"hidden_tests": tests}, {})
+        self.assertTrue(out["pass"], out)
+
     def test_short_note(self):
         from tuieval import tui
         self.assertEqual(tui.short_note("server exited with code 1 while loading: bad file"), "didn't start: bad file")
