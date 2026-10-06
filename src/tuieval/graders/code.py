@@ -53,6 +53,7 @@ def _err(e):
     return last[:200]
 try:
     exec(compile(CANDIDATE, "candidate.py", "exec"), ns)
+    ns = dict(ns)  # tests get a copy, so their imports can't rebind the candidate's globals
     exec(compile(SETUP, "setup.py", "exec"), ns)
     setup_error = None
 except BaseException as e:
