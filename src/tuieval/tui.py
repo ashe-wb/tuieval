@@ -294,7 +294,7 @@ HELP = {
 parallel_models in models.toml, default 1). Answers note the models they ran alongside.
 
 [b]Keys[/b]
-  s  start (or queue it behind a run that's going)     r  results
+  s  start (with a run going: add to it, or queue it)   r  results
   a  add a model (a GGUF, a model id, openrouter:<id>)  m  scan model folders for new GGUFs
   e  pick which tests of the highlighted pack run       p  save or load a selection (preset)
   t  tune the ticked models' speed flags here (after   x  hide or unhide a model
@@ -310,7 +310,7 @@ with the model's reasoning and answer as they stream, then recent results with t
 
 [b]Keys[/b]
   k  skip the current model          c  cancel everything (finished answers are kept; it resumes next time)
-  f  pause or resume auto-scroll     r  results     n  set up a new run (this one keeps going)
+  f  pause or resume auto-scroll     r  results     n  more evals: add them to this run or queue them
   w  runs and queue                  esc  back to Setup (the run keeps going)
   v  with several models at a time: stream the next one (k skips the one streaming)""",
     "ResultsScreen": """[b]Results[/b]
@@ -878,7 +878,8 @@ class SetupScreen(Screen):
         """Says what Start will do when something is already running, here or in another window."""
         app = self.app
         if app.is_busy():
-            return (f"\n[cyan]{app.busy_text()}: Start adds this to the queue as #{len(app.queue) + 1} "
+            add = "add this to the run going or " if isinstance(app.active_session, RunScreen) else ""
+            return (f"\n[cyan]{app.busy_text()}: Start lets you {add}queue it as #{len(app.queue) + 1} "
                     "(w shows the queue).[/cyan]")
         holder = app.engine.machine_holder()
         if holder:
@@ -1464,8 +1465,8 @@ class QueuedRun:
     def line(self):
         return f"{self.title}  [dim]~{fmt_secs(self.est)} · queued {time.strftime('%H:%M', time.localtime(self.queued))}[/dim]"
 
-    def make(self, eng):
-        """(RunScreen, None), or (None, why it can't start) when its turn comes."""
+    def plan(self, eng):
+        """(jobs, None), or (None, why it can't run) now."""
         sel = self.sel
         jobs = eng.plan(sel["models"], sel["packs"], sel["repeat"], sel["tier"], sel["force"] or self.rerun,
                         self.tests(eng))
@@ -1476,7 +1477,12 @@ class QueuedRun:
         if new:
             return None, (f"it would now start over {', '.join(new)}, which wasn't confirmed when it was queued. "
                           "Start it again from Setup to see why")
-        return RunScreen(jobs, sel.get("parallel")), None
+        return jobs, None
+
+    def make(self, eng):
+        """(RunScreen, None), or (None, why it can't start) when its turn comes."""
+        jobs, problem = self.plan(eng)
+        return (RunScreen(jobs, self.sel.get("parallel")), None) if jobs else (None, problem)
 
 
 class QueuedTune:
@@ -1807,7 +1813,7 @@ class RunScreen(Screen):
         Binding("c", "cancel_all", "Cancel all", priority=True),
         Binding("f", "toggle_follow", "Pause scroll", priority=True),
         Binding("v", "watch_next", "Next model", priority=True),
-        Binding("n", "new_run", "New run", priority=True),
+        Binding("n", "new_run", "More evals", priority=True),
         Binding("r", "results", "Results", priority=True),
         Binding("w", "runs", "Runs", priority=True),
         Binding("escape", "back", "Setup", priority=True),
@@ -1815,7 +1821,7 @@ class RunScreen(Screen):
     ]
     kind = "Run"
     LIVE_ONLY = {"skip_model", "cancel_all", "toggle_follow"}
-    DONE_ONLY = {"new_run"}
+    DONE_ONLY = set()
 
     def __init__(self, jobs, parallel=None):
         super().__init__()
@@ -2026,6 +2032,16 @@ class RunScreen(Screen):
                 self.update_job(job)
             if self.watched(kind, d):
                 self.req_started = None
+            self.update_overall()
+        elif kind == "jobs_added":
+            q = self.query_one("#queue", DataTable)
+            for j in d["jobs"]:
+                if j.key not in q.rows:
+                    q.add_row(j.label, j.pack.label, "", "", "", "", "", "", key=j.key)
+                self.update_job(j)
+                self.total += j.total
+            self.query_one("#bar", ProgressBar).update(total=max(self.total, 1))
+            self.event(f"added to this run: {', '.join(j.key for j in d['jobs'])}")
             self.update_overall()
         elif kind in ("job_started", "job_update", "job_done"):
             job = d["job"]
@@ -2262,6 +2278,9 @@ class RunScreen(Screen):
 
     @on(Button.Pressed, "#done-new")
     def action_new_run(self):
+        if self.running:
+            self.notify("Pick models and packs, then Start: add them to this run or queue them after it.",
+                        timeout=8)
         self.app.back_to_setup()  # Setup still holds the last selection
         self.app.screen.query_one("#models").focus()
 
@@ -2923,6 +2942,40 @@ class EvalsApp(App):
                 self.notify("Everything selected had results; running it again.")
             self.add_session(screen)
             return
+        run = self.active_session
+        if item.kind == "Run" and isinstance(run, RunScreen) and run.running \
+                and item.sel["tier"] != run.jobs[0].tier:
+            self.notify(f"The run going is {run.jobs[0].tier.title()} and this is {item.sel['tier'].title()}, "
+                        "so it can't join it.", timeout=10)
+        elif item.kind == "Run" and isinstance(run, RunScreen) and run.running:
+            def picked(choice):
+                if choice == "add":
+                    self.add_to_run(run, item)
+                elif choice == "queue":
+                    self.enqueue(item)
+            what = f"{', '.join(item.sel['models'][:4])}{' …' if len(item.sel['models']) > 4 else ''} · " \
+                   f"{', '.join(item.sel['packs'][:4])}{' …' if len(item.sel['packs']) > 4 else ''}"
+            self.push_screen(ChoiceScreen(
+                f"A run is going: {run.live_text()}.\n\nAdd {what} to it? Its models run after the ones "
+                "already in it.\nOr queue it as a separate run that starts when this one ends.",
+                [("add", "Add to this run", "success"), ("queue", f"Queue it as #{len(self.queue) + 1}", "primary"),
+                 ("keep", "Cancel", "default")]), picked)
+            return
+        self.enqueue(item)
+
+    def add_to_run(self, run, item):
+        jobs, problem = item.plan(self.engine)
+        added, why = self.engine.add_jobs(jobs) if jobs else ([], problem)
+        if not added:
+            self.notify(f"Not added: {why}. Queued it instead.", severity="warning", timeout=10)
+            self.enqueue(item)
+            return
+        run.handle("jobs_added", {"jobs": added})
+        models = sorted({j.label for j in added})
+        self.notify(f"Added {len(added)} pack run(s) to the run going: {', '.join(models)}. w shows it.", timeout=10)
+        self.refresh_live()
+
+    def enqueue(self, item):
         ahead = self.busy_text()
         self.queue.append(item)
         self.notify(f"Queued #{len(self.queue)}: {item.title}. It starts by itself after: {ahead}. "

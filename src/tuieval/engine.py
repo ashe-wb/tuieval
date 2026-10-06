@@ -698,6 +698,8 @@ class Engine:
         self._lanes_lock = threading.Lock()
         self._procs = []
         self._stop_lock = threading.Lock()
+        self._run_lock = threading.Lock()
+        self._run = None          # the run going: {"jobs", "pending", "open", "machine", "cond"} (add_jobs)
         self._header_cache = {}
         self._serving = {}
         self.tuning_dir = os.path.join(root, "tuning")
@@ -1552,29 +1554,38 @@ class Engine:
     # ---- running
     def run(self, jobs, parallel=None):
         """Run the jobs (blocking). Jobs of the same model share one server start. parallel: how many
-        models are served at a time (default: parallel_models for this machine)."""
+        models are served at a time (default: parallel_models for this machine). add_jobs() can add
+        more while it runs; they run after the ones before them."""
         self._cancel.clear()
         self.emit("queue_started", jobs=jobs)
         models = sorted({j.label for j in jobs if j.status == "waiting"})
+        machine = bool(jobs) and self.needs_machine(jobs)
         lock = (self.machine_lock(f"{jobs[0].tier} run: {', '.join(models[:3])}"
                                   + (f" +{len(models) - 3}" if len(models) > 3 else ""))
-                if jobs and self.needs_machine(jobs) else contextlib.nullcontext())
+                if machine else contextlib.nullcontext())
+        order = []
+        for j in jobs:
+            if j.label not in order:
+                order.append(j.label)
+        groups = [(label, [j for j in jobs if j.label == label and j.status == "waiting"]) for label in order]
+        with self._run_lock:
+            self._run = {"jobs": jobs, "pending": [g for g in groups if g[1]], "open": True, "machine": machine,
+                         "cond": threading.Condition(self._run_lock)}
         try:
             with lock:
-                order = []
-                for j in jobs:
-                    if j.label not in order:
-                        order.append(j.label)
-                groups = [(label, [j for j in jobs if j.label == label and j.status == "waiting"]) for label in order]
-                self._run_lanes([g for g in groups if g[1]], max(1, int(parallel or self.parallel_models())))
+                self._run_lanes(max(1, int(parallel or self.parallel_models())))
             if self._cancel.is_set():
                 raise Cancelled()
         except Cancelled:
+            with self._run_lock:
+                self._run["open"] = False
             for j in jobs:
                 if j.status in ("waiting", "loading", "running"):
                     j.status, j.note = "skipped", "cancelled (progress kept)" if j.done else "cancelled"
                     self.emit("job_done", job=j)
         finally:
+            with self._run_lock:
+                self._run["open"] = False
             changes = []
             if any(j.status == "done" and j.started and j.tier != "smoke" for j in jobs):
                 try:
@@ -1586,15 +1597,41 @@ class Engine:
                 self.emit("verdicts", changes=changes)
             self.emit("queue_done", jobs=jobs, cancelled=self._cancel.is_set())
 
-    def _run_lanes(self, groups, parallel):
+    def add_jobs(self, new):
+        """Add planned jobs to the run going on, after its other jobs. Returns (added, why not): a
+        pack already waiting or running in it isn't added twice, and nothing is added once the run is
+        finishing or cancelled, or when it holds no machine lock (hosted only) and these need one.
+        Runs on the caller's thread, so the caller shows what was added (no event)."""
+        with self._run_lock:
+            r = self._run
+            if not r or not r["open"] or self._cancel.is_set():
+                return [], "the run is finishing"
+            if not r["machine"] and self.needs_machine(new):
+                return [], "the run going uses only hosted models, and these need this machine"
+            busy = {j.key for j in r["jobs"] if j.status in ("waiting", "loading", "running")}
+            added = [j for j in new if j.status == "waiting" and j.key not in busy]
+            r["jobs"].extend(added)
+            for j in added:   # a model still waiting takes them on; otherwise it comes again at the end
+                group = next((g for g in r["pending"] if g[0] == j.label), None)
+                if group:
+                    group[1].append(j)
+                else:
+                    r["pending"].append((j.label, [j]))
+            r["cond"].notify_all()
+        return added, None if added else "everything picked is already in the run"
+
+    def _run_lanes(self, parallel):
         """Run each model's jobs in its own lane, up to `parallel` at a time, in order: the next
         model starts once a lane is free, nothing running stops it (runs_alone), and its memory fits
-        next to the ones running (memory_need_gb; an unknown need is left to the setting)."""
-        pending, running, told = list(groups), {}, set()
-        cond = threading.Condition()
+        next to the ones running (memory_need_gb; an unknown need is left to the setting). Lanes
+        wait for jobs added meanwhile (add_jobs) until every model is done."""
+        pending, running, told = self._run["pending"], {}, set()
+        cond = self._run["cond"]
 
         def blocked(label):
             """Why the next model can't start now (None: it can)."""
+            if label in running:   # added again while it runs: it comes back once that ends
+                return ""
             if not running:
                 return None
             if len(running) >= parallel:
@@ -1614,20 +1651,26 @@ class Engine:
 
         def lane():
             while True:
-                with cond:
-                    while True:
-                        if self._cancel.is_set() or not pending:
-                            return
-                        label = pending[0][0]
-                        why = blocked(label)
-                        if why is None:
-                            label, mine = pending.pop(0)
-                            running[label] = self.memory_need_gb(self.model(label))
-                            break
-                        if why and label not in told:
-                            told.add(label)
-                            self.emit("model_waiting", label=label, message=f"{label} waits: {why}")
+                mine, note = None, None
+                with cond:   # events go out after the lock is released: the UI may be waiting for it (add_jobs)
+                    if self._cancel.is_set() or not pending and not running:
+                        self._run["open"] = False   # nothing more can be added
+                        cond.notify_all()
+                        return
+                    label = pending[0][0] if pending else None
+                    why = blocked(label) if label else ""   # none pending: a model still runs, more may come
+                    if why is None:
+                        label, mine = pending.pop(0)
+                        running[label] = self.memory_need_gb(self.model(label))
+                    elif why and label not in told:
+                        told.add(label)
+                        note = f"{label} waits: {why}"
+                    else:
                         cond.wait(1.0)
+                if note:
+                    self.emit("model_waiting", label=label, message=note)
+                if mine is None:
+                    continue
                 try:
                     self._run_lane(label, mine)
                 finally:
@@ -1635,10 +1678,10 @@ class Engine:
                         running.pop(label, None)
                         cond.notify_all()
 
-        if parallel == 1 or len(groups) == 1:
+        if parallel == 1:
             lane()
             return
-        threads = [threading.Thread(target=lane, name=f"lane-{i + 1}") for i in range(min(parallel, len(groups)))]
+        threads = [threading.Thread(target=lane, name=f"lane-{i + 1}") for i in range(parallel)]
         for t in threads:
             t.start()
         for t in threads:
