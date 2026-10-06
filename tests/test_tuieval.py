@@ -456,8 +456,11 @@ class Parallel(unittest.TestCase):
         self.assertFalse(any("ran_alongside" in r for r in self.results("b")["results"]))
 
     def test_tui_runs_side_by_side(self):
+        # slower answers, so the two models surely overlap on a slow CI machine
+        path = os.path.join(self.ws, "models.toml")
+        write(path, read(path).replace('"--delay", "0.15"', '"--delay", "1.0"'))
         code = textwrap.dedent("""
-            import asyncio, json
+            import asyncio, json, time
             from tuieval.tui import EvalsApp, RunScreen
             from textual.widgets import Input, SelectionList
             async def go():
@@ -473,29 +476,31 @@ class Parallel(unittest.TestCase):
                     await pilot.pause()
                     est = str(s.query_one("#estimate").render())
                     s.action_start()
-                    for _ in range(100):
+                    deadline = time.time() + 180     # CI machines can take long to start servers
+                    while time.time() < deadline:
                         await pilot.pause(0.1)
-                        if isinstance(app.screen, RunScreen) and len(app.screen.active()) == 2:
+                        if isinstance(app.screen, RunScreen) and len(app.screen.active()) == 2 \\
+                                and all(j.status == "running" for j in app.screen.jobs):
                             break
                     run = app.screen
                     first = run.watch
                     await pilot.press("v")
                     switched = run.watch
-                    for _ in range(300):
-                        await pilot.pause(0.1)
-                        if not run.running:
-                            break
+                    deadline = time.time() + 240
+                    while run.running and time.time() < deadline:
+                        await pilot.pause(0.2)
                     print(json.dumps({"est": est, "first": first, "switched": switched,
+                                      "notes": [(j.key, j.status, j.note) for j in run.jobs],
                                       "status": sorted({j.status for j in run.jobs}),
                                       "parallel": app.load_state().get("parallel")}))
             asyncio.run(go())
         """)
-        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=480,
                            env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
         out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
         self.assertIsInstance(out, dict, out)
         self.assertIn("Up to 2 models at a time", out["est"])
-        self.assertEqual(out["status"], ["done"])
+        self.assertEqual(out["status"], ["done"], out["notes"])
         self.assertEqual(out["parallel"], 2)
         self.assertIn(out["first"], ("a", "b"))
         self.assertEqual({out["first"], out["switched"]}, {"a", "b"})   # v streams the other model
