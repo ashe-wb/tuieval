@@ -733,6 +733,25 @@ class FirstRun(unittest.TestCase):
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
         self.assertEqual(out, "['first'] ['my-model'] smoke False")   # tuning shows once something has run
 
+    def test_results_open_on_per_question(self):
+        tuieval(self.ws, "add", "my-model", "--server", "local")
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval.tui import EvalsApp
+            from textual.widgets import TabbedContent
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(140, 40)) as pilot:
+                    await pilot.pause()
+                    await pilot.press("r")
+                    await pilot.pause()
+                    print(type(app.screen).__name__, app.screen.query_one(TabbedContent).active)
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
+        self.assertEqual(out, "ResultsScreen tab-per-question")
+
     def test_doctor(self):
         tuieval(self.ws, "add", "mock", "--server", "local", "--label", "wanted")
         p = tuieval(self.ws, "doctor", check=False, ports=self.port)

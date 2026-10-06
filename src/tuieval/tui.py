@@ -10,9 +10,10 @@ Run screen:    live reasoning and answer, per-test ✓/✗, TTFT and tokens/s, p
                k skips the current model, c cancels everything, f pauses auto-scroll.
                r shows results at any time (also mid-run); n starts a new run when it ends.
                Enter on a Recent results row shows that answer in full.
-Results:       ctrl+r reloads (it also reloads when a run's pack finishes). Per question compares
-               each model's tokens and seconds on the same question. Enter on a Failures row or a
-               Per question cell shows the answer: grading and checks, reasoning, answer, question.
+Results:       opens on Per question, which compares each model's tokens and seconds on the same
+               question. ctrl+r reloads (it also reloads when a run's pack finishes). Enter on a
+               Failures row or a Per question cell shows the answer: grading and checks, reasoning,
+               answer, question.
 Answer detail: [ and ] step to the previous/next answer; esc/q close.
 Anywhere:      esc/q go back (q quits only on Setup), ctrl+q quits, w lists this session's runs and
                tunes. Leaving a live run or tune keeps it going; the header shows its progress.
@@ -315,8 +316,8 @@ with the model's reasoning and answer as they stream, then recent results with t
   v  with several models at a time: stream the next one (k skips the one streaming)""",
     "ResultsScreen": """[b]Results[/b]
 
-Start with [b]Production readiness[/b]: one verdict per model and use case, and what's missing when
-it's INCONCLUSIVE. The other tabs are the evidence:
+Opens on [b]Per question[/b]. [b]Production readiness[/b] gives one verdict per model and use case,
+and what's missing when it's INCONCLUSIVE. The other tabs are the evidence:
   Scorecard              accuracy, critical failures and truncation per model and pack
   Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
   Per question           every question, model by model
@@ -2324,7 +2325,7 @@ class ResultsScreen(Screen):
             yield Static(id="results-info")
             if self.smoke_dir:
                 yield Button("Show this Smoke run's results", id="toggle-smoke")
-        with TabbedContent():
+        with TabbedContent(initial="tab-per-question"):
             with TabPane("Production readiness"):
                 yield Static(id="readiness-short")
                 yield Static(self.READINESS_HELP, id="readiness-help")
