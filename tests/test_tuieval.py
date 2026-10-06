@@ -583,6 +583,8 @@ class AddToRun(unittest.TestCase):
 
     def test_added_models_use_a_free_lane(self):
         from tuieval import engine
+        path = os.path.join(self.ws, "models.toml")    # slower answers: a is surely still answering when b is added
+        write(path, read(path).replace('"--delay", "0.2"', '"--delay", "1.0"'))
         events = []
         e = engine.Engine(lambda kind, **d: events.append((kind, d)), root=self.ws)
         jobs = e.plan(["a"], ["apps"], None, "certify", False, {})
@@ -595,8 +597,8 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(sorted(j.key for j in added), ["a/other", "b/apps", "b/other"])
         self.finish(e, t)
         self.assertEqual([j.status for j in jobs], ["done"] * 4)
-        b = json.loads(read(os.path.join(self.ws, "results", "b", "apps.json")))["results"]
-        self.assertTrue(any(r.get("ran_alongside") == ["a"] for r in b))     # started next to a, not after it
+        order = [(k, d.get("label") or d["job"].key) for k, d in events if k in ("model_loading", "job_done")]
+        self.assertLess(order.index(("model_loading", "b")), order.index(("job_done", "a/apps")), order)  # next to a
         a_other = json.loads(read(os.path.join(self.ws, "results", "a", "other.json")))["results"]
         self.assertFalse(any("a" in (r.get("ran_alongside") or []) for r in a_other))
         loads = [d["label"] for k, d in events if k == "model_loading"]

@@ -1630,8 +1630,6 @@ class Engine:
 
         def blocked(label):
             """Why the next model can't start now (None: it can)."""
-            if label in running:   # added again while it runs: it comes back once that ends
-                return ""
             if not running:
                 return None
             if len(running) >= parallel:
@@ -1657,10 +1655,13 @@ class Engine:
                         self._run["open"] = False   # nothing more can be added
                         cond.notify_all()
                         return
-                    label = pending[0][0] if pending else None
-                    why = blocked(label) if label else ""   # none pending: a model still runs, more may come
+                    # in order, except that a model added again while it runs waits for itself to end
+                    # without holding up the ones behind it
+                    nxt = next((i for i, g in enumerate(pending) if g[0] not in running), None)
+                    label = pending[nxt][0] if nxt is not None else None
+                    why = blocked(label) if label else ""   # none can start: a model still runs, more may come
                     if why is None:
-                        label, mine = pending.pop(0)
+                        label, mine = pending.pop(nxt)
                         running[label] = self.memory_need_gb(self.model(label))
                     elif why and label not in told:
                         told.add(label)
