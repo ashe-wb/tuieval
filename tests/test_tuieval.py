@@ -546,6 +546,15 @@ class AddToRun(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def finish(self, e, t, limit=480):
+        """Wait for a run thread; CI machines can take half a minute per server start. One that's
+        still going after `limit` is cancelled, so it can't run into the next test."""
+        t.join(limit)
+        if t.is_alive():
+            e.cancel()
+            t.join(120)
+            self.fail(f"the run didn't finish in {limit}s")
+
     def test_engine_adds_jobs_to_the_run_going(self):
         from tuieval import engine
         events = []
@@ -563,7 +572,7 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(sorted(j.key for j in added), ["a/other", "b/apps", "b/other"])   # a/apps is running
         self.assertEqual(e.add_jobs(e.plan(["b"], ["apps"], None, "certify", False, {}))[1],
                          "everything picked is already in the run")
-        t.join(60)
+        self.finish(e, t)
         self.assertEqual([j.status for j in jobs], ["done"] * 4)
         self.assertEqual(jobs[0].key, "a/apps")
         started = [d["job"].key for k, d in events if k == "job_started"]
@@ -584,7 +593,7 @@ class AddToRun(unittest.TestCase):
             time.sleep(0.05)
         added, why = e.add_jobs(e.plan(["a", "b"], ["other", "apps"], None, "certify", False, {}))
         self.assertEqual(sorted(j.key for j in added), ["a/other", "b/apps", "b/other"])
-        t.join(60)
+        self.finish(e, t)
         self.assertEqual([j.status for j in jobs], ["done"] * 4)
         b = json.loads(read(os.path.join(self.ws, "results", "b", "apps.json")))["results"]
         self.assertTrue(any(r.get("ran_alongside") == ["a"] for r in b))     # started next to a, not after it
