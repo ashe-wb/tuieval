@@ -752,6 +752,45 @@ class FirstRun(unittest.TestCase):
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
         self.assertEqual(out, "ResultsScreen tab-per-question")
 
+    def test_stream_follows_only_at_the_bottom(self):
+        code = textwrap.dedent("""
+            import asyncio
+            from textual.app import App
+            from tuieval.tui import StreamView
+            class A(App):
+                def compose(self):
+                    yield StreamView()
+            async def go():
+                app = A()
+                async with app.run_test(size=(60, 12)) as pilot:
+                    s = app.query_one(StreamView)
+                    for i in range(100):
+                        s.append(f"line {i}\\n")
+                    await pilot.pause()
+                    s.scroll_to(y=20, animate=False)
+                    await pilot.pause()
+                    for i in range(100):
+                        s.append("more\\n")
+                        await pilot.pause()
+                    held = s.scroll_y
+                    s.scroll_end(animate=False)
+                    await pilot.pause()
+                    s.append("last\\n")
+                    await pilot.pause()
+                    following = s.scroll_y == s.max_scroll_y
+                    s.MAX_CHARS = len(s.text) + 100        # the next text trims the oldest
+                    s.scroll_to(y=s.max_scroll_y - 30, animate=False)
+                    await pilot.pause()
+                    top = s.document.get_line(s.scroll_y)
+                    s.append("x\\n" * 60)
+                    await pilot.pause()
+                    await pilot.pause()
+                    print(held, following, s.text.startswith("…"), s.document.get_line(s.scroll_y) == top)
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60).stdout.strip()
+        self.assertEqual(out, "20 True True True")   # scrolled up stays put, also through a trim; bottom follows
+
     def test_doctor(self):
         tuieval(self.ws, "add", "mock", "--server", "local", "--label", "wanted")
         p = tuieval(self.ws, "doctor", check=False, ports=self.port)

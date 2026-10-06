@@ -181,7 +181,8 @@ def fmt_secs(secs):
 
 
 class StreamView(TextArea):
-    """Read-only, word-wrapped text that grows as tokens stream in. Scroll it with the mouse."""
+    """Read-only, word-wrapped text that grows as tokens stream in. Scroll it with the mouse; it follows
+    new text only while scrolled to the bottom."""
 
     can_focus = False
 
@@ -189,13 +190,27 @@ class StreamView(TextArea):
 
     def __init__(self, **kw):
         super().__init__(read_only=True, soft_wrap=True, show_cursor=False, max_checkpoints=1, **kw)
+        self.trim_pending = False
 
     def append(self, text, follow=True):
+        # Follow only when already at the bottom: scrolled up to read, the view stays put.
+        follow = follow and self.scroll_y >= self.max_scroll_y - 1
         self.insert(text, self.document.end)
         if len(self.text) > self.MAX_CHARS:
-            self.load_text("…" + self.text[-self.MAX_CHARS // 2:])
+            if follow:
+                self.trim()
+            elif not self.trim_pending:   # once the new text is laid out, so the place is measured right
+                self.trim_pending = True
+                self.call_after_refresh(self.trim)
         if follow:
             self.scroll_end(animate=False)
+
+    def trim(self):
+        """Drop the oldest text, keeping the view the same distance from the end (the text that's left)."""
+        self.trim_pending = False
+        from_end = self.max_scroll_y - self.scroll_y
+        self.load_text("…" + self.text[-self.MAX_CHARS // 2:])
+        self.call_after_refresh(lambda: self.scroll_to(y=max(0, self.max_scroll_y - from_end), animate=False))
 
 
 # ------------------------------------------------------------------ answer detail
