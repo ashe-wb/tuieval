@@ -37,7 +37,8 @@ def _load_native(data):
             "settings": data.get("settings", {}), "load_s": run.get("load_s"),
             "peak_rss_mb": run.get("peak_rss_mb"), "pack": pack["name"], "pack_fp": pack["fingerprint"],
             # hosted (OpenRouter) models: the provider endpoint and its declared quantization
-            "endpoint": run.get("endpoint"), "quantization": run.get("quantization")}
+            "endpoint": run.get("endpoint"), "quantization": run.get("quantization"),
+            "loaded_alongside": run.get("loaded_alongside") or []}
     rows = []
     for r in data["results"]:
         rows.append({
@@ -54,6 +55,8 @@ def _load_native(data):
             "severity": r.get("severity"), "group": r.get("group"), "repeat": r.get("repeat", 0),
             "difficulty": r.get("difficulty", "unrated"),
             "machine": r.get("machine") or run.get("machine"), "prompt_tokens": r.get("prompt_tokens"),
+            # other models served at the same time (parallel_models): its speed was shared with them
+            "alongside": r.get("ran_alongside") or [],
         })
     return rows, info
 
@@ -210,6 +213,13 @@ def timing(r, machine=None, speeds=None):
     return None, None, None, None, None
 
 
+def alongside_note(rows):
+    """' · n/N ran alongside others' when some answers ran while other models were served (their
+    speed was shared with them), else ''."""
+    shared = sum(bool(r.get("alongside")) for r in rows)
+    return f" · {shared}/{len(rows)} ran alongside others" if shared else ""
+
+
 def speed(rows, infos, machine=None, speeds=None):
     """(header, table, frontier): speed and token use per model.
 
@@ -227,7 +237,9 @@ def speed(rows, infos, machine=None, speeds=None):
     load = {}
     for i in infos:
         cur = load.setdefault(i["label"], {"load_s": None, "peak_rss_mb": None, "tags": i["tags"],
-                                           "think": i["settings"].get("enable_thinking"), "served": set()})
+                                           "think": i["settings"].get("enable_thinking"), "served": set(),
+                                           "loaded_alongside": False})
+        cur["loaded_alongside"] |= bool(i.get("loaded_alongside"))
         if i.get("endpoint"):
             q = i.get("quantization")
             cur["served"].add(f"{'undeclared' if q in (None, 'unknown') else q} via {i['endpoint']}")
@@ -247,6 +259,7 @@ def speed(rows, infos, machine=None, speeds=None):
         here = machine is None or machine in where   # load time and memory only where it ran
         if machine is None:
             kind = "measured on " + (", ".join(where) or "?")
+        kind += alongside_note(v)
         table.append([
             "★" if m in frontier else "", m, "; ".join(sorted(info.get("served") or [])) or "-",
             ",".join(info.get("tags") or []),
@@ -256,7 +269,8 @@ def speed(rows, infos, machine=None, speeds=None):
             _fmt(median(x[3] for x in t), ".0f"), _fmt(median(r["tokens"] for r in v), ".0f"),
             _fmt(median(r["reasoning_tokens"] for r in v), ".0f"), _fmt(median(r["answer_tokens"] for r in v), ".0f"),
             f"{sum(r['tokens'] for r in v) / passes:,.0f}" if passes else "-",
-            _fmt(info.get("load_s") if here else None, ".0f"),
+            _fmt(info.get("load_s") if here else None, ".0f")
+            + (" (alongside others)" if here and info.get("load_s") and info.get("loaded_alongside") else ""),
             _fmt(info["peak_rss_mb"] / 1024 if info.get("peak_rss_mb") and here else None, ".1f"),
         ])
     return header, table, frontier

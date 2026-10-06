@@ -290,6 +290,9 @@ HELP = {
 2. Pick a [b]tier[/b]: Smoke first to check the setup, then Screen, then Certify for finalists.
 3. Press [b]s[/b]. The line above the buttons says how many answers that is and roughly how long.
 
+[b]Models at a time[/b]: how many of the ticked models run side by side (blank: this machine's
+parallel_models in models.toml, default 1). Answers note the models they ran alongside.
+
 [b]Keys[/b]
   s  start (or queue it behind a run that's going)     r  results
   a  add a model (a GGUF, a model id, openrouter:<id>)  m  scan model folders for new GGUFs
@@ -308,7 +311,8 @@ with the model's reasoning and answer as they stream, then recent results with t
 [b]Keys[/b]
   k  skip the current model          c  cancel everything (finished answers are kept; it resumes next time)
   f  pause or resume auto-scroll     r  results     n  set up a new run (this one keeps going)
-  w  runs and queue                  esc  back to Setup (the run keeps going)""",
+  w  runs and queue                  esc  back to Setup (the run keeps going)
+  v  with several models at a time: stream the next one (k skips the one streaming)""",
     "ResultsScreen": """[b]Results[/b]
 
 Start with [b]Production readiness[/b]: one verdict per model and use case, and what's missing when
@@ -435,6 +439,7 @@ class AnswerScreen(ModalScreen):
                  f"{rec['gen_tps']:.0f} tok/s" if rec.get("gen_tps") else "",
                  f"{rec['total_s']:.0f}s total" if rec.get("total_s") is not None else "",
                  f"on {rec['machine']}" if rec.get("machine") else "",
+                 f"[yellow]ran alongside {', '.join(rec['ran_alongside'])}[/yellow]" if rec.get("ran_alongside") else "",
                  f"seed {rec['seed']}" if "seed" in rec else ""]
         self.query_one("#answer-head", Static).update(
             f"{mark}  {diff_badge(rec.get('difficulty', 'unrated'))}  [b]{rich_escape(rec.get('description', rec['test']))}[/b]"
@@ -544,6 +549,8 @@ class SetupScreen(Screen):
         with Horizontal(id="options"):
             yield Label("Repeats")
             yield Input("", id="repeat", type="integer", max_length=2, placeholder="1")
+            yield Label("Models at a time")
+            yield Input("", id="parallel", type="integer", max_length=1, placeholder="1")
             yield Checkbox("Rerun existing results", id="force")
         yield Static(id="estimate")
         with Horizontal(id="buttons"):
@@ -761,6 +768,13 @@ class SetupScreen(Screen):
                 list(self.query_one("#suites", SelectionList).selected), repeat,
                 self.tier(), self.query_one("#force", Checkbox).value)
 
+    def parallel(self):
+        """Models at a time for the next run: the field, or blank for this machine's parallel_models."""
+        try:
+            return max(1, int(self.query_one("#parallel", Input).value)) or None
+        except ValueError:
+            return None
+
     def current_picks(self, suites=None):
         """{pack: picked test ids} for packs that still have those tests (and, given suites, are ticked)."""
         e = self.app.engine
@@ -803,6 +817,7 @@ class SetupScreen(Screen):
         e = self.app.engine
         defaults = sorted({e.default_repeat(e.packs[p], tier) for p in suites}) or [1]
         self.query_one("#repeat", Input).placeholder = str(defaults[0]) if len(defaults) == 1 else "pack"
+        self.query_one("#parallel", Input).placeholder = str(e.parallel_models())
         if not e.packs:
             est.update("[yellow]No packs yet.[/yellow] [dim]Quit, run tuieval new-pack <name>, "
                        "and open tuieval again.[/dim]")
@@ -852,6 +867,11 @@ class SetupScreen(Screen):
         resumed = [j for j in run if "done earlier" in j.note]
         if resumed:
             text += f"   [yellow]{len(resumed)} pack(s) continue from earlier results[/yellow]"
+        at_once = min(self.parallel() or e.parallel_models(), len({j.label for j in run}))
+        if at_once > 1:
+            text += (f"\n[cyan]Up to {at_once} models at a time[/cyan][dim] (the time above assumes one at a "
+                     "time). Answers note the models they ran alongside, since those share the machine's "
+                     "speed.[/dim]")
         est.update(text + self.queue_hint())
 
     def queue_hint(self):
@@ -879,6 +899,8 @@ class SetupScreen(Screen):
             if name in e.packs:
                 packs.select(name)
         self.query_one("#repeat", Input).value = str(sel["repeat"]) if sel.get("repeat") else ""
+        if "parallel" in sel:
+            self.query_one("#parallel", Input).value = str(sel["parallel"]) if sel["parallel"] else ""
         tier = sel.get("tier") or ("smoke" if sel.get("smoke") else None)
         if tier in engine.TIERS:
             self.query_one(f"#tier-{tier}", RadioButton).value = True
@@ -917,7 +939,8 @@ class SetupScreen(Screen):
             self.notify("Select at least one eval pack and one model.", severity="warning")
             return
         picks = self.current_picks(suites)
-        sel = {"models": labels, "packs": suites, "repeat": repeat, "tier": tier, "force": force, "tests": picks}
+        sel = {"models": labels, "packs": suites, "repeat": repeat, "tier": tier, "force": force, "tests": picks,
+               "parallel": self.parallel()}
         jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks)
         rerun = False
         if not any(j.status == "waiting" for j in jobs):
@@ -1453,7 +1476,7 @@ class QueuedRun:
         if new:
             return None, (f"it would now start over {', '.join(new)}, which wasn't confirmed when it was queued. "
                           "Start it again from Setup to see why")
-        return RunScreen(jobs), None
+        return RunScreen(jobs, sel.get("parallel")), None
 
 
 class QueuedTune:
@@ -1783,6 +1806,7 @@ class RunScreen(Screen):
         Binding("k", "skip_model", "Skip model", priority=True),
         Binding("c", "cancel_all", "Cancel all", priority=True),
         Binding("f", "toggle_follow", "Pause scroll", priority=True),
+        Binding("v", "watch_next", "Next model", priority=True),
         Binding("n", "new_run", "New run", priority=True),
         Binding("r", "results", "Results", priority=True),
         Binding("w", "runs", "Runs", priority=True),
@@ -1793,9 +1817,11 @@ class RunScreen(Screen):
     LIVE_ONLY = {"skip_model", "cancel_all", "toggle_follow"}
     DONE_ONLY = {"new_run"}
 
-    def __init__(self, jobs):
+    def __init__(self, jobs, parallel=None):
         super().__init__()
         self.jobs = jobs
+        self.parallel = parallel      # models at a time (None: this machine's parallel_models)
+        self.watch = None             # the model whose answers stream (several run at a time)
         self.running = True
         self.follow = True
         self.buf = {"reasoning": [], "answer": []}
@@ -1839,11 +1865,23 @@ class RunScreen(Screen):
         self.notify("\n".join(lines), title=title, severity="error", timeout=30)
 
     def check_action(self, action, parameters):
+        if action == "watch_next":
+            return self.running and self.side_by_side
         if action in self.LIVE_ONLY:
             return self.running
         if action in self.DONE_ONLY:
             return not self.running
         return True
+
+    @property
+    def side_by_side(self):
+        """Several models run at a time in this run."""
+        return min(self.parallel or self.app.engine.parallel_models(),
+                   len({j.label for j in self.jobs if j.status != "skipped"})) > 1
+
+    def active(self):
+        """Models being loaded or run now, in queue order."""
+        return list(dict.fromkeys(j.label for j in self.jobs if j.status in ("loading", "running")))
 
     def counts(self):
         return (sum(j.done for j in self.jobs), sum(j.passed for j in self.jobs), sum(j.failed for j in self.jobs))
@@ -1908,14 +1946,18 @@ class RunScreen(Screen):
         self.query_one("#bar", ProgressBar).update(total=max(self.total, 1), progress=0)
         self.set_interval(0.1, self.flush_streams)
         self.set_interval(1.0, self.tick)
-        self.app.start_run(self.jobs, self.on_engine_event)
+        self.app.start_run(self.jobs, self.on_engine_event, self.parallel)
         self.tick()
 
     # -- events from the engine thread
     def on_engine_event(self, kind, **d):
         if self.app.closing:
             return  # the app is shutting down; the UI thread may be waiting on the engine
+        if kind in ("request_started", "model_loading") and self.watch not in self.active():
+            self.watch = d["job"].label if "job" in d else d["label"]   # follow the next model streaming
         if kind == "delta":  # very frequent: buffer, flushed every 100 ms on the UI thread
+            if d.get("label", self.watch) != self.watch:
+                return       # another model running alongside: v switches to it
             with self.buf_lock:
                 self.buf[d["stream"]].append(d["text"])
             return
@@ -1936,8 +1978,15 @@ class RunScreen(Screen):
     def event(self, text):
         self.query_one("#events", Log).write_line(time.strftime("%H:%M:%S ") + text)
 
+    def watched(self, kind, d):
+        """Whether an event belongs to the streaming model (always, with one model at a time)."""
+        label = d["job"].label if "job" in d else d.get("label")
+        return label is None or label == self.watch or not self.side_by_side
+
     def handle(self, kind, d):
-        if kind == "request_started":
+        if kind == "request_started" and not self.watched(kind, d):
+            pass         # another model running alongside: its rows still show in Recent results
+        elif kind == "request_started":
             self.flush_streams()
             self.query_one("#reasoning", StreamView).clear()
             self.query_one("#answer", StreamView).clear()
@@ -1948,7 +1997,8 @@ class RunScreen(Screen):
                             f"{'  [magenta]🖼 image[/magenta]' if d['has_image'] else ''}\n"
                             f"{diff_badge(d.get('difficulty', 'unrated'))}  {d['test']}")
         elif kind == "request_done":
-            self.flush_streams()
+            if self.watched(kind, d):
+                self.flush_streams()
             job, r = d["job"], d["record"]
             mark = "[green]✓[/green]" if r["pass"] else "[red]✗[/red]"
             recent = self.query_one("#recent", DataTable)
@@ -1974,7 +2024,8 @@ class RunScreen(Screen):
                 recent.move_cursor(row=recent.row_count - 1)
             if job:
                 self.update_job(job)
-            self.req_started = None
+            if self.watched(kind, d):
+                self.req_started = None
             self.update_overall()
         elif kind in ("job_started", "job_update", "job_done"):
             job = d["job"]
@@ -2008,15 +2059,18 @@ class RunScreen(Screen):
             self.current = "The other window finished; starting…"
             self.event("the machine is free; starting")
         elif kind == "model_loading":
-            self.current = f"Loading [b]{d['label']}[/b]…"
             self.event(f"{d['label']}: starting server")
             if d.get("log"):
                 self.server_logs[d["label"]] = d["log"]
-            self.query_one("#serverlog", Log).write_line(f"$ {' '.join(d['command'])}")
-            self.query_one("#reasoning", StreamView).clear()
-            self.query_one("#answer", StreamView).clear()
+            self.query_one("#serverlog", Log).write_line(self.log_prefix(d) + f"$ {' '.join(d['command'])}")
+            if self.watched(kind, d):
+                self.current = f"Loading [b]{d['label']}[/b]…"
+                self.query_one("#reasoning", StreamView).clear()
+                self.query_one("#answer", StreamView).clear()
+        elif kind == "model_waiting":
+            self.event(f"[yellow]{d['message']}[/yellow]")
         elif kind == "server_log":
-            self.query_one("#serverlog", Log).write_line(d["line"])
+            self.query_one("#serverlog", Log).write_line(self.log_prefix(d) + d["line"])
         elif kind == "server_stall":
             self.event(f"[bold red]STALL[/bold red] {d['message']}")
             self.notify(d["message"], severity="error", timeout=30)
@@ -2029,7 +2083,8 @@ class RunScreen(Screen):
         elif kind == "model_ready":
             loaded = f" in {d['load_s']:.0f}s" if d.get("load_s") else ""
             self.event(f"{d['label']}: ready as {d['ids']}{loaded}")
-            self.current = f"[b]{d['label']}[/b] ready{loaded}, starting evals…"
+            if self.watched(kind, d):
+                self.current = f"[b]{d['label']}[/b] ready{loaded}, starting evals…"
         elif kind == "resource":
             self.mem[d["label"]] = d["rss_mb"]
         elif kind == "server_retry":
@@ -2082,6 +2137,9 @@ class RunScreen(Screen):
             self.app.session_finished(self)
         self.refresh_current()
 
+    def log_prefix(self, d):
+        return f"[{d['label']}] " if self.side_by_side and d.get("label") else ""
+
     def update_job(self, j):
         q = self.query_one("#queue", DataTable)
         style = STATUS_STYLE.get(j.status, "")
@@ -2115,7 +2173,9 @@ class RunScreen(Screen):
             speed += f" · {sorted(tps)[len(tps) // 2]:.0f} tok/s"
         if ttfts:
             speed += f" · TTFT {sorted(ttfts)[len(ttfts) // 2]:.1f}s"
-        mem = max(self.mem.values()) if self.mem else 0
+        active = self.active()
+        mem = (sum(self.mem.get(l, 0) for l in active) if self.side_by_side and active   # models side by side add up
+               else max(self.mem.values()) if self.mem else 0)
         if mem:
             speed += f" · mem {mem / 1024:.1f} GB" if mem >= 1024 else f" · mem {mem:.0f} MB"
         self.query_one("#overall", Static).update(
@@ -2132,6 +2192,12 @@ class RunScreen(Screen):
             if self.req_first and now - self.req_first > 1:
                 rate = f" · ~{self.req_tokens / (now - self.req_first):.0f} tok/s"
             extra = f"   [dim]{fmt_secs(now - self.req_started)} · {ttft}~{self.req_tokens} tokens{rate}[/dim]"
+        others = [l for l in self.active() if l != self.watch] if self.running and self.side_by_side else []
+        if others:
+            def where(label):
+                j = next((j for j in self.jobs if j.label == label and j.status in ("loading", "running")), None)
+                return f"{label} ({j.pack.label} {j.done}/{j.total})" if j and j.status == "running" else f"{label} (loading)"
+            extra += f"\n[dim]Also running: {' · '.join(map(where, others))} · v streams the next one[/dim]"
         self.query_one("#current", Static).update(self.current + extra)
 
     def tick(self):
@@ -2144,8 +2210,28 @@ class RunScreen(Screen):
     # -- actions
     def action_skip_model(self):
         if self.running:
-            self.app.engine.skip_model()
-            self.notify("Skipping the current model…")
+            if self.side_by_side and self.watch:
+                self.app.engine.skip_model(self.watch)
+                self.notify(f"Skipping {self.watch}; the others keep going…")
+            else:
+                self.app.engine.skip_model()
+                self.notify("Skipping the current model…")
+
+    def action_watch_next(self):
+        """Stream the next model running alongside (from its next answer)."""
+        active = self.active()
+        if len(active) < 2:
+            self.notify("Only one model is running right now.")
+            return
+        self.watch = active[(active.index(self.watch) + 1) % len(active)] if self.watch in active else active[0]
+        with self.buf_lock:
+            for v in self.buf.values():
+                v.clear()
+        self.query_one("#reasoning", StreamView).clear()
+        self.query_one("#answer", StreamView).clear()
+        self.req_started = None
+        self.current = f"Streaming [b]{self.watch}[/b] from its next answer…"
+        self.refresh_current()
 
     def action_cancel_all(self):
         if not self.running:
@@ -2548,6 +2634,11 @@ class ResultsScreen(Screen):
                      f"failed; both passed {h['both']}, both failed {h['neither']}. Fewer tokens: {a} on "
                      f"{h['fewer_a']}, {b} on {h['fewer_b']}" + (f" (median {a}/{b} ratio {h['ratio']:.2f}×)"
                                                                if h["ratio"] else "") + ".")
+        shared_speed = sorted({c_m for t in shared for c_m, c in t["cells"].items() if c_m in models
+                               and any(r.get("alongside") for r in c["rows"])})
+        if shared_speed:
+            line += (f"\n[yellow]Some answers of {', '.join(shared_speed)} ran alongside other models, which "
+                     "shared the machine's speed: compare their times with care.[/yellow]")
         title.update(line + "  [dim]Fewest tokens / Fastest = questions won; ties count for both. Total tokens / "
                      "Total time add up each question's median. Avg tok/s = all tokens over all the time they took "
                      "(cached prompts left out).[/dim]")
@@ -2676,6 +2767,7 @@ class EvalsApp(App):
     #options { height: 3; padding: 0 1; align-vertical: middle; }
     #options Label { padding: 1 1 0 0; }
     #options Input { width: 12; }
+    #options #parallel { width: 8; }
     #estimate { padding: 0 2; height: auto; min-height: 2; }
     #buttons { height: 3; padding: 0 1; }
     #buttons Button { margin-right: 2; }
@@ -2965,10 +3057,10 @@ class EvalsApp(App):
         self.worker = threading.Thread(target=work, name="tune")
         self.worker.start()
 
-    def start_run(self, jobs, on_event):
+    def start_run(self, jobs, on_event, parallel=None):
         self.engine.on_event = on_event
         # A plain (non-daemon) thread, so quitting can wait for servers to be stopped.
-        self.worker = threading.Thread(target=self.engine.run, args=(jobs,), name="engine")
+        self.worker = threading.Thread(target=self.engine.run, args=(jobs, parallel), name="engine")
         self.worker.start()
 
     def on_unmount(self):

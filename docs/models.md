@@ -71,7 +71,18 @@ The best server flags differ per model and per machine, so tuieval splits them b
 
 - **Machine id** is detected automatically (e.g. `m3max-64gb`, `m2-16gb`; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
 - **Fit check (Apple Silicon, llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory, capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers. Servers that size their own memory (their `cmd` doesn't take `{ctx}`) are left alone: their context is the model's `max_context`; `fit_check` on the server changes that.
-- **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free for macOS, default 4) and `gpu_residency_gb` (see the stall guard).
+- **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free for macOS, default 4), `gpu_residency_gb` (see the stall guard) and `parallel_models` (see below).
+
+## Several models at a time
+
+By default a run serves one model at a time. On a machine with room for more, set `parallel_models = 2` (or more) under `[machines.<id>]`, type a number in **Models at a time** on the TUI's setup screen (blank uses the machine's setting), or pass `tuieval run --parallel N`.
+
+- Models start in queue order, each in its own lane. The next one waits while its fit-check memory estimate wouldn't fit next to the ones running (without one, e.g. a server that sizes its own memory, the setting decides). Contexts are never shrunk to make room.
+- A second model on the same server gets a free port, so a server's `cmd` must take `{port}`.
+- A server with `before_start` (which may stop other servers) always runs on its own. Tuning is always one model at a time.
+- Answers are judged exactly as in a run of one model. Each answer records the models served while it ran (`ran_alongside`), and a load time measured next to others is marked (`loaded_alongside`), since models side by side share the machine's GPU and memory bandwidth. The speed table and the answer view show it.
+- In the TUI, one model's answers stream at a time: `v` switches to the next, `k` skips the one streaming. `tuieval run` prints one line per answer instead of streaming.
+- Only one run uses the machine at a time across tuieval windows; models at a time applies within a run.
 
 ## Tuning
 
@@ -255,5 +266,6 @@ Optional sections:
 # [machines.m3max-64gb]
 # memory_headroom_gb = 3       # GPU memory kept free for macOS and other apps (default 4)
 # gpu_residency_gb = 12        # GPU memory the driver keeps resident before churning (default: half of RAM)
+# parallel_models = 2          # models a run serves at a time (default 1)
 ```
 
