@@ -1,6 +1,6 @@
 """A tiny OpenAI-compatible chat server for tests: no model, answers from the packs' own tests.
 
-    python tests/mock_server.py --port 18090 --packs path/to/packs [--mode oracle|wrong|fixed]
+    python tests/mock_server.py --port 18090 --packs path/to/packs [--mode oracle|wrong|fixed] [--delay 0.2]
 
 oracle  answers each question with its test's `reference` (or the expected tool call), so a
         correct grader passes it
@@ -45,7 +45,7 @@ def reply_for(test, mode):
 
 
 class Handler(BaseHTTPRequestHandler):
-    answers, mode, model = {}, "oracle", "mock"
+    answers, mode, model, delay = {}, "oracle", "mock", 0.0
 
     def log_message(self, *a):
         pass
@@ -87,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         send({"choices": [{"delta": {"reasoning_content": "Thinking it over. "}}]})
-        time.sleep(0.005)
+        time.sleep(self.delay or 0.005)
         for i in range(0, len(text), 12):
             send({"choices": [{"delta": {"content": text[i:i + 12]}}]})
         for i, c in enumerate(calls):
@@ -107,8 +107,9 @@ def main(argv=None):
     p.add_argument("--packs", required=True)
     p.add_argument("--mode", choices=("oracle", "wrong", "fixed"), default="oracle")
     p.add_argument("--model", default="mock")
+    p.add_argument("--delay", type=float, default=0.0, help="seconds each answer takes")
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
-    Handler.answers, Handler.mode, Handler.model = load_answers(a.packs), a.mode, a.model
+    Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:

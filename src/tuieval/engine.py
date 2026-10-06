@@ -229,6 +229,7 @@ class Serving:
     identity: dict             # output-affecting settings, part of the results fingerprint
     profile: dict | None = None
     mtp_layers: int = 0
+    need_gb: float | None = None   # estimated GPU memory at ctx (from the fit check); None when unknown
 
 
 def infer_server(cfg, model):
@@ -664,6 +665,20 @@ def holder_text(holder):
             "One eval or tune per machine: this starts when it ends")
 
 
+class Lane:
+    """One model being run: its own request stream, stall reason and skip switch, so models run
+    side by side (parallel_models) stop independently. Runs and tunes in one lane use the engine's
+    main lane."""
+    def __init__(self, label=None):
+        self.label = label
+        self.stream = None
+        self.stall = None         # set by the stall watcher: why this model's server stalled
+        self.skip = threading.Event()
+        self.procs = []
+        self.port = None
+        self.seen = set()         # other models served during this model's current load or request
+
+
 class Engine:
     def __init__(self, on_event=None, root=None, models_path=None, packs_dir=None,
                  results_dir=None, log_dir=None):
@@ -677,11 +692,12 @@ class Engine:
         self.pack_errors = []
         self.packs = packs_mod.load_packs(self.packs_dir, self.pack_errors)
         self._cancel = threading.Event()
-        self._skip = threading.Event()
-        self._stall = None        # set by the stall watcher: why the current server stalled
+        self._main_lane = Lane()
+        self._here = threading.local()   # .lane: the lane this thread runs
+        self._lanes = {}          # label -> Lane of each model being served now
+        self._lanes_lock = threading.Lock()
         self._procs = []
         self._stop_lock = threading.Lock()
-        self._stream = None
         self._header_cache = {}
         self._serving = {}
         self.tuning_dir = os.path.join(root, "tuning")
@@ -689,6 +705,34 @@ class Engine:
         self._endpoints = {}      # label -> the provider endpoint a hosted model is pinned to
         self._catalogues = {}
         self._add_remote_models()
+
+    # ---- the lane this thread runs (see Lane)
+    def _lane(self):
+        return getattr(self._here, "lane", None) or self._main_lane
+
+    def _all_lanes(self):
+        with self._lanes_lock:
+            return [self._main_lane, *self._lanes.values()]
+
+    @property
+    def _stream(self):
+        return self._lane().stream
+
+    @_stream.setter
+    def _stream(self, value):
+        self._lane().stream = value
+
+    @property
+    def _stall(self):
+        return self._lane().stall
+
+    @_stall.setter
+    def _stall(self, value):
+        self._lane().stall = value
+
+    @property
+    def _skip(self):
+        return self._lane().skip
 
     def reload(self):
         self._serving = {}
@@ -1150,6 +1194,30 @@ class Engine:
         """models.toml [machines.<id>] (optional): memory_headroom_gb, name."""
         return self.cfg.get("machines", {}).get(machine_id or self.machine().id, {})
 
+    def parallel_models(self):
+        """How many models a run serves at a time on this machine: models.toml [machines.<id>]
+        parallel_models (default 1)."""
+        try:
+            return max(1, int(self.machine_settings().get("parallel_models", 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def memory_need_gb(self, m):
+        """GPU memory a model takes while served here: 0 for one we don't start (a hosted API or a
+        server already running), the fit check's estimate for a local GGUF, else None (unknown)."""
+        if not self.cfg["servers"][m["server"]].get("cmd"):
+            return 0.0
+        return self.serving(m).need_gb
+
+    def memory_available_gb(self):
+        """GPU memory models may take here (what the fit check sizes contexts against)."""
+        mc = self.machine()
+        return mc.gpu_limit_gb - self.machine_settings(mc.id).get("memory_headroom_gb", 4.0)
+
+    def runs_alone(self, m):
+        """A server whose before_start step may stop other servers never runs next to another model."""
+        return bool(self.cfg["servers"][m["server"]].get("before_start"))
+
     def gpu_residency_gb(self, machine=None):
         """GPU memory this machine's driver keeps resident without churning (see machines.py)."""
         mc = machine or self.machine()
@@ -1180,7 +1248,7 @@ class Engine:
         kv = m.get("kv_type") or server.get("kv_type")
         want = min(x for x in (server.get("max_ctx"), m.get("ctx"), m.get("max_context"), 10**9) if x)
         want = None if want == 10**9 else want
-        ctx, fits, note, mtp, size = want, True, "", 0, None
+        ctx, fits, note, mtp, size, need = want, True, "", 0, None, None
         path = expand(m["model"])
         if server.get("model_is_path") and os.path.isfile(path):
             try:
@@ -1192,7 +1260,7 @@ class Engine:
                     headroom = self.machine_settings(mc.id).get("memory_headroom_gb", 4.0)
                     f = machines.fit(path, mc, kv_type=kv or "f16", headroom_gb=headroom, extra_bytes=extra,
                                      want_ctx=want)
-                    ctx, fits, note = f.max_ctx, f.fits, f.note
+                    ctx, fits, note, need = f.max_ctx, f.fits, f.note, f.need_gb
             except (OSError, ValueError) as e:
                 note = f"couldn't read the GGUF header ({e}); context not checked"
         profile, perf, source = None, [], "n/a"
@@ -1221,7 +1289,7 @@ class Engine:
             # resident), so both are part of what a result is valid for.
             identity["machine"] = mc.id
             identity["perf"] = perf
-        sv = Serving(mc, ctx, kv, fits, note, perf, source, identity, profile, mtp)
+        sv = Serving(mc, ctx, kv, fits, note, perf, source, identity, profile, mtp, need)
         self._serving[key] = sv
         return sv
 
@@ -1289,16 +1357,21 @@ class Engine:
     # ---- control
     def cancel(self):
         self._cancel.set()
-        self._abort()
+        self._abort(self._all_lanes(), list(self._procs))
 
-    def skip_model(self):
-        self._skip.set()
-        self._abort()
+    def skip_model(self, label=None):
+        """Skip a model being run (label), or every one being run now."""
+        with self._lanes_lock:
+            lanes = [self._lanes[label]] if label in self._lanes else list(self._lanes.values()) or [self._main_lane]
+        for lane in lanes:
+            lane.skip.set()
+        self._abort(lanes, [p for lane in lanes for p in lane.procs] if self._lanes else list(self._procs))
 
-    def _abort(self):
-        if self._stream:
-            self._stream.close()
-        for p in list(self._procs):
+    def _abort(self, lanes, procs):
+        for lane in lanes:
+            if lane.stream:
+                lane.stream.close()
+        for p in procs:
             self._stop(p, grace=10)
 
     def _check(self):
@@ -1322,6 +1395,7 @@ class Engine:
         STALL_WINDOW_S, the GPU driver is churning memory: record why and abort the request."""
         mc = self.machine()
         limit = self.gpu_residency_gb(mc)
+        lane = self._lane()
         samples = []   # (time, user, kernel)
 
         def run():
@@ -1343,15 +1417,15 @@ class Engine:
                     continue
                 share = dk / (du + dk)
                 info["kernel_share_max"] = max(info.get("kernel_share_max") or 0, round(share, 2))
-                if share > self.STALL_KERNEL_SHARE and (du + dk) / dt > self.STALL_MIN_BUSY and not self._stall:
+                if share > self.STALL_KERNEL_SHARE and (du + dk) / dt > self.STALL_MIN_BUSY and not lane.stall:
                     over = f"{alloc:.1f} GB of GPU memory allocated; " if alloc else ""
-                    self._stall = (f"{m['label']} stalled in the GPU driver on {mc.id}: {100 * share:.0f}% of its "
+                    lane.stall = (f"{m['label']} stalled in the GPU driver on {mc.id}: {100 * share:.0f}% of its "
                                    f"CPU time went to the kernel for {self.STALL_WINDOW_S}s while the GPU waited "
                                    f"({over}this machine keeps ~{limit:.0f} GB resident). "
                                    "Lower its GPU memory or retune it.")
-                    self.emit("server_stall", label=m["label"], message=self._stall)
-                    if self._stream:
-                        self._stream.close()
+                    self.emit("server_stall", label=m["label"], message=lane.stall)
+                    if lane.stream:
+                        lane.stream.close()
         threading.Thread(target=run, daemon=True).start()
 
     # ---- processes
@@ -1360,6 +1434,7 @@ class Engine:
         p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
                              stderr=subprocess.STDOUT, start_new_session=True)
         self._procs.append(p)
+        self._lane().procs.append(p)
         return p
 
     def _stop(self, p, grace=30):
@@ -1381,6 +1456,9 @@ class Engine:
                     p.wait()
             if p in self._procs:
                 self._procs.remove(p)
+            for lane in self._all_lanes():
+                if p in lane.procs:
+                    lane.procs.remove(p)
 
     def _tail(self, path, label, stop):
         def run():
@@ -1472,8 +1550,9 @@ class Engine:
         return any(self.cfg["servers"][j.model["server"]].get("cmd") for j in jobs if j.status == "waiting")
 
     # ---- running
-    def run(self, jobs):
-        """Run the jobs (blocking). Jobs of the same model share one server start."""
+    def run(self, jobs, parallel=None):
+        """Run the jobs (blocking). Jobs of the same model share one server start. parallel: how many
+        models are served at a time (default: parallel_models for this machine)."""
         self._cancel.clear()
         self.emit("queue_started", jobs=jobs)
         models = sorted({j.label for j in jobs if j.status == "waiting"})
@@ -1486,25 +1565,10 @@ class Engine:
                 for j in jobs:
                     if j.label not in order:
                         order.append(j.label)
-                for label in order:
-                    mine = [j for j in jobs if j.label == label and j.status == "waiting"]
-                    if not mine:
-                        continue
-                    self._skip.clear()
-                    try:
-                        try:
-                            self._run_model(mine)
-                        except (Cancelled, ModelFailed):
-                            raise
-                        except Exception as e:  # never let one model's surprise kill the whole queue
-                            raise ModelFailed(f"unexpected error: {e!r}") from e
-                    except ModelFailed as e:
-                        for j in mine:
-                            if j.status in ("waiting", "loading", "running"):
-                                j.status = "skipped" if "by user" in str(e) else "failed"
-                                j.note, j.finished = str(e).splitlines()[0], time.time()
-                                self.emit("job_done", job=j)
-                        self.emit("model_failed", label=label, message=str(e))
+                groups = [(label, [j for j in jobs if j.label == label and j.status == "waiting"]) for label in order]
+                self._run_lanes([g for g in groups if g[1]], max(1, int(parallel or self.parallel_models())))
+            if self._cancel.is_set():
+                raise Cancelled()
         except Cancelled:
             for j in jobs:
                 if j.status in ("waiting", "loading", "running"):
@@ -1521,6 +1585,112 @@ class Engine:
             if changes:
                 self.emit("verdicts", changes=changes)
             self.emit("queue_done", jobs=jobs, cancelled=self._cancel.is_set())
+
+    def _run_lanes(self, groups, parallel):
+        """Run each model's jobs in its own lane, up to `parallel` at a time, in order: the next
+        model starts once a lane is free, nothing running stops it (runs_alone), and its memory fits
+        next to the ones running (memory_need_gb; an unknown need is left to the setting)."""
+        pending, running, told = list(groups), {}, set()
+        cond = threading.Condition()
+
+        def blocked(label):
+            """Why the next model can't start now (None: it can)."""
+            if not running:
+                return None
+            if len(running) >= parallel:
+                return ""
+            m = self.model(label)
+            if self.runs_alone(m) or any(self.runs_alone(self.model(l)) for l in running):
+                alone = label if self.runs_alone(m) else next(l for l in running if self.runs_alone(self.model(l)))
+                return (f"{alone}'s server runs a before_start step that may stop other servers, so it runs "
+                        "on its own")
+            need = self.memory_need_gb(m)
+            used = sum(n for n in running.values() if n)
+            room = self.memory_available_gb()
+            if need and used + need > room:
+                return (f"needs ~{need:.0f} GB; {', '.join(running)} take ~{used:.0f} of {room:.0f} GB, so it "
+                        "starts when there's room")
+            return None
+
+        def lane():
+            while True:
+                with cond:
+                    while True:
+                        if self._cancel.is_set() or not pending:
+                            return
+                        label = pending[0][0]
+                        why = blocked(label)
+                        if why is None:
+                            label, mine = pending.pop(0)
+                            running[label] = self.memory_need_gb(self.model(label))
+                            break
+                        if why and label not in told:
+                            told.add(label)
+                            self.emit("model_waiting", label=label, message=f"{label} waits: {why}")
+                        cond.wait(1.0)
+                try:
+                    self._run_lane(label, mine)
+                finally:
+                    with cond:
+                        running.pop(label, None)
+                        cond.notify_all()
+
+        if parallel == 1 or len(groups) == 1:
+            lane()
+            return
+        threads = [threading.Thread(target=lane, name=f"lane-{i + 1}") for i in range(min(parallel, len(groups)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def _run_lane(self, label, mine):
+        """One model's jobs, in this thread's own lane. Other models served meanwhile are noted on
+        each answer (ran_alongside), since they share the machine's GPU and memory bandwidth."""
+        lane = Lane(label)
+        m = mine[0].model
+        with self._lanes_lock:
+            for other in self._lanes.values():
+                other.seen.add(label)
+            lane.seen = set(self._lanes)
+            if self.cfg["servers"][m["server"]].get("cmd"):
+                lane.port = self._lane_port(m)
+            self._lanes[label] = lane
+        self._here.lane = lane
+        try:
+            try:
+                self._run_model(mine)
+            except (Cancelled, ModelFailed):
+                raise
+            except Exception as e:  # never let one model's surprise kill the whole queue
+                raise ModelFailed(f"unexpected error: {e!r}") from e
+        except ModelFailed as e:
+            for j in mine:
+                if j.status in ("waiting", "loading", "running"):
+                    j.status = "skipped" if "by user" in str(e) else "failed"
+                    j.note, j.finished = str(e).splitlines()[0], time.time()
+                    self.emit("job_done", job=j)
+            self.emit("model_failed", label=label, message=str(e))
+        except Cancelled:
+            pass   # run() marks what's left
+        finally:
+            self._here.lane = None
+            with self._lanes_lock:
+                self._lanes.pop(label, None)
+
+    def _lane_port(self, m):
+        """The server's port, or a free one when another model being served has it (call with
+        _lanes_lock held)."""
+        port = self.cfg["servers"][m["server"]].get("port")
+        if port is None or not any(l.port == port for l in self._lanes.values()):
+            return port
+        taken = {l.port for l in self._lanes.values()}
+        while True:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                free = s.getsockname()[1]
+            if free not in taken:
+                return free
 
     @contextlib.contextmanager
     def serve(self, m, perf_args=None, port=None, log_name=None):
@@ -1649,11 +1819,16 @@ class Engine:
         for j in jobs:
             j.status = "loading"
             self.emit("job_update", job=j)
-        with self.serve(m) as (base_url, info):
+        lane = self._lane()
+        with self.serve(m, port=lane.port) as (base_url, info):
+            with self._lanes_lock:
+                loaded_alongside = sorted(lane.seen)   # served while this one loaded: its load time is shared
+
             def run_info():
                 return {"load_s": info["load_s"], "peak_rss_mb": info["peak_mb"](),
                         "server_facts": info["facts"] or None, "gpu_peak_gb": info.get("gpu_peak_gb"),
-                        "kernel_share_max": info.get("kernel_share_max"), **serving_info}
+                        "kernel_share_max": info.get("kernel_share_max"),
+                        **({"loaded_alongside": loaded_alongside} if loaded_alongside else {}), **serving_info}
             failed_in_row = 0
             for j in jobs:
                 self._check()
@@ -1736,7 +1911,7 @@ class Engine:
         return tests
 
     # ---- sittings: a pack run over several sessions (stopped and resumed) keeps its total time
-    SITTING_KEYS = ("load_s", "peak_rss_mb", "gpu_peak_gb", "kernel_share_max", "machine")
+    SITTING_KEYS = ("load_s", "peak_rss_mb", "gpu_peak_gb", "kernel_share_max", "machine", "loaded_alongside")
 
     def _sitting(self, job, info):
         now = time.time()
@@ -1811,6 +1986,9 @@ class Engine:
         for k in ("peak_rss_mb", "gpu_peak_gb", "kernel_share_max"):
             if peak(k) is not None:
                 out[k] = peak(k)
+        along = sorted({l for s in sittings for l in s.get("loaded_alongside") or []})
+        if along:
+            out["loaded_alongside"] = along
         return out
 
     def _run_job(self, job, base_url, run_info, alive=lambda: True):
@@ -1862,6 +2040,9 @@ class Engine:
                 if (test["id"], rep) in done_keys:
                     continue
                 self._check()
+                lane = self._lane()
+                with self._lanes_lock:
+                    lane.seen = set(self._lanes) - {job.label}
                 self.emit("request_started", job=job, test=test["description"], test_id=test["id"],
                           has_image=bool(test.get("image")), repeat=rep, difficulty=test.get("difficulty", "unrated"))
                 waits = list(self.SERVER_RETRY_WAITS_S)
@@ -1870,7 +2051,7 @@ class Engine:
                     try:
                         body = self._body(job, test, rep)
                         res = client.stream_chat(base_url, body,
-                                                 lambda kind, text: self.emit("delta", stream=kind, text=text),
+                                                 lambda kind, text: self.emit("delta", stream=kind, text=text, label=job.label),
                                                  timeout=timeout, stream=self._stream, headers=headers)
                     except client.Cancelled:
                         self._check()
@@ -1917,6 +2098,8 @@ class Engine:
                        **({"checks": g["checks"]} if "checks" in g else {}),
                        "machine": self.machine().id,
                        **({"quantization": ep.get("quantization")} if ep else {}),
+                       # other models served while this answer ran: they shared the machine, so its speed did too
+                       **({"ran_alongside": sorted(lane.seen)} if lane.seen else {}),
                        "sent": "+".join(msg["role"] for msg in body["messages"]),  # proof: single turn
                        **({"seed": body["seed"]} if "seed" in body else {}), **meta}
                 # The same long answer twice for one question, with sampling on, means a cached response

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 import urllib.request
@@ -364,6 +365,156 @@ class PickTests(unittest.TestCase):
         tuieval(self.ws, "run", "--preset", "quick")
         self.assertEqual(self.rows(), {"b": True, "d": True})
         self.assertEqual(len(self.rows("other")), 1)     # no pick: the Screen sample (screen = 1)
+
+
+class Parallel(unittest.TestCase):
+    """Several models at a time (parallel_models / --parallel): each runs in its own lane on its own
+    port, answers note the models they ran alongside, and the scheduler keeps the memory and
+    before_start rules."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        d = os.path.join(self.ws, "packs", "apps")
+        os.makedirs(d)
+        write(os.path.join(d, "pack.toml"), 'label = "apps"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+        write(os.path.join(d, "tests.yaml"), "".join(
+            f"- {{id: {t}, input: question {t}, expected: 1, reference: 'ANSWER: 1', difficulty: easy}}\n"
+            for t in "abcdef"))
+        mock = [sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                os.path.join(self.ws, "packs"), "--model", "{served_name}", "--delay", "0.15"]
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f"\n[servers.mk]\ncmd = {json.dumps(mock)}\nport = {free_port()}\n"
+                    f"\n[servers.solo]\ncmd = {json.dumps(mock)}\nport = {free_port()}\n"
+                    f'before_start = ["{sys.executable}", "-c", "pass"]\n')
+            for label, server in (("a", "mk"), ("b", "mk"), ("s", "solo")):
+                f.write(f'\n[[models]]\nlabel = "{label}"\nserver = "{server}"\nmodel = "{label}"\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def results(self, label):
+        return json.loads(read(os.path.join(self.ws, "results", label, "apps.json")))
+
+    def engine(self):
+        from tuieval import engine
+        events = []
+        e = engine.Engine(lambda kind, **d: events.append((kind, d)), root=self.ws)
+        return e, events
+
+    def test_default_is_one_at_a_time(self):
+        out = tuieval(self.ws, "run", "--only", "a,b", "--tier", "certify").stdout
+        self.assertNotIn("at a time", out)
+        for label in "ab":
+            data = self.results(label)
+            self.assertEqual(sum(r["pass"] for r in data["results"]), 6)
+            self.assertFalse(any("ran_alongside" in r for r in data["results"]))
+            self.assertNotIn("loaded_alongside", data["run"])
+
+    def test_side_by_side_on_their_own_ports(self):
+        out = tuieval(self.ws, "run", "--only", "a,b", "--tier", "certify", "--parallel", "2").stdout
+        self.assertIn("up to 2 models at a time", out)
+        self.assertIn("apps [", out)                    # one line per answer, with the model and pack
+        for label, other in (("a", "b"), ("b", "a")):
+            data = self.results(label)
+            self.assertEqual(sum(r["pass"] for r in data["results"]), 6)
+            self.assertTrue(any(r.get("ran_alongside") == [other] for r in data["results"]), data["results"])
+        logs = read(os.path.join(self.ws, "logs", "server", "a.log")) + read(os.path.join(self.ws, "logs", "server", "b.log"))
+        ports = set(re.findall(r"mock server on 127.0.0.1:(\d+)", logs))
+        self.assertEqual(len(ports), 2, logs)          # the second model got a free port
+
+    def test_machine_setting_and_cli_override(self):
+        e, _ = self.engine()
+        self.assertEqual(e.parallel_models(), 1)
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f"\n[machines.{e.machine().id}]\nparallel_models = 2\n")
+        out = tuieval(self.ws, "run", "--only", "a,b", "--tier", "certify").stdout
+        self.assertIn("up to 2 models at a time", out)
+        out = tuieval(self.ws, "run", "--only", "a,b", "--tier", "certify", "--force", "--parallel", "1").stdout
+        self.assertNotIn("at a time", out)
+        self.assertFalse(any("ran_alongside" in r for r in self.results("a")["results"]))
+
+    def test_before_start_runs_alone(self):
+        e, events = self.engine()
+        jobs = e.plan(["a", "s"], ["apps"], None, "certify", False, {})
+        e.run(jobs, parallel=2)
+        self.assertTrue(all(j.status == "done" for j in jobs), [(j.key, j.status, j.note) for j in jobs])
+        waits = [d["message"] for k, d in events if k == "model_waiting"]
+        self.assertTrue(waits and "runs on its own" in waits[0], waits)
+        for label in "as":
+            self.assertFalse(any("ran_alongside" in r for r in self.results(label)["results"]))
+
+    def test_waits_for_memory(self):
+        e, events = self.engine()
+        e.memory_need_gb = lambda m: 0.6 * e.memory_available_gb()   # two don't fit together
+        jobs = e.plan(["a", "b"], ["apps"], None, "certify", False, {})
+        e.run(jobs, parallel=2)
+        self.assertTrue(all(j.status == "done" for j in jobs))
+        waits = [d["message"] for k, d in events if k == "model_waiting"]
+        self.assertTrue(waits and "starts when there's room" in waits[0], waits)
+        self.assertFalse(any("ran_alongside" in r for r in self.results("b")["results"]))
+
+    def test_tui_runs_side_by_side(self):
+        code = textwrap.dedent("""
+            import asyncio, json
+            from tuieval.tui import EvalsApp, RunScreen
+            from textual.widgets import Input, SelectionList
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    s.query_one("#suites", SelectionList).select("apps")
+                    s.selected_models = {"a", "b"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+                    s.query_one("#parallel", Input).value = "2"
+                    await pilot.pause()
+                    est = str(s.query_one("#estimate").render())
+                    s.action_start()
+                    for _ in range(100):
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and len(app.screen.active()) == 2:
+                            break
+                    run = app.screen
+                    first = run.watch
+                    await pilot.press("v")
+                    switched = run.watch
+                    for _ in range(300):
+                        await pilot.pause(0.1)
+                        if not run.running:
+                            break
+                    print(json.dumps({"est": est, "first": first, "switched": switched,
+                                      "status": sorted({j.status for j in run.jobs}),
+                                      "parallel": app.load_state().get("parallel")}))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertIn("Up to 2 models at a time", out["est"])
+        self.assertEqual(out["status"], ["done"])
+        self.assertEqual(out["parallel"], 2)
+        self.assertIn(out["first"], ("a", "b"))
+        self.assertEqual({out["first"], out["switched"]}, {"a", "b"})   # v streams the other model
+        self.assertTrue(any(r.get("ran_alongside") for r in self.results("a")["results"]))
+
+    def test_skip_one_model_keeps_the_other(self):
+        e, events = self.engine()
+        jobs = e.plan(["a", "b"], ["apps"], None, "certify", False, {})
+        orig = e.on_event
+
+        def on_event(kind, **d):
+            orig(kind, **d)
+            if kind == "request_done" and d["job"].label == "a" and d["job"].done == 1:
+                threading.Thread(target=e.skip_model, args=("a",)).start()
+        e.on_event = on_event
+        e.run(jobs, parallel=2)
+        status = {j.label: j.status for j in jobs}
+        self.assertEqual(status, {"a": "skipped", "b": "done"}, [(j.key, j.status, j.note) for j in jobs])
+        self.assertEqual(sum(r["pass"] for r in self.results("b")["results"]), 6)
 
 
 class FirstRun(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Run several models at a time: `parallel_models` per machine, **Models at a time** in the TUI, or `tuieval run --parallel N` (default 1). Models wait for memory to fit, and answers note what ran alongside them.
 - A new workspace's `models.toml` is 23 lines: the llama, local and OpenRouter servers and the defaults are built in (docs/models.md lists them in full; a server defined in `models.toml` replaces the built-in one with that name). Existing workspaces keep their settings; built-in servers they don't define become available, and adding a model still prefers the workspace's own servers.
 - Less to take in at first: until something has run, the setup screen leaves out context sizes, tuning state and the Tune key; Presets and Hide are off the footer (`?` lists every key); `tuieval help` groups commands into Start here, Day to day and Advanced.
 - Results lead with a plain summary per model ("ready for Support; not decided yet for Coding → run Certify to finish"), in the TUI, `tuieval verdict` (with the command to run next) and the report; the statistics follow.
