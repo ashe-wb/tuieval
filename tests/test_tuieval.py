@@ -198,6 +198,16 @@ class WorkspaceGraders(unittest.TestCase):
 
 
 class Units(unittest.TestCase):
+    def test_server_errors_never_judge_the_model(self):
+        from tuieval import client
+        no_endpoints = 'server returned HTTP 404: {"error":{"message":"No endpoints found for some/model."}}'
+        for reason, retry, unavailable in ((no_endpoints, False, True), ("server returned HTTP 402: no credits", False, True),
+                                           ("server returned HTTP 503: busy", True, False),
+                                           ("server returned HTTP 400: bad request", False, False),
+                                           ("connection error: timed out", False, False)):   # the model too slow
+            self.assertEqual((client.is_server_error(reason), client.is_unavailable(reason)), (retry, unavailable), reason)
+            self.assertEqual(client.server_error_row({"pass": False, "reason": reason}), retry or unavailable, reason)
+
     def test_tune_workload_needs_no_packs(self):
         from tuieval import tune
         work = tune.workload(None, 65536)
@@ -785,6 +795,41 @@ class PTAIndex(unittest.TestCase):
             self.assertIsInstance(got, dict, got)
             self.assertTrue(got["triangle"])
             self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100"])
+
+
+class Unavailable(unittest.TestCase):
+    """A model no server will serve (OpenRouter's 404 "No endpoints found", a bad key, no credits) stops at
+    once and is never judged on it; the other models run as usual."""
+
+    def test_unavailable_model_stops_and_isnt_judged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            d = os.path.join(ws, "packs", "apps")
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), 'label = "apps"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"), "".join(
+                f"- {{id: {t}, input: question {t}, expected: 1, reference: 'ANSWER: 1', difficulty: easy}}\n"
+                for t in "abc"))
+            up, down = Mock(os.path.join(ws, "packs"), "oracle"), Mock(os.path.join(ws, "packs"), "unavailable")
+            try:
+                with open(os.path.join(ws, "models.toml"), "a") as f:
+                    f.write(f'\n[servers.up]\nurl = "http://127.0.0.1:{up.port}"\n'
+                            f'\n[servers.down]\nurl = "http://127.0.0.1:{down.port}"\n')
+                tuieval(ws, "add", "mock", "--server", "up", "--label", "works")
+                tuieval(ws, "add", "mock", "--server", "down", "--label", "gone")
+                t = time.time()
+                out = tuieval(ws, "run", "--tier", "certify", check=False).stdout
+            finally:
+                up.stop()
+                down.stop()
+            self.assertLess(time.time() - t, 60)                      # no retrying for minutes
+            self.assertIn("isn't available there", out)
+            verdict = tuieval(ws, "verdict", check=False).stdout
+            self.assertNotIn("0% right", verdict)                       # never judged on the 404s
+            rows = [l for l in verdict.splitlines() if "gone" in l]
+            self.assertFalse(any("FAIL" in l for l in rows), rows)
+            self.assertIn("works", tuieval(ws, "pta").stdout)
 
 
 class FirstRun(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A model a server won't serve (HTTP 401-404, e.g. OpenRouter's "No endpoints found") is never judged on it: those answers don't count, and the model stops at once instead of failing every question.
 - PTA index: privacy, time (total, relative to the fastest) and accuracy per model, as a triangle in Results, `tuieval pta` and the report.
 - Run several models at a time: `parallel_models` per machine, **Models at a time** in the TUI, or `tuieval run --parallel N` (default 1). Models wait for memory to fit, and answers note what ran alongside them.
 - More evals during a run: `n` opens Setup, and Start adds them to the run going (same tier) or queues them after it.

@@ -2105,6 +2105,9 @@ class Engine:
                     self._check()
                     if res["error"] and not alive():
                         raise ModelFailed(f"the server stopped: {res['error']}")
+                    if client.is_unavailable(res["error"]):   # never an answer; retrying won't help
+                        raise ModelFailed(f"the model isn't available there (not counted against it): "
+                                          f"{res['error'][:300]}")
                     if not client.is_server_error(res["error"]):
                         break
                     # the server failed, not the model: never recorded as an answer

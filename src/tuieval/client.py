@@ -17,6 +17,10 @@ import time
 import urllib.parse
 
 SERVER_ERROR_PREFIXES = ("server returned HTTP 5", "server returned HTTP 429", "server error", "connection error")
+# the model can't be reached there at all (a bad key, no credits, or a hosted API with no provider serving it, e.g.
+# OpenRouter's 404 "No endpoints found"): not the model's answer either, and waiting won't fix it
+UNAVAILABLE_PREFIXES = ("server returned HTTP 401", "server returned HTTP 402", "server returned HTTP 403",
+                        "server returned HTTP 404")
 
 
 def is_server_error(error):
@@ -27,9 +31,15 @@ def is_server_error(error):
         and "timeout" not in error.lower()
 
 
+def is_unavailable(error):
+    """True for an error saying the model isn't available on that server at all: HTTP 401, 402, 403 or
+    404. Never the model's answer, and not worth retrying."""
+    return bool(error) and error.startswith(UNAVAILABLE_PREFIXES)
+
+
 def server_error_row(rec):
     """A stored answer that was really a server failure (never a judgement of the model)."""
-    return not rec.get("pass") and is_server_error(rec.get("reason"))
+    return not rec.get("pass") and (is_server_error(rec.get("reason")) or is_unavailable(rec.get("reason")))
 
 
 class Cancelled(Exception):
