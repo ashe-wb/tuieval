@@ -21,6 +21,7 @@
     tuieval list                                  # the models tuieval knows; hidden ones listed separately
     tuieval remove --hidden                       # clean up hidden models (archived in removed/)
     tuieval regrade                               # re-score stored answers with the current graders
+    tuieval regrade --only my-model --packs coding   # just one model's results (and packs)
     tuieval machines                              # this machine, known machines, fit and tuning per model
     tuieval tune my-model                         # find the fastest speed flags for a model on this machine
     tuieval tune --untuned                        # tune every model that has no profile here yet
@@ -270,9 +271,22 @@ def cmd_remove(argv):
 def cmd_regrade(argv):
     p = argparse.ArgumentParser(prog="tuieval regrade", description="Re-score stored answers with current graders.")
     p.add_argument("paths", nargs="*", help="result files (default: all in results/)")
+    p.add_argument("--only", help="comma-separated model labels")
+    p.add_argument("--packs", help="comma-separated packs")
     a = p.parse_args(argv)
     from . import compare
-    for path in a.paths or compare.default_paths():
+    paths = a.paths or compare.default_paths()
+    for flag, value, part in (("--only", a.only, lambda q: os.path.basename(os.path.dirname(q))),
+                              ("--packs", a.packs, lambda q: os.path.basename(q)[:-len(".json")])):
+        if not value:
+            continue
+        wanted = [v.strip() for v in value.split(",") if v.strip()]
+        known = sorted({part(q) for q in paths})
+        missing = [v for v in wanted if v not in known]
+        if missing:
+            sys.exit(f"{flag}: no results for {', '.join(missing)}. With results: {', '.join(known) or 'none'}")
+        paths = [q for q in paths if part(q) in wanted]
+    for path in paths:
         try:
             before, after = engine.regrade(path)
             print(f"{os.path.relpath(path)}: {before} -> {after} passed")

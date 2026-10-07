@@ -412,6 +412,21 @@ class Parallel(unittest.TestCase):
             self.assertFalse(any("ran_alongside" in r for r in data["results"]))
             self.assertNotIn("loaded_alongside", data["run"])
 
+    def test_regrade_one_model(self):
+        tuieval(self.ws, "run", "--only", "a,b", "--tier", "certify")
+        tests = os.path.join(self.ws, "packs", "apps", "tests.yaml")
+        write(tests, read(tests).replace("expected: 1", "expected: 2"))   # a grader change: every answer now wrong
+        out = tuieval(self.ws, "regrade", "--only", "a", "--packs", "apps").stdout
+        self.assertIn("6 -> 0 passed", out)
+        self.assertNotIn(os.path.join("b", "apps.json"), out)
+        self.assertEqual(sum(r["pass"] for r in self.results("a")["results"]), 0)
+        self.assertEqual(sum(r["pass"] for r in self.results("b")["results"]), 6)   # left as it was
+        for args, name in ((["--only", "a,nope"], "nope"), (["--packs", "nope"], "nope")):
+            p = tuieval(self.ws, "regrade", *args, check=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn(f"no results for {name}", p.stderr)
+        self.assertEqual(sum(r["pass"] for r in self.results("b")["results"]), 6)   # a typo regrades nothing
+
     def test_side_by_side_on_their_own_ports(self):
         out = tuieval(self.ws, "run", "--only", "a,b", "--tier", "certify", "--parallel", "2").stdout
         self.assertIn("up to 2 models at a time", out)
