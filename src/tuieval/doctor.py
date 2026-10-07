@@ -10,6 +10,7 @@ import platform
 import sys
 
 from . import engine
+from . import machines
 from . import workspace
 
 OK, WARN, BAD = "✓", "!", "✗"
@@ -43,6 +44,22 @@ def check(models_path=None):
         r.line(BAD, f"models.toml in {workspace.root()}: {ex}", "fix the file (tuieval init makes a fresh one elsewhere)")
         return r.bad
     r.line(OK, f"workspace {e.root}")
+
+    r.head("Machine")
+    mc = e.machine()
+    r.line(OK, f"{mc.id}: {mc.summary}")
+    if mc.discrete:
+        r.line(OK, f"models are sized to {mc.gpu_limit_gb:.0f} GB of VRAM, keeping {e.headroom_gb(mc):g} GB free "
+                   "(memory_headroom_gb, gpu_memory_gb under [machines.<id>] change it)")
+        new = machines.gpu_id(machines.discrete_gpus(), mc.ram_gb)
+        if mc.id != new and not os.environ.get("EVALS_MACHINE"):
+            r.line(WARN, f"keeping the id {mc.id} this machine had before its GPU was detected, so earlier results "
+                         "and tuning still match", f"to switch: EVALS_MACHINE={new} (results under the old id "
+                                                   "then count as another machine)")
+    elif platform.system() == "Linux" and any(os.path.exists(p) for p in ("/dev/nvidia0", "/dev/kfd")):
+        r.line(WARN, "this machine seems to have an Nvidia or AMD GPU, but nvidia-smi / amd-smi / rocm-smi "
+                     "isn't installed, so models are sized against system RAM",
+               "install the vendor's tools, or set gpu_memory_gb under [machines.<id>] in models.toml")
 
     r.head("Packs")
     for err in e.pack_errors:

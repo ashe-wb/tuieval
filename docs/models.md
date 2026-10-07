@@ -69,9 +69,21 @@ The best server flags differ per model and per machine, so tuieval splits them b
 
 ## Machines
 
-- **Machine id** is detected automatically (e.g. `m3max-64gb`, `m2-16gb`; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
-- **Fit check (Apple Silicon, llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory, capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers. Servers that size their own memory (their `cmd` doesn't take `{ctx}`) are left alone: their context is the model's `max_context`; `fit_check` on the server changes that.
-- **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free for macOS, default 4), `gpu_residency_gb` (see the stall guard) and `parallel_models` (see below).
+- **Machine id** is detected automatically (e.g. `m3max-64gb`, `m2-16gb`, or `rtx4090-128gb` on a Linux machine with a discrete GPU; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
+- **Fit check (llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory (a Mac's unified memory, or a discrete GPU's VRAM), capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers. Servers that size their own memory (their `cmd` doesn't take `{ctx}`) are left alone: their context is the model's `max_context`; `fit_check` on the server changes that.
+- **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free: default 4 on a Mac, 1.5 in a discrete GPU's VRAM), `gpu_memory_gb` (the GPU memory to size models against, when detection gets it wrong or you want to hold some back), `gpu_residency_gb` (see the stall guard) and `parallel_models` (see below).
+
+### Discrete GPUs (Linux: Nvidia, AMD)
+
+With `nvidia-smi` (Nvidia) or `amd-smi` / `rocm-smi` (AMD) installed, tuieval reads each card's name and VRAM. Several cards add up, since llama.cpp splits a model across them. `tuieval doctor` shows what it found.
+
+- Models are sized to fit **entirely in VRAM** (servers keep `-ngl 99`); splitting a model between GPU and CPU isn't supported. A model that doesn't fit is skipped with what it needs and what's free.
+- **Memory** in results is the server's peak VRAM: its own processes' on Nvidia, the whole machine's on AMD (its tools don't report it per process reliably, so it's only exact when nothing else uses the GPU).
+- `tuieval tune` rejects flags that leave VRAM nearly full. The macOS memory-pressure checks and the stall guard don't apply.
+- A machine that recorded itself before its GPU was detected keeps that id, so its results and tuning still match; `tuieval doctor` names the new id if you want to switch (`EVALS_MACHINE`).
+- Without the vendor tools, models are sized against system RAM, as on any other machine; set `gpu_memory_gb` instead.
+
+Windows isn't supported (WSL2 works like Linux).
 
 ## Several models at a time
 

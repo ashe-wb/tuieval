@@ -1181,7 +1181,19 @@ class Engine:
 
     # ---- serving on this machine
     def machine(self):
-        return machines.detect()
+        """This machine, with its models.toml [machines.<id>] gpu_memory_gb applied. A Linux machine
+        that recorded itself before its GPU was detected keeps that id, so its results and tuning
+        still match (EVALS_MACHINE renames it)."""
+        mc = machines.detect()
+        if mc.discrete and not os.environ.get("EVALS_MACHINE"):
+            old = machines.machine_id(mc.chip, mc.ram_gb)
+            if os.path.isdir(os.path.join(self.tuning_dir, old)) and \
+                    not os.path.isdir(os.path.join(self.tuning_dir, mc.id)):
+                mc = dataclasses.replace(mc, id=old)
+        override = self.cfg.get("machines", {}).get(mc.id, {}).get("gpu_memory_gb")
+        if override:
+            mc = dataclasses.replace(mc, gpu_limit_gb=float(override))
+        return mc
 
     def machines(self):
         """This machine first, then every other machine recorded in tuning/ (synced)."""
@@ -1193,8 +1205,13 @@ class Engine:
         return [here] + [mc for mc in profiles.known_machines(self.tuning_dir) if mc.id != here.id]
 
     def machine_settings(self, machine_id=None):
-        """models.toml [machines.<id>] (optional): memory_headroom_gb, name."""
+        """models.toml [machines.<id>] (optional): memory_headroom_gb, gpu_memory_gb, name."""
         return self.cfg.get("machines", {}).get(machine_id or self.machine().id, {})
+
+    def headroom_gb(self, mc):
+        """GPU memory kept free: memory_headroom_gb, else 4 GB on a Mac (macOS and other apps share
+        it) and 1.5 GB in a discrete GPU's VRAM."""
+        return float(self.machine_settings(mc.id).get("memory_headroom_gb", 1.5 if mc.discrete else 4.0))
 
     def parallel_models(self):
         """How many models a run serves at a time on this machine: models.toml [machines.<id>]
@@ -1214,7 +1231,7 @@ class Engine:
     def memory_available_gb(self):
         """GPU memory models may take here (what the fit check sizes contexts against)."""
         mc = self.machine()
-        return mc.gpu_limit_gb - self.machine_settings(mc.id).get("memory_headroom_gb", 4.0)
+        return mc.gpu_limit_gb - self.headroom_gb(mc)
 
     def runs_alone(self, m):
         """A server whose before_start step may stop other servers never runs next to another model."""
@@ -1259,8 +1276,7 @@ class Engine:
                 if fit_check(server):
                     mmproj = expand(m.get("mmproj", ""))
                     extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
-                    headroom = self.machine_settings(mc.id).get("memory_headroom_gb", 4.0)
-                    f = machines.fit(path, mc, kv_type=kv or "f16", headroom_gb=headroom, extra_bytes=extra,
+                    f = machines.fit(path, mc, kv_type=kv or "f16", headroom_gb=self.headroom_gb(mc), extra_bytes=extra,
                                      want_ctx=want)
                     ctx, fits, note, need = f.max_ctx, f.fits, f.note, f.need_gb
             except (OSError, ValueError) as e:
@@ -1474,11 +1490,22 @@ class Engine:
                         time.sleep(0.2)
         threading.Thread(target=run, daemon=True).start()
 
-    def _watch_memory(self, proc, label, stop, peak):
+    VRAM_EVERY_S = 6   # how often to read a discrete GPU's VRAM while a server runs
+
+    def _watch_memory(self, proc, label, stop, peak, info=None):
         """Peak resident memory of the server's process group (MB). On Apple Silicon this includes
-        the model weights mapped for the GPU."""
+        the model weights mapped for the GPU. With discrete GPUs, also the peak VRAM it holds
+        (info["vram_peak_gb"]): its own processes' on Nvidia, the machine's on AMD."""
+        discrete = info is not None and self.machine().discrete
+        last_vram = [0.0]
+
         def run():
             while not stop.is_set():
+                if discrete and time.time() - last_vram[0] >= self.VRAM_EVERY_S:
+                    last_vram[0] = time.time()
+                    used = machines.vram_used_gb(machines.tree_pids(proc.pid))
+                    if used:
+                        info["vram_peak_gb"] = round(max(info.get("vram_peak_gb") or 0, used), 2)
                 try:
                     out = subprocess.run(["ps", "-axo", "pgid=,rss="], capture_output=True, text=True).stdout
                     rss = sum(int(r) for g, r in (l.split() for l in out.splitlines() if l.strip())
@@ -1779,7 +1806,7 @@ class Engine:
                                           f"(see logs/server/{log_name or m['label']}.log)")
                 t0 = time.time()
                 srv = self._start(cmd, log, cwd=cwd)
-                self._watch_memory(srv, m["label"], stop, peak)
+                self._watch_memory(srv, m["label"], stop, peak, info)
             else:
                 key_env = server.get("api_key_env")
                 if key_env and not os.environ.get(key_env):
@@ -1871,6 +1898,7 @@ class Engine:
             def run_info():
                 return {"load_s": info["load_s"], "peak_rss_mb": info["peak_mb"](),
                         "server_facts": info["facts"] or None, "gpu_peak_gb": info.get("gpu_peak_gb"),
+                        "vram_peak_gb": info.get("vram_peak_gb"),
                         "kernel_share_max": info.get("kernel_share_max"),
                         **({"loaded_alongside": loaded_alongside} if loaded_alongside else {}), **serving_info}
             failed_in_row = 0
@@ -1955,7 +1983,8 @@ class Engine:
         return tests
 
     # ---- sittings: a pack run over several sessions (stopped and resumed) keeps its total time
-    SITTING_KEYS = ("load_s", "peak_rss_mb", "gpu_peak_gb", "kernel_share_max", "machine", "loaded_alongside")
+    SITTING_KEYS = ("load_s", "peak_rss_mb", "gpu_peak_gb", "vram_peak_gb", "kernel_share_max", "machine",
+                    "loaded_alongside")
 
     def _sitting(self, job, info):
         now = time.time()
@@ -2027,7 +2056,7 @@ class Engine:
         out = {"started": min(s["started"] for s in sittings),
                "wall_s": round(sum(s.get("wall_s") or 0 for s in sittings), 1),
                "sittings": len(sittings), "sittings_log": sittings}
-        for k in ("peak_rss_mb", "gpu_peak_gb", "kernel_share_max"):
+        for k in ("peak_rss_mb", "gpu_peak_gb", "vram_peak_gb", "kernel_share_max"):
             if peak(k) is not None:
                 out[k] = peak(k)
         along = sorted({l for s in sittings for l in s.get("loaded_alongside") or []})

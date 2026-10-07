@@ -25,7 +25,7 @@ Whatever runs your models, the first steps are short:
 | You have | Do this |
 |---|---|
 | **LM Studio, Ollama or vLLM** | Start its server and load a model, then `tuieval init my-evals`: it finds the model. Later: `tuieval add` lists new ones. |
-| **GGUF files** | Install llama.cpp (`brew install llama.cpp`), then `tuieval add ~/models/Some-Model-Q4_K_M.gguf`. tuieval starts `llama-server` for it, sized to your machine. |
+| **GGUF files** | Install llama.cpp (`brew install llama.cpp`, or a CUDA/ROCm build on Linux), then `tuieval add ~/models/Some-Model-Q4_K_M.gguf`. tuieval starts `llama-server` for it, sized to your Mac's memory or your Nvidia/AMD card's VRAM. |
 | **An OpenRouter key** | `export OPENROUTER_API_KEY=…`, then `tuieval run --tier smoke --only openrouter:<model id>`. |
 
 Stuck? `tuieval doctor` checks servers, models, packs and keys, and says what to fix.
@@ -50,7 +50,7 @@ Afterwards, every answer keeps its reasoning. Enter on a result opens it with th
 - **Verdicts you can act on.** A pack passes only with zero critical failures over enough trials, and an accuracy whose 95% lower bound clears your bar. *INCONCLUSIVE* says what evidence is missing.
 - **Two tiers:** *Screen* a sample of every pack to drop weak models fast, then *Certify* finalists on every test with repeats. Certification reuses the screening answers.
 - **Honest numbers:** every request is a fresh single-turn conversation, with prompt caching off and repeat rounds in different orders. Each answer records what was sent, and the run warns about reused prompts or identical repeats.
-- **Per-machine speed.** A fit check picks the largest context that fits your Mac's GPU memory, `tuieval tune` finds the fastest speed-only server flags (with a guard that rejects flags that change answers), and readiness includes a *Fast enough?* table per machine, measured or projected.
+- **Per-machine speed.** A fit check picks the largest context that fits your Mac's GPU memory or your Nvidia/AMD card's VRAM, `tuieval tune` finds the fastest speed-only server flags (with a guard that rejects flags that change answers), and readiness includes a *Fast enough?* table per machine, measured or projected.
 - **Tests that check themselves.** Every test carries a reference answer and known-wrong answers, and `tuieval selftest` checks the grader accepts the first and rejects the second, and that each gate is reachable at all.
 - **History.** Verdict changes are appended to `results/verdicts.jsonl`, and replaced results are moved to `history/`, never overwritten.
 

@@ -60,6 +60,7 @@ SWAP_NOTABLE = 256 * 2**20  # swap worth a warning (bytes); rejecting for swap n
 ANSWER_TOKENS = 1024       # answer length the projected objective scores ([tune] answer_tokens)
 PRESSURE_CRITICAL = 4      # macOS memory pressure level that rejects a candidate
 PRESSURE_EVERY_S = 2
+VRAM_MARGIN_GB = 0.25     # a discrete GPU this close to full could run out on a longer prompt
 GPU_MARGIN_GB = 0.75      # a candidate whose GPU allocation comes this close to the residency limit
                           # is rejected even before it stalls: servers grow as requests arrive
 REQUEST_LIMIT_S = 600     # a tuning request taking longer fails the candidate ([tune] request_timeout_s)
@@ -556,6 +557,14 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
                     r.facts["gpu_settled_gb"] = round(settled, 1)
                 if info.get("kernel_share_max") is not None:
                     r.facts["kernel_share"] = info["kernel_share_max"]
+                mc = eng.machine()
+                if mc.discrete:   # VRAM is the limit there: its own memory, nothing else can use it
+                    vram = machines.vram_used_gb()
+                    if vram is not None:
+                        r.facts["vram_used_gb"] = round(vram, 1)
+                        if vram > mc.gpu_limit_gb - VRAM_MARGIN_GB and not r.error:
+                            r.error = (f"VRAM nearly full: {vram:.1f} of {mc.gpu_limit_gb:.0f} GB in use "
+                                       "(a longer prompt could run out)")
                 limit = eng.gpu_residency_gb()
                 if settled and settled > limit - GPU_MARGIN_GB and not r.error:
                     r.error = (f"GPU allocation settled at {settled:.1f} GB, within {GPU_MARGIN_GB} GB of the "

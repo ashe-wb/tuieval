@@ -35,7 +35,8 @@ def _load_native(data):
     m, pack, run = data["model"], data["pack"], data["run"]
     info = {"label": m["label"], "served": m.get("served_name"), "tags": m.get("tags") or [],
             "settings": data.get("settings", {}), "load_s": run.get("load_s"),
-            "peak_rss_mb": run.get("peak_rss_mb"), "pack": pack["name"], "pack_fp": pack["fingerprint"],
+            "peak_rss_mb": run.get("peak_rss_mb"), "vram_peak_gb": run.get("vram_peak_gb"),
+            "pack": pack["name"], "pack_fp": pack["fingerprint"],
             # hosted (OpenRouter) models: the provider endpoint and its declared quantization
             "endpoint": run.get("endpoint"), "quantization": run.get("quantization"),
             "loaded_alongside": run.get("loaded_alongside") or []}
