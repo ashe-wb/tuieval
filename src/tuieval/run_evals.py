@@ -373,11 +373,12 @@ def report_markdown(e, labels=None):
                              + f"; truncated {100 * ev['truncation']:.1f}%"
                              + (f"; consistency {100 * ev['consistency']:.0f}% of {ev['groups']} groups" if ev.get("consistency") is not None else ""))
                 recs = e.records(label, name)
+                from .compare import pct
                 levels = []
                 for lvl in ("easy", "medium", "hard"):
                     x = [r["pass"] for r in recs if r.get("difficulty") == lvl]
                     if x:
-                        levels.append(f"{lvl} {sum(x)}/{len(x)} ({100 * sum(x) / len(x):.0f}%)")
+                        levels.append(f"{lvl} {sum(x)}/{len(x)} ({pct(sum(x) / len(x))})")
                 if levels:
                     lines.append("  - by difficulty: " + ", ".join(levels))
                 for ex in ev.get("critical_examples", []):

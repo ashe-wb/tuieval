@@ -2197,7 +2197,7 @@ class RunScreen(Screen):
         done_now = sum(j.done - j.resumed for j in self.jobs if j.started)   # answers from earlier sittings
         if self.running and done_now > 0 and self.total > done:              # took no time in this one
             eta = f" · ETA {fmt_secs(elapsed / done_now * (self.total - done))}"
-        pct = f"{100 * passed / (passed + failed):.0f}%" if passed + failed else "-"
+        pct = compare.pct(passed / (passed + failed)) if passed + failed else "-"
         recent = self.stats[-50:]
         tps = [r["gen_tps"] for r in recent if r.get("gen_tps")]
         ttfts = [r["ttft_s"] for r in recent if r.get("ttft_s") is not None and not r.get("cached_tokens")]

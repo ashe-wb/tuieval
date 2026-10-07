@@ -259,7 +259,8 @@ def _plain_fail(v):
     if "cut off" in text:
         return "too many answers cut off by max_tokens"
     if "accuracy" in text and ev.get("trials"):
-        return f"{100 * ev['accuracy']:.0f}% right, under the bar"
+        from .compare import pct   # local: compare imports nothing from here, but keep verdict light
+        return f"{pct(ev['accuracy'])} right, under the bar"
     return text.split(" (")[0]
 
 

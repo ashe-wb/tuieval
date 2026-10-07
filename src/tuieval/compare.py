@@ -121,6 +121,12 @@ def p90(values):
     return statistics.quantiles(values, n=10)[-1] if len(values) > 1 else (values[0] if values else None)
 
 
+def pct(fraction):
+    """A share as a percentage: "100%" and "0%" only when exact, else one decimal ("99.6%"), so a model
+    with a wrong answer never shows as perfect."""
+    return "100%" if fraction >= 1 else "0%" if fraction <= 0 else f"{100 * fraction:.1f}%"
+
+
 def median(values):
     values = [v for v in values if v is not None]
     return statistics.median(values) if values else None
@@ -421,7 +427,7 @@ def by_difficulty(rows):
             cells = []
             for lvl in LEVELS:
                 x = [r["ok"] for r in sub if r.get("difficulty") == lvl]
-                cells.append(f"{sum(x)}/{len(x)} ({100 * sum(x) / len(x):.0f}%)" if x else "-")
+                cells.append(f"{sum(x)}/{len(x)} ({pct(sum(x) / len(x))})" if x else "-")
             table.append([m, s] + cells)
     return header, table
 

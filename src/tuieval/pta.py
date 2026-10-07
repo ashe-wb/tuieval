@@ -111,7 +111,7 @@ def bars(result, width=20, markup=True):
         return []
     name_w = max(len(x["model"]) for x in result["models"])
     # each column: the bar, a space, "100%" or "9.8×" (5), then a gap; at least as wide as its heading
-    cell_w = max(width + 8, *(len(f"{k} {name}") + 2 for k, name, _, _ in LETTERS))
+    cell_w = max(width + 9, *(len(f"{k} {name}") + 2 for k, name, _, _ in LETTERS))
     head = " " * (name_w + 2) + "".join(f"{f'{k} {name}':<{cell_w}}" for k, name, _, _ in LETTERS)
     lines = [f"[b]{head.rstrip()}[/b]" if markup else head.rstrip()]
     for x in result["models"]:
@@ -119,10 +119,12 @@ def bars(result, width=20, markup=True):
         for k, _, shown, color in LETTERS:
             v = x[k]
             full = 0 if v is None else round(width * max(0, min(100, v)) / 100)
+            if v is not None and v < 100:   # full only when perfect (accuracy) or the best (P, T)
+                full = min(full, width - 1)
             bar, rest = "█" * full, "░" * (width - full)
-            num = (("-" if v is None else f"{v:.0f}%") if shown == "A" else times(x.get(shown)))
+            num = (("-" if v is None else compare.pct(v / 100)) if shown == "A" else times(x.get(shown)))
             bar = f"[{color}]{bar}[/][grey37]{rest}[/]" if markup else bar + rest
-            cells.append(f"{bar} {num:>5}" + " " * (cell_w - width - 6))
+            cells.append(f"{bar} {num:>6}" + " " * (cell_w - width - 7))
         name = f"{x['model']:<{name_w}}"
         lines.append((f"{rich_escape(name) if markup else name}  " + "".join(cells)).rstrip())
     return lines
