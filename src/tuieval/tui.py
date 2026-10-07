@@ -2370,9 +2370,10 @@ class ResultsScreen(Screen):
                 with Horizontal(id="pta-controls"):
                     yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
                     yield Button("Models: all", id="pta-models")
-                yield Static("[dim]P privacy: 100 when prompts stay on machines you control (local, or a server "
-                             "marked private = true), 0 for a hosted API. T speed: 100 for the fastest total time over the "
-                             "questions compared, lower = slower. A accuracy: answers right. Higher is better for "
+                yield Static("[dim]P privacy %: 100% when prompts stay on machines you control (local, or a server "
+                             "marked private = true), 0% for a hosted API. T speed /100: a score, not a percentage: 100 "
+                             "for the fastest total time over the questions compared, lower = slower. A accuracy %: "
+                             "answers right. Higher is better for "
                              "all three. Each "
                              "model is a dot pulled toward each corner by its score: filled when the three "
                              "average 50 or more. Verdicts and critical failures are in Production readiness.[/dim]")

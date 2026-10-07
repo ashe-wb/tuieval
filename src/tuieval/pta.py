@@ -1,14 +1,14 @@
 """PTA index: privacy, speed (time) and accuracy per model, 0-100 each and higher is better, with each
 model a dot on a triangle.
 
-    P  privacy   100 when prompts stay on machines you control: tuieval starts the server, its URL
+    P  privacy   a percentage: 100 when prompts stay on machines you control: tuieval starts the server, its URL
                  is this machine, or the server is marked private = true in models.toml. 0 otherwise
                  (a hosted API: there's no partial privacy once prompts leave).
-    T  speed     from the total time to answer every question compared (each question at its median
+    T  speed     a score out of 100 (not a percentage), from the total time to answer every question compared (each question at its median
                  over repeats): 100 for the fastest model, and every doubling of its total time costs
                  POINTS_PER_DOUBLING points (0 at about 100 times slower). A log scale, so models that
                  are all much slower than the fastest still differ.
-    A  accuracy  the share of answers to those questions that passed.
+    A  accuracy  a percentage: the share of answers to those questions that passed.
 
 Models are compared on the questions all of them answered, so one that skipped some never looks
 faster. Server and connection errors aren't answers. By default a model with fewer than half as many
@@ -207,7 +207,8 @@ def legend(result, width=60):
     for x in result["models"]:
         mark = f"[{x['color']}]{'●' if strong(x) else '○'}[/]" if x["model"] in where else " "
         same = [m for m, at in where.items() if m != x["model"] and at == where.get(x["model"])]
-        out.append(f"{mark} {x['model']}  P {_score(x['P'])} · T {_score(x['T'])} · A {_score(x['A'])}"
+        out.append(f"{mark} {x['model']}  P {_score(x['P'], '%')} · T {_score(x['T'], '/100')} · "
+                   f"A {_score(x['A'], '%')}"
                    + (f"  [dim](same spot as {', '.join(same)}: drawn as {len(same) + 1})[/dim]" if same else "")
                    + ("  [yellow](some answers ran alongside other models)[/yellow]" if x["alongside"] else ""))
     return out + [f"[dim]{line}[/dim]" for line in left_out_lines(result)]
@@ -225,14 +226,15 @@ def left_out_lines(result):
     return out
 
 
-def _score(v):
-    return "-" if v is None else f"{v:.0f}"
+def _score(v, unit=""):
+    """P and A are percentages (%), T a score out of 100 (/100: on a log scale, not a percentage)."""
+    return "-" if v is None else f"{v:.0f}{unit}"
 
 
 def table(result):
     """(header, rows) for a plain table of the index."""
-    header = ["model", "P privacy", "T speed", "A accuracy", "total time", "answers right"]
-    rows = [[x["model"], _score(x["P"]), _score(x["T"]), _score(x["A"]),
+    header = ["model", "P privacy %", "T speed /100", "A accuracy %", "total time", "answers right"]
+    rows = [[x["model"], _score(x["P"], "%"), _score(x["T"]), _score(x["A"], "%"),
              fmt_total(x["total_s"]) + (" ★" if x.get("fastest") else ""),
              f"{x['passed']}/{x['answers']}"] for x in result["models"]]
     return header, rows
@@ -253,8 +255,9 @@ def scope_note(result, models):
     if not result["questions"]:
         return "These models have no question in common yet, so there's nothing to compare."
     return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
-            f"T speed: 100 = the fastest total time (★), {POINTS_PER_DOUBLING} points less for each doubling "
-            "of time; a faster model added lowers the others.")
+            f"P and A are percentages. T speed is a score out of 100, not a percentage: 100 = the fastest total "
+            f"time (★), {POINTS_PER_DOUBLING} points less for each doubling of time; a faster model added lowers "
+            "the others.")
 
 
 def for_engine(e, labels=None, packs=None, results_dir=None):

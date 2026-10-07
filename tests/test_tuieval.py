@@ -724,7 +724,9 @@ class PTAIndex(unittest.TestCase):
         self.assertAlmostEqual(by["slow"]["T"], 100 - 15 * math.log2(13 / 4))   # 15 points per doubling
         self.assertEqual((pta.speed(2, 1), pta.speed(1000, 1)), (85, 0))
         header, table = pta.table(res)
-        self.assertEqual(header[2], "T speed")
+        self.assertEqual(header[1:4], ["P privacy %", "T speed /100", "A accuracy %"])
+        self.assertEqual(dict((r[0], r[1:4]) for r in table)["fast"], ["0%", "100", "50%"])
+        self.assertIn("P 100% · T ", "\n".join(pta.legend(res)))
         self.assertTrue(dict((r[0], r[4]) for r in table)["fast"].endswith("★"))   # the fastest total
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
@@ -801,10 +803,10 @@ class PTAIndex(unittest.TestCase):
             out = tuieval(ws, "pta").stdout
             self.assertIn("Compared on the 4 questions all 2 model(s) answered", out)
             table = {l.split()[0]: l.split()[1:4] for l in out.splitlines() if l.startswith(("good ", "hosted "))}
-            self.assertEqual(table["good"], ["100", "100", "100"])
-            self.assertEqual(table["hosted"][0], "0")
+            self.assertEqual(table["good"], ["100%", "100", "100%"])
+            self.assertEqual(table["hosted"][0], "0%")
             self.assertLess(int(table["hosted"][1]), 100)   # slower in total
-            self.assertEqual(table["hosted"][2], "0")
+            self.assertEqual(table["hosted"][2], "0%")
             self.assertIn("P privacy", out)
             self.assertIn("4/4", tuieval(ws, "pta", "--only", "good").stdout)
             report = os.path.join(tmp, "r.md")
@@ -831,7 +833,7 @@ class PTAIndex(unittest.TestCase):
             got = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
             self.assertIsInstance(got, dict, got)
             self.assertTrue(got["triangle"])
-            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100"])
+            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100%", "100", "100%"])
 
 
 class FirstRun(unittest.TestCase):
