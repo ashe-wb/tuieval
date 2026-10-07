@@ -335,7 +335,7 @@ Opens on [b]Per question[/b]. [b]Production readiness[/b] gives one verdict per 
 and what's missing when it's INCONCLUSIVE. The other tabs are the evidence:
   Scorecard              accuracy, critical failures and truncation per model and pack
   Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
-  PTA index              privacy, total time and accuracy per model (0-100 each), a dot each on a triangle
+  PTA index              privacy, speed and accuracy per model (0-100, higher = better), a dot each on a triangle
   Per question           every question, model by model
   Is the difference real? whether one model is really better than another, or it's noise
   Tests that separate    the questions that tell models apart
@@ -2371,8 +2371,9 @@ class ResultsScreen(Screen):
                     yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
                     yield Button("Models: all", id="pta-models")
                 yield Static("[dim]P privacy: 100 when prompts stay on machines you control (local, or a server "
-                             "marked private = true), 0 for a hosted API. T time: total time for every question "
-                             "compared, relative to the fastest model (100). A accuracy: answers right. Each "
+                             "marked private = true), 0 for a hosted API. T speed: 100 for the fastest total time over the "
+                             "questions compared, lower = slower. A accuracy: answers right. Higher is better for "
+                             "all three. Each "
                              "model is a dot pulled toward each corner by its score: filled when the three "
                              "average 50 or more. Verdicts and critical failures are in Production readiness.[/dim]")
                 yield Static(id="pta-note")

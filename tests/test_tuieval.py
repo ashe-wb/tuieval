@@ -3,6 +3,7 @@
 Uses a temporary workspace and tests/mock_server.py on a free local port; no model or GPU needed.
 """
 import json
+import math
 import os
 import re
 import socket
@@ -720,7 +721,11 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual(by["fast"]["total_s"], 4)
         self.assertEqual(by["slow"]["total_s"], 13)      # q1 8 + q2 median of 4 and 6
         self.assertEqual(by["fast"]["T"], 100)
-        self.assertAlmostEqual(by["slow"]["T"], 100 * 4 / 13)
+        self.assertAlmostEqual(by["slow"]["T"], 100 - 15 * math.log2(13 / 4))   # 15 points per doubling
+        self.assertEqual((pta.speed(2, 1), pta.speed(1000, 1)), (85, 0))
+        header, table = pta.table(res)
+        self.assertEqual(header[2], "T speed")
+        self.assertTrue(dict((r[0], r[4]) for r in table)["fast"].endswith("★"))   # the fastest total
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
         lines = pta.triangle(res, 40)

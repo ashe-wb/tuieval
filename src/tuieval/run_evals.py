@@ -389,7 +389,7 @@ def report_markdown(e, labels=None):
 
 def cmd_pta(argv):
     p = argparse.ArgumentParser(prog="tuieval pta",
-                                description="The PTA index: privacy, time and accuracy per model (0-100 each), as a "
+                                description="The PTA index: privacy, speed and accuracy per model (0-100, higher is better), as a "
                                             "triangle (a dot per model) and a table, over the questions all the models answered.")
     p.add_argument("--only", help="comma-separated model labels (default: every model with results)")
     p.add_argument("--packs", help="comma-separated packs (default: all)")

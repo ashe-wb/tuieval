@@ -14,7 +14,7 @@ Start here
 
 Day to day
   tuieval compare [...]       scorecards (--speed, --pairwise, --failures)
-  tuieval pta                 the PTA index: privacy, time and accuracy per model, a dot each on a triangle
+  tuieval pta                 the PTA index: privacy, speed and accuracy per model, a dot each on a triangle
   tuieval report              the verdicts with their evidence, as a markdown file
   tuieval history             every verdict change, newest first
   tuieval items               tests that don't separate models or look broken

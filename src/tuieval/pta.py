@@ -1,10 +1,13 @@
-"""PTA index: privacy, time and accuracy per model, 0-100 each, with each model a dot on a triangle.
+"""PTA index: privacy, speed (time) and accuracy per model, 0-100 each and higher is better, with each
+model a dot on a triangle.
 
     P  privacy   100 when prompts stay on machines you control: tuieval starts the server, its URL
                  is this machine, or the server is marked private = true in models.toml. 0 otherwise
                  (a hosted API: there's no partial privacy once prompts leave).
-    T  time      the total time to answer every question compared (each question at its median over
-                 repeats), relative to the fastest model: 100 x fastest total / this model's total.
+    T  speed     from the total time to answer every question compared (each question at its median
+                 over repeats): 100 for the fastest model, and every doubling of its total time costs
+                 POINTS_PER_DOUBLING points (0 at about 100 times slower). A log scale, so models that
+                 are all much slower than the fastest still differ.
     A  accuracy  the share of answers to those questions that passed.
 
 Models are compared on the questions all of them answered, so one that skipped some never looks
@@ -14,12 +17,21 @@ shared questions for everyone. There's no combined number: the three stay side b
 and critical failures stay where they are (verdict.py).
 """
 import colorsys
+import math
 import urllib.parse
 
 from . import compare
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 MIN_SHARE = 0.5   # fewer answers than this share of the most-answered model's: left out by default
+POINTS_PER_DOUBLING = 15
+
+
+def speed(total_s, fastest_s):
+    """T: 100 for the fastest total, POINTS_PER_DOUBLING less for every doubling of time, never below 0."""
+    if not total_s or not fastest_s:
+        return None
+    return max(0.0, 100 - POINTS_PER_DOUBLING * math.log2(total_s / fastest_s))
 
 
 def colors(n):
@@ -75,7 +87,8 @@ def index(rows, privacy_of, models=None):
                     "alongside": any(r.get("alongside") for c in cells for r in c["rows"])})
     fastest = min((x["total_s"] for x in out if x["total_s"] > 0), default=None)
     for x in out:
-        x["T"] = 100 * fastest / x["total_s"] if fastest and x["total_s"] > 0 else None
+        x["T"] = speed(x["total_s"], fastest)
+        x["fastest"] = bool(fastest) and x["total_s"] == fastest
     out.sort(key=lambda x: (-(x["A"] or 0), -(x["T"] or 0), x["model"]))
     for x, c in zip(out, colors(len(out))):
         x["color"] = c
@@ -183,7 +196,7 @@ def triangle(result, width=60):
     lines = c.text()
     pad = " " * max(0, cols // 2 - 5)
     return ([f"{pad}[b]P[/b] privacy"] + lines
-            + [f"[b]T[/b] time{' ' * max(1, cols - 15)}[b]A[/b] accuracy"])
+            + [f"[b]T[/b] speed{' ' * max(1, cols - 16)}[b]A[/b] accuracy"])
 
 
 def legend(result, width=60):
@@ -218,8 +231,9 @@ def _score(v):
 
 def table(result):
     """(header, rows) for a plain table of the index."""
-    header = ["model", "P privacy", "T time", "A accuracy", "total time", "answers right"]
-    rows = [[x["model"], _score(x["P"]), _score(x["T"]), _score(x["A"]), fmt_total(x["total_s"]),
+    header = ["model", "P privacy", "T speed", "A accuracy", "total time", "answers right"]
+    rows = [[x["model"], _score(x["P"]), _score(x["T"]), _score(x["A"]),
+             fmt_total(x["total_s"]) + (" ★" if x.get("fastest") else ""),
              f"{x['passed']}/{x['answers']}"] for x in result["models"]]
     return header, rows
 
@@ -239,7 +253,8 @@ def scope_note(result, models):
     if not result["questions"]:
         return "These models have no question in common yet, so there's nothing to compare."
     return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
-            "T is relative to the fastest total, so adding a faster model lowers the others.")
+            f"T speed: 100 = the fastest total time (★), {POINTS_PER_DOUBLING} points less for each doubling "
+            "of time; a faster model added lowers the others.")
 
 
 def for_engine(e, labels=None, packs=None, results_dir=None):
