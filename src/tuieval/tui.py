@@ -10,10 +10,10 @@ Run screen:    live reasoning and answer, per-test ✓/✗, TTFT and tokens/s, p
                k skips the current model, c cancels everything, f pauses auto-scroll.
                r shows results at any time (also mid-run); n starts a new run when it ends.
                Enter on a Recent results row shows that answer in full.
-Results:       opens on Per question, which compares each model's tokens and seconds on the same
-               question. ctrl+r reloads (it also reloads when a run's pack finishes). Enter on a
-               Failures row or a Per question cell shows the answer: grading and checks, reasoning,
-               answer, question.
+Results:       opens on the PTA index (parsimony, speed and accuracy per model, as bars). Per
+               question compares each model's tokens and seconds on the same question. ctrl+r
+               reloads (it also reloads when a run's pack finishes). Enter on a Failures row or a
+               Per question cell shows the answer: grading and checks, reasoning, answer, question.
 Answer detail: [ and ] step to the previous/next answer; esc/q close.
 Anywhere:      esc/q go back (q quits only on Setup), ctrl+q quits, w lists this session's runs and
                tunes. Leaving a live run or tune keeps it going; the header shows its progress.
@@ -331,11 +331,11 @@ with the model's reasoning and answer as they stream, then recent results with t
   v  with several models at a time: stream the next one (k skips the one streaming)""",
     "ResultsScreen": """[b]Results[/b]
 
-Opens on [b]Per question[/b]. [b]Production readiness[/b] gives one verdict per model and use case,
-and what's missing when it's INCONCLUSIVE. The other tabs are the evidence:
+Opens on the [b]PTA index[/b]: parsimony (tokens), speed and accuracy per model, a bar each (0-100,
+longer = better). [b]Production readiness[/b] gives one verdict per model and use case, and what's
+missing when it's INCONCLUSIVE. The other tabs are the evidence:
   Scorecard              accuracy, critical failures and truncation per model and pack
   Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
-  PTA index              privacy, total time and accuracy per model (0-100 each), as a triangle
   Per question           every question, model by model
   Is the difference real? whether one model is really better than another, or it's noise
   Tests that separate    the questions that tell models apart
@@ -2341,7 +2341,18 @@ class ResultsScreen(Screen):
             yield Static(id="results-info")
             if self.smoke_dir:
                 yield Button("Show this Smoke run's results", id="toggle-smoke")
-        with TabbedContent(initial="tab-per-question"):
+        with TabbedContent(initial="tab-pta"):
+            with TabPane("PTA index", id="tab-pta"):
+                with Horizontal(id="pta-controls"):
+                    yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
+                    yield Button("Models: all", id="pta-models")
+                yield Static("[dim]P parsimony: tokens used (reasoning and answer). T speed: total time. A accuracy: "
+                             "answers right. Longer bars are better for all three. Verdicts and critical failures "
+                             "are in Production readiness.[/dim]")
+                yield Static(id="pta-note")
+                yield Static(id="pta-bars")
+                yield DataTable(id="pta", zebra_stripes=True, cursor_type="none")
+                yield Static(id="pta-left-out")
             with TabPane("Production readiness"):
                 yield Static(id="readiness-short")
                 yield Static(self.READINESS_HELP, id="readiness-help")
@@ -2366,19 +2377,6 @@ class ResultsScreen(Screen):
                              "On another machine, times are measured there if the model ran there, otherwise "
                              "projected from each answer's token counts and that machine's tuned speeds.[/dim]")
                 yield DataTable(id="speed", zebra_stripes=True)
-            with TabPane("PTA index", id="tab-pta"):
-                with Horizontal(id="pta-controls"):
-                    yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
-                    yield Button("Models: all", id="pta-models")
-                yield Static("[dim]P privacy: 100 when prompts stay on machines you control (local, or a server "
-                             "marked private = true), 0 for a hosted API. T time: total time for every question "
-                             "compared, relative to the fastest model (100). A accuracy: answers right. Bigger "
-                             "triangle = better all round; verdicts and critical failures are in Production "
-                             "readiness.[/dim]")
-                yield Static(id="pta-note")
-                with Horizontal(id="pta-body"):
-                    yield Static(id="pta-triangle")
-                    yield DataTable(id="pta", zebra_stripes=True, cursor_type="none")
             with TabPane("Per question", id="tab-per-question"):
                 with Horizontal(id="pq-controls"):
                     yield Select([("All packs", "")], id="pq-pack", allow_blank=False, value="")
@@ -2586,21 +2584,22 @@ class ResultsScreen(Screen):
         present = {r["model"] for r in rows}
         chosen = {m for m in self.app.pq_models if m in present}
         self.query_one("#pta-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
-        models = sorted(chosen or present)
         t = self.query_one("#pta", DataTable)
         t.clear(columns=True)
-        if not models:
+        if not present:
             self.query_one("#pta-note", Static).update("No finished results to compare yet.")
-            self.query_one("#pta-triangle", Static).update("")
+            self.query_one("#pta-bars", Static).update("")
+            self.query_one("#pta-left-out", Static).update("")
             return
-        result = pta.index(rows, lambda m: pta.privacy(e.cfg, m), models)
-        extra = (f"  [yellow]{len(pta.COLORS)} models are drawn at most; pick fewer with Models.[/yellow]"
-                 if len(models) > len(pta.COLORS) else "")
-        self.query_one("#pta-note", Static).update(pta.scope_note(result, models) + extra)
-        self.query_one("#pta-triangle", Static).update(
-            "\n".join(pta.triangle(result, 48) + [""] + pta.legend(result)) if result["questions"] else "")
+        # none picked: every model with enough answers (pta.index leaves out the rest, and says so)
+        result = pta.index(rows, sorted(chosen) or None)
+        self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
+        self.query_one("#pta-bars", Static).update("\n".join(pta.bars(result)) if result["questions"] else "")
+        self.query_one("#pta-left-out", Static).update(
+            "\n".join(f"[dim]{rich_escape(line)}[/dim]" for line in pta.left_out_lines(result)))
         header, table = pta.table(result)
-        t.add_columns(*header)
+        for i, h in enumerate(header):   # sized to the contents: added before the rows, a column keeps its header's width
+            t.add_column(h, width=max(len(h), *(len(r[i]) for r in table)) if table else None)
         t.add_rows(table)
 
     def fill_per_question(self):
@@ -2908,9 +2907,9 @@ class EvalsApp(App):
     #pq-controls { height: 3; }
     #pta-controls { height: 3; }
     #pta-controls Select { width: 28; margin-right: 1; }
-    #pta-body { height: auto; }
-    #pta-triangle { width: auto; padding: 1 2 0 0; }
+    #pta-bars { height: auto; padding: 1 0 0 0; }
     #pta { width: 1fr; height: auto; margin-top: 1; }
+    #pta-left-out { height: auto; padding: 1 0 0 0; }
     #pq-controls Checkbox { width: auto; }
     #pq-controls Select { width: 28; margin-right: 1; }
     #pq-models { margin-right: 1; min-width: 20; }
