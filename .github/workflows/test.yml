@@ -29,17 +29,6 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: pip install -e .
-      - name: diagnose slow startup (temporary)
-        if: runner.os == 'macOS'
-        run: |
-          python -c "import socket,time; t=time.time(); socket.getfqdn('127.0.0.1'); print('getfqdn', round(time.time()-t,2))"
-          python -c "import socket,time; t=time.time(); socket.gethostbyname(socket.gethostname()); print('gethostbyname', round(time.time()-t,2))"
-          tuieval init "$RUNNER_TEMP/ws" >/dev/null
-          cd "$RUNNER_TEMP/ws" && mkdir -p packs/apps && printf 'label = "apps"\n' > packs/apps/pack.toml
-          printf -- "- {id: a, input: q, expected: 1, reference: 'ANSWER: 1'}\n" > packs/apps/tests.yaml
-          export TUIEVAL_HOME="$RUNNER_TEMP/ws" TUIEVAL_DETECT_PORTS=""
-          time tuieval run --tests a || true
-          python -m cProfile -s cumtime -m tuieval run --tests a 2>&1 | head -45 || true
       - run: python -m unittest discover -s tests -v
 
   # Every push to main is published as a dev build (X.Y.0.devN, installed with pip install --pre);

@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import yaml
@@ -104,6 +105,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
 
+class Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # skip HTTPServer's own-hostname lookup (socket.getfqdn): 35 s per server on CI's macOS runners
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=18090)
@@ -113,7 +121,7 @@ def main(argv=None):
     p.add_argument("--delay", type=float, default=0.0, help="seconds each answer takes")
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
     Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    srv = Server(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:
         srv.serve_forever()
