@@ -6,6 +6,7 @@ oracle  answers each question with its test's `reference` (or the expected tool 
         correct grader passes it
 wrong   answers with the test's first `wrong` entry (or "ANSWER: 0")
 fixed   always "ANSWER: 42"
+unavailable  HTTP 404 "No endpoints found" for every chat request
 
 Streams like llama.cpp: reasoning_content then content deltas, usage and timings at the end.
 """
@@ -77,6 +78,8 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(content, list):
             content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
         test = self.answers.get(" ".join(str(content).split()))
+        if self.mode == "unavailable":   # like OpenRouter with no provider serving the model
+            return self._json({"error": {"message": f"No endpoints found for {self.model}.", "code": 404}}, 404)
         text, calls = reply_for(test, self.mode)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -105,7 +108,7 @@ def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=18090)
     p.add_argument("--packs", required=True)
-    p.add_argument("--mode", choices=("oracle", "wrong", "fixed"), default="oracle")
+    p.add_argument("--mode", choices=("oracle", "wrong", "fixed", "unavailable"), default="oracle")
     p.add_argument("--model", default="mock")
     p.add_argument("--delay", type=float, default=0.0, help="seconds each answer takes")
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
