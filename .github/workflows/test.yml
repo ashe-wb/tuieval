@@ -16,8 +16,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12", "3.13"]
-        # PRs test macOS on one Python; main and tags test all of them before publishing
-        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"macos-latest","python":"3.11"},{"os":"macos-latest","python":"3.13"}]') || fromJSON('[]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
