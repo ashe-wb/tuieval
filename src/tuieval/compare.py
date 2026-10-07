@@ -122,6 +122,12 @@ def p90(values):
     return statistics.quantiles(values, n=10)[-1] if len(values) > 1 else (values[0] if values else None)
 
 
+def pct(fraction):
+    """A share as a percentage: "100%" and "0%" only when exact, else one decimal ("99.6%"), so a model
+    with a wrong answer never shows as perfect."""
+    return "100%" if fraction >= 1 else "0%" if fraction <= 0 else f"{100 * fraction:.1f}%"
+
+
 def median(values):
     values = [v for v in values if v is not None]
     return statistics.median(values) if values else None
@@ -155,10 +161,19 @@ def settings_notes(infos):
         per_model.setdefault(i["label"], i["settings"])
     keys = sorted({k for s in per_model.values() for k in s})
     differing = [k for k in keys if len({json.dumps(s.get(k)) for s in per_model.values()}) > 1]
-    if differing:
-        detail = "; ".join(f"{k}: " + ", ".join(f"{m}={per_model[m].get(k)}" for m in sorted(per_model))
-                           for k in differing)
-        notes.append(f"Settings differ between models ({detail}). Compare those models knowing that.")
+    parts = []
+    for k in differing:   # only the models that differ from the most common value, named when few
+        groups = collections.defaultdict(list)
+        for m in sorted(per_model):
+            groups[json.dumps(per_model[m].get(k))].append(m)
+        common = max(groups, key=lambda v: len(groups[v]))
+        for value, ms in sorted(groups.items()):
+            if value != common:
+                who = ", ".join(ms) if len(ms) <= 3 else f"{len(ms)} models"
+                shown = "unset" if value == "null" else json.loads(value)
+                parts.append(f"{k} {shown} on {who}")
+    if parts:
+        notes.append("Settings differ: " + "; ".join(parts) + ".")
     fps = collections.defaultdict(set)
     for i in infos:
         if i.get("pack"):
@@ -413,7 +428,7 @@ def by_difficulty(rows):
             cells = []
             for lvl in LEVELS:
                 x = [r["ok"] for r in sub if r.get("difficulty") == lvl]
-                cells.append(f"{sum(x)}/{len(x)} ({100 * sum(x) / len(x):.0f}%)" if x else "-")
+                cells.append(f"{sum(x)}/{len(x)} ({pct(sum(x) / len(x))})" if x else "-")
             table.append([m, s] + cells)
     return header, table
 

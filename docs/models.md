@@ -98,13 +98,15 @@ By default a run serves one model at a time. On a machine with room for more, se
 
 ## PTA index
 
-The **PTA index** puts privacy, time and accuracy side by side, 0-100 each, as a radar triangle (Results → PTA index, `tuieval pta`, and a section in `tuieval report`). Each model is a triangle reaching each corner as far as its score: bigger means better all round. There's no combined number; verdicts and critical failures stay in Production readiness.
+The **PTA index** puts parsimony (tokens), time and accuracy side by side, as a bar for each per model (longer is better), with a table underneath. It's the first tab in Results, where `r` opens, and it's also `tuieval pta` and a section in `tuieval report`. There's no combined number; verdicts and critical failures stay in Production readiness.
 
-- **P privacy**: 100 when prompts stay on machines you control (tuieval starts the server, its `url` is this machine, or the server has `private = true`, e.g. your own box on the network); 0 for a hosted API.
-- **T time**: the total time to answer every question compared (each question at its median over repeats), relative to the fastest model: `100 × fastest total ÷ this model's total`. Adding a faster model lowers the others.
+- **P parsimony (tokens)**: the tokens used, reasoning and answer, on every question compared (each question at its median over repeats). Beside the bar: how many times the leanest model's, e.g. `2.4×` (`1.0×` is the leanest, ★ in the table's **tokens/answer**). Unlike time it doesn't depend on your machine: it's how much a model says to get to an answer, which is what you pay for on an API and what fills its context.
+- **T time**: the total time to answer those questions, as how many times the fastest model's, e.g. `28×` (★ in **time/answer**).
 - **A accuracy**: the share of answers to those questions that passed.
 
-Models are compared on the questions all of them answered, so one that skipped some never looks faster. Pick the models and pack to compare in the TUI, or use `--only` and `--packs`.
+The P and T bars use a log scale: full for the best, 15 points (of 100) shorter for every doubling, empty at about 100 times the best. So a model at 28× still shows a bar, and adding a better model shortens the others'.
+
+Models are compared on the questions all of them answered, so one that skipped some never looks faster. Server and connection errors aren't answers: a model with only those is listed as having none. A model with fewer than half as many answers as the most-answered one is left out (and listed), or it would shrink the shared questions for everyone. Pick the models and pack to compare in the TUI, or use `--only` and `--packs`: models you pick are always compared.
 
 ## Tuning
 
@@ -152,7 +154,6 @@ On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM,
 |---|---|
 | `cmd` | command that starts the server (no `cmd` = an already-running server at `url`). Placeholders: `{model}`, `{served_name}`, `{port}`, `{mmproj}`, `{ctx}`, `{kv_type}`, `{root}` (the workspace), and the tune placeholders. An argument `env:NAME=value` sets an environment variable instead. |
 | `url` | an already-running server's base URL |
-| `private` | `true` for a server on a machine you control (e.g. your own box on the network): its models score 100 for privacy in the PTA index |
 | `port` | the port `cmd` serves on |
 | `cwd` | folder to start `cmd` in |
 | `model_is_path` | `model` is a file or folder: check it exists before starting |

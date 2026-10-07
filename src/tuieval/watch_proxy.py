@@ -18,6 +18,7 @@ import http.client
 import itertools
 import json
 import os
+import socketserver
 import sys
 import threading
 import time
@@ -128,6 +129,12 @@ class Proxy:
 
         class Server(ThreadingHTTPServer):
             daemon_threads = True
+
+            def server_bind(self):
+                # HTTPServer looks up its own hostname here (socket.getfqdn), which can take half a
+                # minute where DNS is slow; the name is only cosmetic, so use the address.
+                socketserver.TCPServer.server_bind(self)
+                self.server_name, self.server_port = self.server_address[:2]
 
             def handle_error(self, request, client_address):
                 err = sys.exc_info()[1]

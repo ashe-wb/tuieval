@@ -1,147 +1,171 @@
-"""PTA index: privacy, time and accuracy per model, 0-100 each, drawn as a radar triangle.
+"""PTA index: parsimony (tokens), time and accuracy per model, a bar each (longer = better).
 
-    P  privacy   100 when prompts stay on machines you control: tuieval starts the server, its URL
-                 is this machine, or the server is marked private = true in models.toml. 0 otherwise
-                 (a hosted API: there's no partial privacy once prompts leave).
-    T  time      the total time to answer every question compared (each question at its median over
-                 repeats), relative to the fastest model: 100 x fastest total / this model's total.
-    A  accuracy  the share of answers to those questions that passed.
+    P  parsimony (tokens)  the tokens (reasoning and answer) used on every question compared (each
+                           question at its median over repeats), shown as how many times the leanest
+                           model's ("2.4×"). Unlike T it doesn't depend on the machine.
+    T  time                the total time to answer those questions, as how many times the fastest
+                           model's ("28×").
+    A  accuracy            the share of answers to those questions that passed (%).
+
+Behind the P and T bars is a 0-100 score: 100 for the best, POINTS_PER_DOUBLING points less for every
+doubling (0 at about 100 times more), so models far behind the best still get a visible bar.
 
 Models are compared on the questions all of them answered, so one that skipped some never looks
-faster. There's no combined number: the three stay side by side, and verdicts and critical
-failures stay where they are (verdict.py).
+faster. Server and connection errors aren't answers. By default a model with fewer than half as many
+answers as the most-answered model is left out (listed, so it can be picked), or it would shrink the
+shared questions for everyone. There's no combined number: the three stay side by side, and verdicts
+and critical failures stay where they are (verdict.py).
 """
-import urllib.parse
+import math
+
+from rich.markup import escape as rich_escape
 
 from . import compare
 
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
-# one colour per model on the triangle; more models than colours are listed but not drawn
-COLORS = ["cyan", "magenta", "yellow", "green", "red", "blue", "bright_white", "bright_cyan"]
+MIN_SHARE = 0.5   # fewer answers than this share of the most-answered model's: left out by default
+POINTS_PER_DOUBLING = 15
 
 
-def privacy(cfg, label):
-    """100 if a model's prompts stay on machines you control, else 0 (see the module docstring);
-    None for a model that's no longer in models.toml (where it ran isn't known)."""
-    m = next((m for m in cfg["models"] if m["label"] == label), None)
-    server = cfg["servers"].get(m["server"], {}) if m else {}
-    if not server:
+def score(total, best):
+    """P and T: 100 for the best (lowest) total, POINTS_PER_DOUBLING less for every doubling, never below 0."""
+    if not total or not best:
         return None
-    if server.get("cmd") or server.get("private"):
-        return 100
-    host = urllib.parse.urlparse(server.get("url", "")).hostname or ""
-    return 100 if host.lower() in LOCAL_HOSTS else 0
+    return max(0.0, 100 - POINTS_PER_DOUBLING * math.log2(total / best))
 
 
-def index(rows, privacy_of, models=None):
-    """{"questions": n shared, "models": [{model, P, T, A, total_s, passed, answers, alongside}]},
-    best accuracy first. models: the ones to compare (default: every model in rows)."""
+def memory_gb(infos):
+    """{model: the most memory its server held in any run (GB)}, for models tuieval served (hosted: none).
+    On a discrete GPU that's its peak VRAM (vram_peak_gb), where the model lives; otherwise its resident memory."""
+    out = {}
+    for i in infos:
+        gb = i.get("vram_peak_gb") or (i["peak_rss_mb"] / 1024 if i.get("peak_rss_mb") else None)
+        if gb:
+            out[i["label"]] = max(out.get(i["label"], 0), gb)
+    return out
+
+
+def index(rows, models=None, memory=None):
+    """{"questions": n shared, "models": [{model, P, T, A, tokens, total_s, passed, answers, alongside,
+    fewest, fastest, tps, ttft, memory_gb}],
+    "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
+    most-answered model}, best accuracy first. models: the ones to compare (default: every model in rows
+    with enough answers; models named here are compared whatever their count). memory: memory_gb()."""
+    no_answers = sorted({r["model"] for r in rows} - {r["model"] for r in rows if not r.get("error")})
+    rows = [r for r in rows if not r.get("error")]     # a server or connection error isn't an answer
     tests = compare.per_question(rows)
-    models = sorted(models or {m for t in tests for m in t["cells"]})
+    counts = {}
+    for t in tests:
+        for m in t["cells"]:
+            counts[m] = counts.get(m, 0) + 1
+    most = max(counts.values(), default=0)
+    if models:
+        no_answers = [m for m in no_answers if m in models]
+        models, left_out = sorted(m for m in models if m in counts), []
+    else:
+        models = sorted(m for m in counts if counts[m] >= MIN_SHARE * most)
+        left_out = sorted(((m, n) for m, n in counts.items() if m not in models), key=lambda x: (-x[1], x[0]))
     shared = [t for t in tests if models and all(m in t["cells"] for m in models)]
     out = []
     for m in models:
         cells = [t["cells"][m] for t in shared]
         answers = sum(c["n"] for c in cells)
-        out.append({"model": m, "P": privacy_of(m), "total_s": sum(c["secs"] or 0 for c in cells),
+        out.append({"model": m, "tokens": sum(c["tokens"] or 0 for c in cells),
+                    "total_s": sum(c["secs"] or 0 for c in cells),
                     "passed": sum(c["passed"] for c in cells), "answers": answers,
                     "A": 100 * sum(c["passed"] for c in cells) / answers if answers else None,
+                    # generation speed and time to first token over the same answers (medians)
+                    "tps": compare.median(r.get("gen_tps") for c in cells for r in c["rows"]),
+                    "ttft": compare.median(r.get("ttft") for c in cells for r in c["rows"]),
+                    "memory_gb": (memory or {}).get(m),
                     # answers that ran while other models were served shared the machine's speed
                     "alongside": any(r.get("alongside") for c in cells for r in c["rows"])})
     fastest = min((x["total_s"] for x in out if x["total_s"] > 0), default=None)
+    fewest = min((x["tokens"] for x in out if x["tokens"] > 0), default=None)
     for x in out:
-        x["T"] = 100 * fastest / x["total_s"] if fastest and x["total_s"] > 0 else None
+        x["P"], x["T"] = score(x["tokens"], fewest), score(x["total_s"], fastest)
+        # shown on the bars: how many times the leanest / fastest model's total (1.0 = the best)
+        x["tokens_x"] = x["tokens"] / fewest if fewest and x["tokens"] else None
+        x["time_x"] = x["total_s"] / fastest if fastest and x["total_s"] else None
+        x["fewest"] = bool(fewest) and x["tokens"] == fewest
+        x["fastest"] = bool(fastest) and x["total_s"] == fastest
     out.sort(key=lambda x: (-(x["A"] or 0), -(x["T"] or 0), x["model"]))
-    return {"questions": len(shared), "models": out}
+    return {"questions": len(shared), "models": out, "left_out": left_out, "no_answers": no_answers,
+            "most": most}
 
 
-# ---------------------------------------------------------------- the triangle (braille, no dependencies)
-_DOTS = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))   # braille dot bits by (row, column)
+# (letter, name, what the number beside the bar shows, colour); the bar itself is the 0-100 score
+LETTERS = (("P", "parsimony (tokens)", "tokens_x", "cyan"), ("T", "time", "time_x", "magenta"),
+           ("A", "accuracy", "A", "green"))
 
 
-class _Canvas:
-    """Braille cells, 2 dots wide and 4 tall each; every cell takes the colour of the last line through it."""
-    def __init__(self, cols, rows):
-        self.cols, self.rows = cols, rows
-        self.bits = [[0] * cols for _ in range(rows)]
-        self.color = [[None] * cols for _ in range(rows)]
-
-    def dot(self, x, y, color):
-        cx, cy = int(x) // 2, int(y) // 4
-        if 0 <= cx < self.cols and 0 <= cy < self.rows:
-            self.bits[cy][cx] |= _DOTS[int(y) % 4][int(x) % 2]
-            self.color[cy][cx] = color
-
-    def line(self, a, b, color, dotted=False):
-        steps = int(max(abs(b[0] - a[0]), abs(b[1] - a[1]))) or 1
-        for i in range(steps + 1):
-            if dotted and i % 3:
-                continue
-            self.dot(a[0] + (b[0] - a[0]) * i / steps, a[1] + (b[1] - a[1]) * i / steps, color)
-
-    def text(self):
-        lines = []
-        for bits, colors in zip(self.bits, self.color):
-            out = []
-            for b, c in zip(bits, colors):
-                ch = chr(0x2800 + b) if b else " "
-                out.append(f"[{c}]{ch}[/]" if b and c else ch)
-            lines.append("".join(out).rstrip())
-        return lines
+def times(v):
+    """A multiple of the best: "1.0×", "2.4×", "28×"."""
+    return "-" if v is None else f"{v:.1f}×" if v < 9.95 else f"{v:.0f}×"
 
 
-def triangle(result, width=60):
-    """The radar triangle as Rich markup lines: P at the top, T bottom left, A bottom right; a
-    model's triangle reaches each corner as far as its score (bigger = better all round)."""
-    cols = max(20, width)
-    w = cols * 2 - 2                            # dots across
-    h = int(w * 0.866)                          # an equilateral triangle (braille dots are about square)
-    rows = h // 4 + 1
-    top, left, right = (w / 2, 0), (0, h), (w, h)
-    center = (w / 2, h * 2 / 3)
-    c = _Canvas(cols, rows)
-
-    def at(corner, score):
-        return (center[0] + (corner[0] - center[0]) * score / 100, center[1] + (corner[1] - center[1]) * score / 100)
-
-    for corner in (top, left, right):           # axes, the 50% ring, then the frame
-        c.line(center, corner, "grey37", dotted=True)
-    half = [at(k, 50) for k in (top, left, right)]
-    for a, b in zip(half, half[1:] + half[:1]):
-        c.line(a, b, "grey37", dotted=True)
-    for a, b in ((top, left), (left, right), (right, top)):
-        c.line(a, b, "grey70")
-    for i, x in enumerate(result["models"][:len(COLORS)][::-1]):   # the best ends on top
-        color = COLORS[len(result["models"][:len(COLORS)]) - 1 - i]
-        pts = [at(k, s or 0) for k, s in ((top, x["P"]), (left, x["T"]), (right, x["A"]))]
-        for a, b in zip(pts, pts[1:] + pts[:1]):
-            c.line(a, b, color)
-    lines = c.text()
-    pad = " " * max(0, cols // 2 - 5)
-    return ([f"{pad}[b]P[/b] privacy"] + lines
-            + [f"[b]T[/b] time{' ' * max(1, cols - 15)}[b]A[/b] accuracy"])
+def bars(result, width=20, markup=True):
+    """Lines with a row per model and a bar per score (P, T, A), longer = better: the at-a-glance view.
+    Beside P and T, how many times the leanest / fastest model's tokens / time; beside A, the percentage.
+    markup=False gives plain text (the report)."""
+    if not result["models"]:
+        return []
+    name_w = max(len(x["model"]) for x in result["models"])
+    # each column: the bar, a space, "100%" or "9.8×" (5), then a gap; at least as wide as its heading
+    cell_w = max(width + 9, *(len(f"{k} {name}") + 2 for k, name, _, _ in LETTERS))
+    head = " " * (name_w + 2) + "".join(f"{f'{k} {name}':<{cell_w}}" for k, name, _, _ in LETTERS)
+    lines = [f"[b]{head.rstrip()}[/b]" if markup else head.rstrip()]
+    for x in result["models"]:
+        cells = []
+        for k, _, shown, color in LETTERS:
+            v = x[k]
+            full = 0 if v is None else round(width * max(0, min(100, v)) / 100)
+            if v is not None and v < 100:   # full only when perfect (accuracy) or the best (P, T)
+                full = min(full, width - 1)
+            bar, rest = "█" * full, "░" * (width - full)
+            num = (("-" if v is None else compare.pct(v / 100)) if shown == "A" else times(x.get(shown)))
+            bar = f"[{color}]{bar}[/][grey37]{rest}[/]" if markup else bar + rest
+            cells.append(f"{bar} {num:>6}" + " " * (cell_w - width - 7))
+        name = f"{x['model']:<{name_w}}"
+        lines.append((f"{rich_escape(name) if markup else name}  " + "".join(cells)).rstrip())
+    return lines
 
 
-def legend(result):
-    """One Rich markup line per model: its colour on the triangle and its three scores."""
+def left_out_lines(result):
+    """Plain sentences on the models not compared (too few answers, or only server errors) and on
+    answers that shared the machine with other models."""
     out = []
-    for i, x in enumerate(result["models"]):
-        mark = f"[{COLORS[i]}]■[/]" if i < len(COLORS) else " "
-        out.append(f"{mark} {x['model']}  P {_score(x['P'])} · T {_score(x['T'])} · A {_score(x['A'])}"
-                   + ("  [yellow](some answers ran alongside other models)[/yellow]" if x["alongside"] else ""))
+    if result["left_out"]:
+        out.append("Left out (fewer than half as many answers as the most-answered model; pick them under "
+                   "Models or --only to include them): "
+                   + ", ".join(f"{m} ({n} of {result['most']})" for m, n in result["left_out"]))
+    if result["no_answers"]:
+        out.append("No answers, only server errors: " + ", ".join(result["no_answers"]))
+    shared = [x["model"] for x in result["models"] if x["alongside"]]
+    if shared:
+        out.append("Some answers ran alongside other models, which shared the machine's speed: " + ", ".join(shared))
     return out
-
-
-def _score(v):
-    return "-" if v is None else f"{v:.0f}"
 
 
 def table(result):
     """(header, rows) for a plain table of the index."""
-    header = ["model", "P privacy", "T time", "A accuracy", "total time", "answers right"]
-    rows = [[x["model"], _score(x["P"]), _score(x["T"]), _score(x["A"]), fmt_total(x["total_s"]),
-             f"{x['passed']}/{x['answers']}"] for x in result["models"]]
+    n = result["questions"] or 1
+    header = ["model", "tokens/answer", "time/answer", "answers right", "tok/s", "TTFT s", "memory GB"]
+    rows = [[x["model"], f"{round(x['tokens'] / n):,}" + (" ★" if x.get("fewest") else ""),
+             fmt_secs(x["total_s"] / n) + (" ★" if x.get("fastest") else ""),
+             f"{x['passed']}/{x['answers']}", _num(x.get("tps"), ".0f"), _num(x.get("ttft"), ".1f"),
+             _num(x.get("memory_gb"), ".1f")] for x in result["models"]]
     return header, rows
+
+
+def fmt_secs(secs):
+    """Time per answer: "2.5s", "69s", "4m10s"."""
+    if not secs:
+        return "-"
+    return f"{secs:.1f}s" if secs < 10 else f"{secs:.0f}s" if secs < 60 else fmt_total(secs)
+
+
+def _num(v, fmt):
+    return "-" if v is None else format(v, fmt)
 
 
 def fmt_total(secs):
@@ -158,18 +182,19 @@ def scope_note(result, models):
     """What the scores compare, in a sentence."""
     if not result["questions"]:
         return "These models have no question in common yet, so there's nothing to compare."
-    return (f"Compared on the {result['questions']} questions all {len(models)} model(s) answered. "
-            "T is relative to the fastest total, so adding a faster model lowers the others.")
+    return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
+            "Longer bars are better. P parsimony (tokens) and T time: how many times the leanest / fastest "
+            "model's (1.0×, ★ in the table). A accuracy: answers right.")
 
 
 def for_engine(e, labels=None, packs=None, results_dir=None):
     """(result, models) from a workspace's finished results (results on their way out excluded)."""
     paths = [p for p in compare.default_paths(results_dir or e.results_dir) if not e.superseded(p)]
-    rows, _ = compare.load(paths) if paths else ([], [])
+    rows, infos = compare.load(paths) if paths else ([], [])
     if packs:
         rows = [r for r in rows if r["suite"] in packs]
     models = sorted({r["model"] for r in rows} & set(labels) if labels else {r["model"] for r in rows})
-    return index(rows, lambda m: privacy(e.cfg, m), models), models
+    return index(rows, models if labels else None, memory_gb(infos)), models
 
 
 def markdown(result, models):
@@ -177,9 +202,10 @@ def markdown(result, models):
     lines = ["## PTA index", "", scope_note(result, models), ""]
     if not result["questions"]:
         return lines
+    lines += ["```"] + bars(result, markup=False) + ["```", ""]
     header, rows = table(result)
     lines += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     lines += ["| " + " | ".join(r) + " |" for r in rows]
-    if any(x["alongside"] for x in result["models"]):
-        lines += ["", "Some answers ran alongside other models, which shared the machine's speed."]
+    for line in left_out_lines(result):
+        lines += ["", line]
     return lines

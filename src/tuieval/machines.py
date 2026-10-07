@@ -194,10 +194,10 @@ def detect():
         # macOS default when unset: about 2/3 of RAM up to 36 GB, 3/4 above.
         limit = wired / 1024 if wired > 0 else ram * (0.75 if ram > 36 else 2 / 3)
         gpu_cores = None
-        try:
-            out = subprocess.run(["system_profiler", "SPDisplaysDataType"], capture_output=True, text=True,
-                                 timeout=15).stdout
-            m = re.search(r"Total Number of Cores:\s*(\d+)", out)
+        try:   # the GPU driver's own count: instant, where system_profiler can take seconds (CI's virtual Macs)
+            out = subprocess.run(["ioreg", "-rc", "AGXAccelerator", "-d1"], capture_output=True, text=True,
+                                 timeout=5).stdout
+            m = re.search(r'"gpu-core-count"\s*=\s*(\d+)', out)
             gpu_cores = int(m.group(1)) if m else None
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -332,14 +332,15 @@ def fit(model_path, machine=None, kv_type="f16", headroom_gb=4.0, extra_bytes=0,
     model_max = info["context_length"] or 131072
     max_ctx = int(min(room / per_tok, model_max, want_ctx or model_max)) if room > 0 else 0
     max_ctx = max_ctx // 1024 * 1024
+    of = " of VRAM" if machine.discrete else ""
     if max_ctx < MIN_CTX:
         need = fixed + MIN_CTX * per_tok / GB
         return Fit(False, max_ctx, round(need, 1), round(available, 1),
                    f"doesn't fit on {machine.id}: needs ~{need:.0f} GB at {MIN_CTX // 1024}k context, "
-                   f"{available:.0f} GB available")
+                   f"{available:.0f} GB{of} available")
     need = fixed + max_ctx * per_tok / GB
     return Fit(True, max_ctx, round(need, 1), round(available, 1),
-               f"fits on {machine.id} up to {max_ctx // 1024}k context (~{need:.0f} of {available:.0f} GB)")
+               f"fits on {machine.id} up to {max_ctx // 1024}k context (~{need:.0f} of {available:.0f} GB{of})")
 
 
 # ---------------------------------------------------------------- memory pressure

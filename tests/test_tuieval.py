@@ -3,6 +3,7 @@
 Uses a temporary workspace and tests/mock_server.py on a free local port; no model or GPU needed.
 """
 import json
+import math
 import os
 import re
 import socket
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import types
 import time
 import unittest
 import urllib.request
@@ -198,6 +200,35 @@ class WorkspaceGraders(unittest.TestCase):
 
 
 class Units(unittest.TestCase):
+    def test_settings_note_names_only_what_differs(self):
+        from tuieval import compare
+        infos = [{"label": m, "settings": {"temperature": 1.0, **extra}} for m, extra in
+                 (("a", {}), ("b", {}), ("c", {"effort": "medium"}), ("d", {"effort": "medium"}),
+                  ("e", {"effort": "medium"}), ("f", {"effort": "medium"}), ("g", {}), ("h", {}), ("i", {}),
+                  ("j", {"penalty": 1.5}))]
+        self.assertEqual(compare.settings_notes(infos),
+                         ["Settings differ: effort medium on 4 models; penalty 1.5 on j."])
+
+    def test_eta_goes_pack_by_pack(self):
+        from tuieval.tui import RunScreen
+        job = lambda key, label, total, done=0, status="waiting": types.SimpleNamespace(
+            key=key, label=label, total=total, done=done, status=status)
+        run = RunScreen.__new__(RunScreen)
+        run.parallel, run.rough = 1, {"local/new"}
+        run.jobs = [job("hosted/a", "hosted", 100, 100, "done"), job("local/a", "local", 200, 4, "running"),
+                    job("local/new", "local", 50)]
+        run.spr = {"local/a": 60.0, "local/new": 30.0}            # from history
+        run.live = {"local/a": [900.0, 800.0, 700.0, 1000.0]}       # its first answers are the slow ones
+        left, rough = run.eta_seconds()
+        self.assertEqual((left, rough), (196 * 60 + 50 * 30, True))  # history, not 4 slow answers: ~3.7h, not ~47h
+        run.live["local/a"].append(600.0)                            # 5 answers: its own average takes over
+        run.jobs[1].done = 5
+        self.assertEqual(run.eta_seconds()[0], 195 * 800 + 50 * 30)
+        run.parallel = 2
+        run.jobs.append(job("other/a", "other", 10))
+        run.spr["other/a"] = 10.0
+        self.assertEqual(run.eta_seconds()[0], (195 * 800 + 50 * 30 + 100) / 2)   # two models at a time
+
     def test_server_errors_never_judge_the_model(self):
         from tuieval import client
         no_endpoints = 'server returned HTTP 404: {"error":{"message":"No endpoints found for some/model."}}'
@@ -702,40 +733,71 @@ class AddToRun(unittest.TestCase):
 
 
 class PTAIndex(unittest.TestCase):
-    """The PTA index: privacy from where a model runs, time relative to the fastest total, accuracy,
-    all over the questions every compared model answered."""
-
-    def test_privacy(self):
-        from tuieval import pta
-        cfg = {"servers": {"llama": {"cmd": ["llama-server"]}, "lm": {"url": "http://localhost:1234/v1"},
-                           "box": {"url": "http://192.168.1.20:8000/v1"}, "mine": {"url": "http://192.168.1.20:8000/v1",
-                                                                                   "private": True},
-                           "or": {"url": "https://openrouter.ai/api/v1"}},
-               "models": [{"label": l, "server": l} for l in ("llama", "lm", "box", "mine", "or")]}
-        self.assertEqual([pta.privacy(cfg, l) for l in ("llama", "lm", "box", "mine", "or", "gone")],
-                         [100, 100, 0, 100, 0, None])
+    """The PTA index: parsimony from tokens and speed from time, each relative to the best on a log
+    scale, and accuracy, all over the questions every compared model answered."""
 
     def test_index_compares_shared_questions(self):
         from tuieval import pta
 
         def row(model, test, ok, secs, repeat=0):
             return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "latency": secs * 1000,
-                    "tokens": 10, "truncated": False, "gen_tps": None, "repeat": repeat}
+                    "tokens": 10 if model == "slow" else 40, "truncated": False, "gen_tps": None, "repeat": repeat}
         rows = [row("fast", "q1", True, 2), row("fast", "q2", False, 2),
                 row("slow", "q1", True, 8), row("slow", "q2", True, 4), row("slow", "q2", True, 6, repeat=1),
                 row("slow", "q3", True, 100)]               # only slow answered q3: not compared
-        res = pta.index(rows, lambda m: 100 if m == "slow" else 0)
+        res = pta.index(rows)
         self.assertEqual(res["questions"], 2)
         by = {x["model"]: x for x in res["models"]}
         self.assertEqual(by["fast"]["total_s"], 4)
         self.assertEqual(by["slow"]["total_s"], 13)      # q1 8 + q2 median of 4 and 6
         self.assertEqual(by["fast"]["T"], 100)
-        self.assertAlmostEqual(by["slow"]["T"], 100 * 4 / 13)
+        self.assertAlmostEqual(by["slow"]["T"], 100 - 15 * math.log2(13 / 4))   # 15 points per doubling
+        self.assertEqual((by["slow"]["tokens"], by["fast"]["tokens"]), (20, 80))   # medians over repeats
+        self.assertEqual((by["slow"]["P"], by["fast"]["P"]), (100, 70))          # 4x the tokens: two doublings
+        self.assertEqual((pta.score(2, 1), pta.score(1000, 1)), (85, 0))
+        header, table = pta.table(res)
+        self.assertEqual(header[1:4], ["tokens/answer", "time/answer", "answers right"])
+        cells = {r[0]: r for r in table}
+        self.assertEqual((cells["slow"][1], cells["fast"][1:3]), ("10 ★", ["40", "2.0s ★"]))   # per answer
+        bars = pta.bars(res, 10, markup=False)
+        self.assertEqual(bars[0].split(), ["P", "parsimony", "(tokens)", "T", "time", "A", "accuracy"])
+        self.assertEqual((bars[0].index("P parsimony"), bars[0].index("T time")),   # each bar starts under
+                         (bars[2].index("███████░░░"), bars[2].index("██████████")))  # its heading
+        # the bar is the score (4x the tokens: 70); beside it, how many times the best
+        self.assertEqual(bars[2].split(), ["fast", "███████░░░", "4.0×", "██████████", "1.0×", "█████░░░░░", "50.0%"])
+        self.assertEqual((pta.times(1), pta.times(9.84), pta.times(27.9)), ("1.0×", "9.8×", "28×"))
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
-        lines = pta.triangle(res, 40)
-        self.assertIn("P[/b] privacy", lines[0])
-        self.assertTrue(any("[cyan]" in l for l in lines) and any("[magenta]" in l for l in lines))
+
+    def test_accuracy_never_rounds_up_to_perfect(self):
+        from tuieval import compare, pta
+        self.assertEqual([compare.pct(f) for f in (467 / 469, 1, 0, 0.5)], ["99.6%", "100%", "0%", "50.0%"])
+        row = lambda model, a: {"model": model, "P": 100, "T": 100, "A": a, "tokens_x": 1, "time_x": 1}
+        bars = pta.bars({"models": [row("two-wrong", 100 * 467 / 469), row("perfect", 100.0)]}, 10, markup=False)
+        two_wrong, perfect = bars[1].split(), bars[2].split()
+        self.assertEqual((two_wrong[-2], two_wrong[-1]), ("█████████░", "99.6%"))   # not a full bar
+        self.assertEqual((perfect[-2], perfect[-1]), ("██████████", "100%"))
+
+    def test_server_errors_and_models_with_few_answers(self):
+        from tuieval import pta
+
+        def row(model, test, ok=True, error=False):
+            return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "error": error,
+                    "latency": 1000, "tokens": 10, "truncated": False, "gen_tps": None, "repeat": 0}
+        rows = ([row(m, f"q{i}") for m in ("a", "b") for i in range(10)] + [row("few", "q0", ok=False)]
+                + [row("down", f"q{i}", ok=False, error=True) for i in range(10)]
+                + [row("b", "q10", ok=False, error=True)])      # an error among real answers: not counted
+        res = pta.index(rows)
+        self.assertEqual([x["model"] for x in res["models"]], ["a", "b"])
+        self.assertEqual(res["questions"], 10)                  # not shrunk to the one "few" answered
+        self.assertEqual(res["left_out"], [("few", 1)])
+        self.assertEqual(res["no_answers"], ["down"])
+        self.assertEqual([x["answers"] for x in res["models"]], [10, 10])
+        legend = "\n".join(pta.left_out_lines(res))
+        self.assertIn("few (1 of 10)", legend)
+        self.assertIn("only server errors: down", legend)
+        picked = pta.index(rows, ["a", "few"])      # picked by hand: compared anyway
+        self.assertEqual((picked["questions"], picked["left_out"]), (1, []))
 
     def test_cli_report_and_tui(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -759,16 +821,13 @@ class PTAIndex(unittest.TestCase):
             finally:
                 right.stop()
                 wrong.stop()
-            path = os.path.join(ws, "models.toml")    # as if "there" were a hosted API
-            write(path, read(path).replace(f"http://127.0.0.1:{wrong.port}", "https://api.example.com/v1"))
             out = tuieval(ws, "pta").stdout
             self.assertIn("Compared on the 4 questions all 2 model(s) answered", out)
-            table = {l.split()[0]: l.split()[1:4] for l in out.splitlines() if l.startswith(("good ", "hosted "))}
-            self.assertEqual(table["good"], ["100", "100", "100"])
-            self.assertEqual(table["hosted"][0], "0")
-            self.assertLess(int(table["hosted"][1]), 100)   # slower in total
-            self.assertEqual(table["hosted"][2], "0")
-            self.assertIn("P privacy", out)
+            bars = {l.split()[0]: l for l in out.splitlines() if "█" in l}
+            self.assertEqual((bars["good"].count("1.0×"), "100%" in bars["good"]), (2, True))
+            self.assertEqual(bars["hosted"].count("1.0×"), 1)   # as many tokens (the mock), but slower
+            self.assertIn(" 0%", bars["hosted"])
+            self.assertIn("P parsimony", out)
             self.assertIn("4/4", tuieval(ws, "pta", "--only", "good").stdout)
             report = os.path.join(tmp, "r.md")
             tuieval(ws, "report", "-o", report)
@@ -776,7 +835,7 @@ class PTAIndex(unittest.TestCase):
             code = textwrap.dedent("""
                 import asyncio, json
                 from tuieval.tui import EvalsApp, ResultsScreen
-                from textual.widgets import DataTable, Static
+                from textual.widgets import DataTable, Static, TabbedContent
                 async def go():
                     app = EvalsApp({})
                     async with app.run_test(size=(180, 60)) as pilot:
@@ -785,16 +844,27 @@ class PTAIndex(unittest.TestCase):
                         await pilot.pause(0.5)
                         t = app.screen.query_one("#pta", DataTable)
                         rows = [[str(c) for c in t.get_row_at(i)] for i in range(t.row_count)]
-                        tri = str(app.screen.query_one("#pta-triangle", Static).render())
-                        print(json.dumps({"rows": rows, "triangle": "P privacy" in tri}))
+                        tri = str(app.screen.query_one("#pta-bars", Static).render())
+                        app.screen.query_one("#pq-disagree").value = True       # right vs wrong on all 4
+                        await pilot.pause(0.3)
+                        pq = app.screen.query_one("#per-question", DataTable)
+                        both = pq.row_count
+                        app.pq_models = {"good"}                                # one model never disagrees
+                        app.screen.fill_per_question()
+                        await pilot.pause(0.3)
+                        alone = pq.row_count
+                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone],
+                                          "tab": app.screen.query_one(TabbedContent).active}))
                 asyncio.run(go())
             """)
             p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
                                env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""))
             got = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
             self.assertIsInstance(got, dict, got)
-            self.assertTrue(got["triangle"])
-            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100"])
+            self.assertTrue(got["bars"])
+            self.assertEqual(got["disagree"], [4, 0])
+            self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
+            self.assertEqual([(r[0], r[3]) for r in got["rows"]][0], ("good", "4/4"))
 
 
 class Unavailable(unittest.TestCase):
@@ -948,6 +1018,28 @@ class DiscreteGPU(unittest.TestCase):
             os.environ.clear()
             os.environ.update(env)
 
+    def test_fit_messages_name_vram(self):
+        from tuieval import machines
+        path = os.path.join(self.tmp.name, "m.gguf")
+        fake_gguf(path, size=1000)
+        gpu = lambda gb: machines.Machine("rtx4090-128gb", "x86_64", 128.0, gb, 16, 0, None, "Linux",
+                                          gpu_name="NVIDIA GeForce RTX 4090", discrete=True)
+        ok, no = machines.fit(path, gpu(24.0), headroom_gb=1.5), machines.fit(path, gpu(1.2), headroom_gb=0.1)
+        self.assertTrue(ok.fits and ok.note.endswith("GB of VRAM)"), ok.note)
+        self.assertTrue(not no.fits and no.note.endswith("GB of VRAM available"), no.note)
+        mac = machines.Machine("m3max-64gb", "Apple M3 Max", 64.0, 48.0, 12, 4, 40, "macOS")
+        self.assertNotIn("VRAM", machines.fit(path, mac).note)
+
+    def test_vram_peak_reaches_the_pta_index(self):
+        from tuieval import engine, pta
+        sittings = [{"started": 1, "wall_s": 10, "vram_peak_gb": 18.2, "peak_rss_mb": 2048},
+                    {"started": 2, "wall_s": 10, "vram_peak_gb": 21.5, "peak_rss_mb": 1900}]
+        run = engine.Engine.sittings_summary(sittings)
+        self.assertEqual(run["vram_peak_gb"], 21.5)                   # the peak over every sitting is kept
+        infos = [{"label": "gpu", "vram_peak_gb": run["vram_peak_gb"], "peak_rss_mb": run["peak_rss_mb"]},
+                 {"label": "mac", "peak_rss_mb": 25600}]
+        self.assertEqual(pta.memory_gb(infos), {"gpu": 21.5, "mac": 25.0})   # VRAM where it was measured
+
     def test_mac_is_unchanged(self):
         from tuieval import engine, machines
         e = engine.Engine.__new__(engine.Engine)
@@ -1014,24 +1106,26 @@ class FirstRun(unittest.TestCase):
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
         self.assertEqual(out, "['first'] ['my-model'] smoke False")   # tuning shows once something has run
 
-    def test_results_open_on_per_question(self):
+    def test_results_open_on_pta_index(self):
         tuieval(self.ws, "add", "my-model", "--server", "local")
         code = textwrap.dedent("""
             import asyncio
             from tuieval.tui import EvalsApp
-            from textual.widgets import TabbedContent
+            from textual.widgets import TabbedContent, TabPane
             async def go():
                 app = EvalsApp({})
                 async with app.run_test(size=(140, 40)) as pilot:
                     await pilot.pause()
                     await pilot.press("r")
                     await pilot.pause()
-                    print(type(app.screen).__name__, app.screen.query_one(TabbedContent).active)
+                    tc = app.screen.query_one(TabbedContent)
+                    tabs = " | ".join(str(tc.get_tab(p.id).label) for p in tc.query(TabPane))
+                    print(type(app.screen).__name__, tc.active, "|", tabs)
             asyncio.run(go())
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
-        self.assertEqual(out, "ResultsScreen tab-per-question")
+        self.assertEqual(out, "ResultsScreen tab-pta | PTA index | Production readiness | Per question | Failures")
 
     def test_stream_follows_only_at_the_bottom(self):
         code = textwrap.dedent("""
