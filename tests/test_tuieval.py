@@ -720,13 +720,11 @@ class PTAIndex(unittest.TestCase):
         cells = {r[0]: r for r in table}
         self.assertEqual(cells["fast"][1:4], ["70", "100", "50%"])
         self.assertEqual((cells["slow"][4], cells["fast"][5][-1]), ("20 ★", "★"))   # fewest tokens, fastest
-        self.assertIn("P 70/100 · T 100/100 · A 50%", "\n".join(pta.legend(res)))
+        bars = pta.bars(res, 10, markup=False)
+        self.assertEqual(bars[0].split(), ["P", "parsimony", "T", "speed", "A", "accuracy"])
+        self.assertEqual(bars[2], "fast  " + "███████░░░   70  " + "██████████  100  " + "█████░░░░░  50%")
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
-        lines = pta.triangle(res, 40)
-        self.assertIn("P[/b] parsimony", lines[0])
-        for x in res["models"]:                      # a dot each, in its own colour
-            self.assertTrue(any(f"[{x['color']}]" in l for l in lines), x)
 
     def test_server_errors_and_models_with_few_answers(self):
         from tuieval import pta
@@ -743,31 +741,11 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual(res["left_out"], [("few", 1)])
         self.assertEqual(res["no_answers"], ["down"])
         self.assertEqual([x["answers"] for x in res["models"]], [10, 10])
-        legend = "\n".join(pta.legend(res))
+        legend = "\n".join(pta.left_out_lines(res))
         self.assertIn("few (1 of 10)", legend)
         self.assertIn("only server errors: down", legend)
         picked = pta.index(rows, ["a", "few"])      # picked by hand: compared anyway
         self.assertEqual((picked["questions"], picked["left_out"]), (1, []))
-
-    def test_dots(self):
-        from tuieval import pta
-        corner = {"P": 100, "T": 0, "A": 0}
-        self.assertEqual(pta.position(corner), (1, 0, 0))
-        self.assertEqual(pta.position({"P": 100, "T": 0, "A": 100}), (0.5, 0, 0.5))   # on the P-A edge
-        self.assertEqual(pta.position({"P": 30, "T": 30, "A": 30}), (1 / 3, 1 / 3, 1 / 3))
-        self.assertIsNone(pta.position({"P": 0, "T": None, "A": 0}))
-        self.assertTrue(pta.strong({"P": 100, "T": 0, "A": 60}))     # averages 53
-        self.assertFalse(pta.strong({"P": 0, "T": 40, "A": 100}))    # averages 47
-        self.assertEqual(len(set(pta.colors(16))), 16)
-        models = [dict(model=m, P=100, T=0, A=100, color=c, alongside=False) for m, c in zip(("x", "y"), pta.colors(2))]
-        models.append(dict(model="z", P=0, T=100, A=0, color="#ffffff", alongside=False))
-        res = {"models": models, "questions": 1, "left_out": [], "no_answers": [], "most": 1}
-        where = pta.spots(res, 40)
-        self.assertEqual(where["x"], where["y"])
-        self.assertEqual(where["z"], (0, max(r for _, r in where.values())))   # bottom left: T
-        text = "\n".join(pta.triangle(res, 40))
-        self.assertIn("[b]2[/b]", text)                         # two models on one spot
-        self.assertIn("same spot as y", "\n".join(pta.legend(res, 40)))
 
     def test_cli_report_and_tui(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -806,7 +784,7 @@ class PTAIndex(unittest.TestCase):
             code = textwrap.dedent("""
                 import asyncio, json
                 from tuieval.tui import EvalsApp, ResultsScreen
-                from textual.widgets import DataTable, Static
+                from textual.widgets import DataTable, Static, TabbedContent
                 async def go():
                     app = EvalsApp({})
                     async with app.run_test(size=(180, 60)) as pilot:
@@ -815,15 +793,17 @@ class PTAIndex(unittest.TestCase):
                         await pilot.pause(0.5)
                         t = app.screen.query_one("#pta", DataTable)
                         rows = [[str(c) for c in t.get_row_at(i)] for i in range(t.row_count)]
-                        tri = str(app.screen.query_one("#pta-triangle", Static).render())
-                        print(json.dumps({"rows": rows, "triangle": "P parsimony" in tri}))
+                        tri = str(app.screen.query_one("#pta-bars", Static).render())
+                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri,
+                                          "tab": app.screen.query_one(TabbedContent).active}))
                 asyncio.run(go())
             """)
             p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
                                env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""))
             got = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
             self.assertIsInstance(got, dict, got)
-            self.assertTrue(got["triangle"])
+            self.assertTrue(got["bars"])
+            self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
             self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100%"])
 
 
@@ -884,7 +864,7 @@ class FirstRun(unittest.TestCase):
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
         self.assertEqual(out, "['first'] ['my-model'] smoke False")   # tuning shows once something has run
 
-    def test_results_open_on_per_question(self):
+    def test_results_open_on_pta_index(self):
         tuieval(self.ws, "add", "my-model", "--server", "local")
         code = textwrap.dedent("""
             import asyncio
@@ -901,7 +881,7 @@ class FirstRun(unittest.TestCase):
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
-        self.assertEqual(out, "ResultsScreen tab-per-question")
+        self.assertEqual(out, "ResultsScreen tab-pta")
 
     def test_stream_follows_only_at_the_bottom(self):
         code = textwrap.dedent("""

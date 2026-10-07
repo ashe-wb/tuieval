@@ -390,10 +390,10 @@ def report_markdown(e, labels=None):
 def cmd_pta(argv):
     p = argparse.ArgumentParser(prog="tuieval pta",
                                 description="The PTA index: parsimony (tokens), speed and accuracy per model (0-100, higher is better), as a "
-                                            "triangle (a dot per model) and a table, over the questions all the models answered.")
+                                            "bar per score for each model and a table, over the questions all the models answered.")
     p.add_argument("--only", help="comma-separated model labels (default: every model with results)")
     p.add_argument("--packs", help="comma-separated packs (default: all)")
-    p.add_argument("--width", type=int, default=48, help="triangle width in characters (default 48)")
+    p.add_argument("--width", type=int, default=20, help="bar width in characters (default 20)")
     p.add_argument("--models")
     p.add_argument("--results-dir")
     a = p.parse_args(argv)
@@ -412,13 +412,16 @@ def cmd_pta(argv):
             out.print(line, markup=False)
         return
     out.print()
-    for line in pta.triangle(result, a.width) + [""] + pta.legend(result, a.width):
+    for line in pta.bars(result, a.width):
         out.print(line)
     header, rows = pta.table(result)
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(header)]
     out.print()
     for line in [header] + rows:
         out.print("  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip(), markup=False)
+    for line in pta.left_out_lines(result):
+        out.print()
+        out.print(line, markup=False)
 
 
 def cmd_report(argv):

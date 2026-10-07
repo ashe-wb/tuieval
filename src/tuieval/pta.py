@@ -1,5 +1,5 @@
-"""PTA index: parsimony, speed (time) and accuracy per model, 0-100 each and higher is better, with
-each model a dot on a triangle.
+"""PTA index: parsimony, speed (time) and accuracy per model, 0-100 each and higher is better, shown
+as a bar per score for each model.
 
     P  parsimony  a score out of 100, from the tokens (reasoning and answer) used on every question
                   compared (each question at its median over repeats): 100 for the model that used the
@@ -15,8 +15,9 @@ answers as the most-answered model is left out (listed, so it can be picked), or
 shared questions for everyone. There's no combined number: the three stay side by side, and verdicts
 and critical failures stay where they are (verdict.py).
 """
-import colorsys
 import math
+
+from rich.markup import escape as rich_escape
 
 from . import compare
 
@@ -31,18 +32,9 @@ def score(total, best):
     return max(0.0, 100 - POINTS_PER_DOUBLING * math.log2(total / best))
 
 
-def colors(n):
-    """n distinct colours (#rrggbb), evenly spread around the colour wheel, readable on dark and light."""
-    out = []
-    for i in range(n):
-        r, g, b = colorsys.hls_to_rgb((i / max(n, 1) + 0.55) % 1, 0.58, 0.85)
-        out.append(f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}")
-    return out
-
-
 def index(rows, models=None):
     """{"questions": n shared, "models": [{model, P, T, A, tokens, total_s, passed, answers, alongside,
-    fewest, fastest, color}],
+    fewest, fastest}],
     "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
     most-answered model}, best accuracy first. models: the ones to compare (default: every model in rows
     with enough answers; models named here are compared whatever their count)."""
@@ -78,132 +70,39 @@ def index(rows, models=None):
         x["fewest"] = bool(fewest) and x["tokens"] == fewest
         x["fastest"] = bool(fastest) and x["total_s"] == fastest
     out.sort(key=lambda x: (-(x["A"] or 0), -(x["T"] or 0), x["model"]))
-    for x, c in zip(out, colors(len(out))):
-        x["color"] = c
     return {"questions": len(shared), "models": out, "left_out": left_out, "no_answers": no_answers,
             "most": most}
 
 
-def position(x):
-    """Where a model's dot sits, as weights on the (P, T, A) corners summing to 1: pulled toward each
-    corner by its score, so the dot shows the balance of the three. None when every score is 0 or unknown."""
-    s = [x[k] or 0 for k in ("P", "T", "A")]
-    total = sum(s)
-    return tuple(v / total for v in s) if total else None
+LETTERS = (("P", "parsimony", "/100", "cyan"), ("T", "speed", "/100", "magenta"), ("A", "accuracy", "%", "green"))
 
 
-def strong(x):
-    """Whether a model's scores average 50 or more: drawn filled (●), otherwise hollow (○)."""
-    return sum(x[k] or 0 for k in ("P", "T", "A")) / 3 >= 50
-
-
-# ---------------------------------------------------------------- the triangle (braille, no dependencies)
-_DOTS = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))   # braille dot bits by (row, column)
-
-
-class _Canvas:
-    """Braille cells, 2 dots wide and 4 tall each; every cell takes the colour of the last line through it."""
-    def __init__(self, cols, rows):
-        self.cols, self.rows = cols, rows
-        self.bits = [[0] * cols for _ in range(rows)]
-        self.color = [[None] * cols for _ in range(rows)]
-        self.marks = {}
-
-    def dot(self, x, y, color):
-        cx, cy = int(x) // 2, int(y) // 4
-        if 0 <= cx < self.cols and 0 <= cy < self.rows:
-            self.bits[cy][cx] |= _DOTS[int(y) % 4][int(x) % 2]
-            self.color[cy][cx] = color
-
-    def line(self, a, b, color, dotted=False):
-        steps = int(max(abs(b[0] - a[0]), abs(b[1] - a[1]))) or 1
-        for i in range(steps + 1):
-            if dotted and i % 3:
-                continue
-            self.dot(a[0] + (b[0] - a[0]) * i / steps, a[1] + (b[1] - a[1]) * i / steps, color)
-
-    def mark(self, cx, cy, char, color):
-        """A whole cell for a model's dot; a second dot in the same cell turns it into a count."""
-        self.marks.setdefault((cx, cy), []).append((char, color))
-
-    def text(self):
-        lines = []
-        for y, (bits, colors) in enumerate(zip(self.bits, self.color)):
-            out = []
-            for x, (b, c) in enumerate(zip(bits, colors)):
-                here = self.marks.get((x, y))
-                if here:
-                    out.append(f"[{here[0][1]}]{here[0][0]}[/]" if len(here) == 1 else
-                               f"[b]{len(here) if len(here) < 10 else '+'}[/b]")
-                    continue
-                ch = chr(0x2800 + b) if b else " "
-                out.append(f"[{c}]{ch}[/]" if b and c else ch)
-            lines.append("".join(out).rstrip())
-        return lines
-
-
-def _geometry(width):
-    cols = max(20, width)
-    w = cols * 2 - 2                            # dots across
-    h = int(w * 0.866)                          # an equilateral triangle (braille dots are about square)
-    return cols, w, h
-
-
-def spots(result, width=60):
-    """{model: (column, row)}: the character cell each model's dot is drawn in (None if it has no dot)."""
-    cols, w, h = _geometry(width)
-    rows = h // 4 + 1
-    corners = ((w / 2, 0), (0, h), (w, h))
-    out = {}
+def bars(result, width=20, markup=True):
+    """Lines with a row per model and a bar per score (P, T, A), longer = better, each with its number:
+    the at-a-glance view. markup=False gives plain text (the report)."""
+    if not result["models"]:
+        return []
+    name_w = max(len(x["model"]) for x in result["models"])
+    cell_w = width + 6                          # the bar, a space and "100%" or " 100"
+    head = " " * (name_w + 2) + "".join(f"{f'{k} {name}':<{cell_w}}" for k, name, _, _ in LETTERS)
+    lines = [f"[b]{head.rstrip()}[/b]" if markup else head.rstrip()]
     for x in result["models"]:
-        wts = position(x)
-        if wts:
-            px = sum(k[0] * v for k, v in zip(corners, wts))
-            py = sum(k[1] * v for k, v in zip(corners, wts))
-            out[x["model"]] = (min(cols - 1, max(0, int(px) // 2)), min(rows - 1, max(0, int(py) // 4)))
-    return out
-
-
-def triangle(result, width=60):
-    """The triangle as Rich markup lines: P at the top, T bottom left, A bottom right. Each model is
-    a dot in its own colour, pulled toward each corner by its score (position()); filled when its
-    scores average 50 or more, hollow below that. A number is that many models on the same spot."""
-    cols, w, h = _geometry(width)
-    rows = h // 4 + 1
-    top, left, right = (w / 2, 0), (0, h), (w, h)
-    center = (w / 2, h * 2 / 3)
-    c = _Canvas(cols, rows)
-    for corner in (top, left, right):           # lines to the corners from the middle, then the frame
-        c.line(center, corner, "grey37", dotted=True)
-    for a, b in ((top, left), (left, right), (right, top)):
-        c.line(a, b, "grey70")
-    where = spots(result, width)
-    for x in result["models"]:
-        if x["model"] in where:
-            c.mark(*where[x["model"]], "●" if strong(x) else "○", x["color"])
-    lines = c.text()
-    pad = " " * max(0, cols // 2 - 5)
-    return ([f"{pad}[b]P[/b] parsimony"] + lines
-            + [f"[b]T[/b] speed{' ' * max(1, cols - 16)}[b]A[/b] accuracy"])
-
-
-def legend(result, width=60):
-    """One Rich markup line per model: its dot on the triangle (and the models it shares a spot with,
-    drawn as a count), its three scores, then any models left out of the comparison and why."""
-    where = spots(result, width)
-    out = []
-    for x in result["models"]:
-        mark = f"[{x['color']}]{'●' if strong(x) else '○'}[/]" if x["model"] in where else " "
-        same = [m for m, at in where.items() if m != x["model"] and at == where.get(x["model"])]
-        out.append(f"{mark} {x['model']}  P {_score(x['P'], '/100')} · T {_score(x['T'], '/100')} · "
-                   f"A {_score(x['A'], '%')}"
-                   + (f"  [dim](same spot as {', '.join(same)}: drawn as {len(same) + 1})[/dim]" if same else "")
-                   + ("  [yellow](some answers ran alongside other models)[/yellow]" if x["alongside"] else ""))
-    return out + [f"[dim]{line}[/dim]" for line in left_out_lines(result)]
+        cells = []
+        for k, _, unit, color in LETTERS:
+            v = x[k]
+            full = 0 if v is None else round(width * max(0, min(100, v)) / 100)
+            bar, rest = "█" * full, "░" * (width - full)
+            num = "-" if v is None else f"{v:.0f}{'%' if unit == '%' else ''}"
+            bar = f"[{color}]{bar}[/][grey37]{rest}[/]" if markup else bar + rest
+            cells.append(f"{bar} {num:>4}")
+        name = f"{x['model']:<{name_w}}"
+        lines.append(f"{rich_escape(name) if markup else name}  " + "  ".join(cells))
+    return lines
 
 
 def left_out_lines(result):
-    """Plain sentences on the models not compared: too few answers, or only server errors."""
+    """Plain sentences on the models not compared (too few answers, or only server errors) and on
+    answers that shared the machine with other models."""
     out = []
     if result["left_out"]:
         out.append("Left out (fewer than half as many answers as the most-answered model; pick them under "
@@ -211,6 +110,9 @@ def left_out_lines(result):
                    + ", ".join(f"{m} ({n} of {result['most']})" for m, n in result["left_out"]))
     if result["no_answers"]:
         out.append("No answers, only server errors: " + ", ".join(result["no_answers"]))
+    shared = [x["model"] for x in result["models"] if x["alongside"]]
+    if shared:
+        out.append("Some answers ran alongside other models, which shared the machine's speed: " + ", ".join(shared))
     return out
 
 
@@ -265,11 +167,10 @@ def markdown(result, models):
     lines = ["## PTA index", "", scope_note(result, models), ""]
     if not result["questions"]:
         return lines
+    lines += ["```"] + bars(result, markup=False) + ["```", ""]
     header, rows = table(result)
     lines += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     lines += ["| " + " | ".join(r) + " |" for r in rows]
-    if any(x["alongside"] for x in result["models"]):
-        lines += ["", "Some answers ran alongside other models, which shared the machine's speed."]
     for line in left_out_lines(result):
         lines += ["", line]
     return lines
