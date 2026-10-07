@@ -725,7 +725,49 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
         lines = pta.triangle(res, 40)
         self.assertIn("P[/b] privacy", lines[0])
-        self.assertTrue(any("[cyan]" in l for l in lines) and any("[magenta]" in l for l in lines))
+        for x in res["models"]:                      # a dot each, in its own colour
+            self.assertTrue(any(f"[{x['color']}]" in l for l in lines), x)
+
+    def test_server_errors_and_models_with_few_answers(self):
+        from tuieval import pta
+
+        def row(model, test, ok=True, error=False):
+            return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "error": error,
+                    "latency": 1000, "tokens": 10, "truncated": False, "gen_tps": None, "repeat": 0}
+        rows = ([row(m, f"q{i}") for m in ("a", "b") for i in range(10)] + [row("few", "q0", ok=False)]
+                + [row("down", f"q{i}", ok=False, error=True) for i in range(10)]
+                + [row("b", "q10", ok=False, error=True)])      # an error among real answers: not counted
+        res = pta.index(rows, lambda m: 0)
+        self.assertEqual([x["model"] for x in res["models"]], ["a", "b"])
+        self.assertEqual(res["questions"], 10)                  # not shrunk to the one "few" answered
+        self.assertEqual(res["left_out"], [("few", 1)])
+        self.assertEqual(res["no_answers"], ["down"])
+        self.assertEqual([x["answers"] for x in res["models"]], [10, 10])
+        legend = "\n".join(pta.legend(res))
+        self.assertIn("few (1 of 10)", legend)
+        self.assertIn("only server errors: down", legend)
+        picked = pta.index(rows, lambda m: 0, ["a", "few"])      # picked by hand: compared anyway
+        self.assertEqual((picked["questions"], picked["left_out"]), (1, []))
+
+    def test_dots(self):
+        from tuieval import pta
+        corner = {"P": 100, "T": 0, "A": 0}
+        self.assertEqual(pta.position(corner), (1, 0, 0))
+        self.assertEqual(pta.position({"P": 100, "T": 0, "A": 100}), (0.5, 0, 0.5))   # on the P-A edge
+        self.assertEqual(pta.position({"P": 30, "T": 30, "A": 30}), (1 / 3, 1 / 3, 1 / 3))
+        self.assertIsNone(pta.position({"P": 0, "T": None, "A": 0}))
+        self.assertTrue(pta.strong({"P": 100, "T": 0, "A": 60}))     # averages 53
+        self.assertFalse(pta.strong({"P": 0, "T": 40, "A": 100}))    # averages 47
+        self.assertEqual(len(set(pta.colors(16))), 16)
+        models = [dict(model=m, P=100, T=0, A=100, color=c, alongside=False) for m, c in zip(("x", "y"), pta.colors(2))]
+        models.append(dict(model="z", P=0, T=100, A=0, color="#ffffff", alongside=False))
+        res = {"models": models, "questions": 1, "left_out": [], "no_answers": [], "most": 1}
+        where = pta.spots(res, 40)
+        self.assertEqual(where["x"], where["y"])
+        self.assertEqual(where["z"], (0, max(r for _, r in where.values())))   # bottom left: T
+        text = "\n".join(pta.triangle(res, 40))
+        self.assertIn("[b]2[/b]", text)                         # two models on one spot
+        self.assertIn("same spot as y", "\n".join(pta.legend(res, 40)))
 
     def test_cli_report_and_tui(self):
         with tempfile.TemporaryDirectory() as tmp:

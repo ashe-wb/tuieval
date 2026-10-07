@@ -390,7 +390,7 @@ def report_markdown(e, labels=None):
 def cmd_pta(argv):
     p = argparse.ArgumentParser(prog="tuieval pta",
                                 description="The PTA index: privacy, time and accuracy per model (0-100 each), as a "
-                                            "triangle and a table, over the questions all the models answered.")
+                                            "triangle (a dot per model) and a table, over the questions all the models answered.")
     p.add_argument("--only", help="comma-separated model labels (default: every model with results)")
     p.add_argument("--packs", help="comma-separated packs (default: all)")
     p.add_argument("--width", type=int, default=48, help="triangle width in characters (default 48)")
@@ -408,9 +408,11 @@ def cmd_pta(argv):
         sys.exit("no finished results to compare" + (" for those models or packs" if labels or packs else ""))
     out.print(pta.scope_note(result, models))
     if not result["questions"]:
+        for line in pta.left_out_lines(result):
+            out.print(line, markup=False)
         return
     out.print()
-    for line in pta.triangle(result, a.width) + [""] + pta.legend(result):
+    for line in pta.triangle(result, a.width) + [""] + pta.legend(result, a.width):
         out.print(line)
     header, rows = pta.table(result)
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(header)]
