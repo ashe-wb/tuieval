@@ -1,6 +1,7 @@
 """Which machine this is, what a model needs, and whether it fits.
 
-    detect()              -> Machine (chip, cores, RAM, GPU memory limit, id like "m3max-64gb")
+    detect()              -> Machine (chip, cores, RAM, GPU memory limit, id like "m3max-64gb";
+                             with Nvidia/AMD cards on Linux, their VRAM and an id like "rtx4090-128gb")
     read_gguf(path)       -> GGUF header facts (architecture, layers, KV heads, context length, …)
     fit(model_path, …)    -> Fit (largest context that fits this machine, estimated memory)
 
@@ -9,6 +10,7 @@ the KV cache on its own (that would change answers); a quantized-KV variant is a
 """
 import dataclasses
 import functools
+import json
 import os
 import platform
 import re
@@ -28,15 +30,19 @@ class Machine:
     id: str
     chip: str
     ram_gb: float
-    gpu_limit_gb: float      # what Metal may wire for the GPU
+    gpu_limit_gb: float      # what Metal may wire for the GPU; with discrete GPUs, their VRAM (all cards)
     p_cores: int
     e_cores: int
     gpu_cores: int | None
     os: str
+    gpu_name: str | None = None   # discrete GPUs, e.g. "2× NVIDIA GeForce RTX 4090"
+    discrete: bool = False        # the GPU has its own memory (VRAM), separate from RAM
 
     @property
     def summary(self):
         cores = f"{self.p_cores}P+{self.e_cores}E" if self.e_cores else f"{self.p_cores} cores"
+        if self.discrete:
+            return f"{self.chip} · {self.ram_gb:.0f} GB RAM · {self.gpu_name} · {self.gpu_limit_gb:.0f} GB VRAM · {cores}"
         gpu = f", {self.gpu_cores}-core GPU" if self.gpu_cores else ""
         return f"{self.chip} · {self.ram_gb:.0f} GB (GPU up to {self.gpu_limit_gb:.0f} GB) · {cores}{gpu}"
 
@@ -51,6 +57,129 @@ def _sysctl(name):
 def machine_id(chip, ram_gb):
     name = re.sub(r"^apple\s+", "", chip.strip(), flags=re.I)
     return re.sub(r"[^a-z0-9]+", "", name.lower()) + f"-{round(ram_gb)}gb"
+
+
+def gpu_id(gpus, ram_gb):
+    """A machine id from its discrete GPUs: "rtx4090-128gb", "2xrtx4090-128gb", "rx7900xtx+rtx3090-64gb"."""
+    names = []
+    for name in sorted({n for n, _ in gpus}):
+        short = re.sub(r"\b(nvidia|geforce|amd|radeon|ati|graphics|tm)\b", "", name.lower())
+        short = re.sub(r"[^a-z0-9]+", "", short) or "gpu"
+        count = sum(n == name for n, _ in gpus)
+        names.append(f"{count}x{short}" if count > 1 else short)
+    return "+".join(names) + f"-{round(ram_gb)}gb"
+
+
+# ---------------------------------------------------------------- discrete GPUs (Linux: Nvidia, AMD)
+# Read from the vendors' own tools. Anything unexpected counts as "not detected", never an error.
+def _run(cmd, timeout=10):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def _nvidia_gpus():
+    out = _run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+    gpus = []
+    for line in (out or "").splitlines():
+        name, _, mib = line.rpartition(",")
+        try:
+            gpus.append((name.strip(), float(mib) / 1024))
+        except ValueError:
+            pass
+    return [g for g in gpus if g[0] and g[1] > 0]
+
+
+def _walk(obj):
+    """Every dict inside a JSON value."""
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk(v)
+
+
+def _bytes(value, unit=None):
+    """VRAM sizes as amd-smi/rocm-smi print them: 25753026560, "24560 MB", {"value": 24560, "unit": "MB"}."""
+    if isinstance(value, dict):
+        return _bytes(value.get("value"), value.get("unit"))
+    m = re.match(r"\s*([\d.]+)\s*([KMGT]i?B|B)?\s*$", str(value), re.I)
+    if not m:
+        return None
+    scale = {"B": 1, "KB": 2**10, "MB": 2**20, "GB": 2**30, "TB": 2**40}
+    u = (m.group(2) or unit or "B").upper().replace("I", "")
+    return float(m.group(1)) * scale.get(u, 1)
+
+
+def _amd_gpus():
+    out = _run(["amd-smi", "static", "--asic", "--vram", "--json"])
+    gpus = []
+    try:
+        for d in _walk(json.loads(out)) if out else []:
+            if "vram" in d and isinstance(d["vram"], dict):
+                size = _bytes(d["vram"].get("size"))
+                name = (d.get("asic") or {}).get("market_name") or "AMD GPU"
+                if size:
+                    gpus.append((str(name), size / GB))
+    except ValueError:
+        gpus = []
+    if gpus:
+        return gpus
+    out = _run(["rocm-smi", "--showmeminfo", "vram", "--showproductname", "--json"])
+    try:
+        cards = json.loads(out) if out else {}
+    except ValueError:
+        return []
+    for key, d in sorted(cards.items()) if isinstance(cards, dict) else []:
+        if not key.startswith("card") or not isinstance(d, dict):
+            continue
+        size = _bytes(d.get("VRAM Total Memory (B)"))
+        name = d.get("Card Series") or d.get("Card series") or d.get("Card SKU") or d.get("Card model") or "AMD GPU"
+        if size:
+            gpus.append((str(name), size / GB))
+    return gpus
+
+
+def discrete_gpus():
+    """[(name, VRAM GB)] for the Nvidia or AMD cards this machine has, or [] (none, or tools missing)."""
+    return _nvidia_gpus() or _amd_gpus()
+
+
+def vram_used_gb(pids=None):
+    """VRAM in use now (GB): by these processes on Nvidia (all of it when pids is None), or on the
+    whole machine on AMD, whose tools don't report it reliably per process. None if unknown."""
+    if pids is not None:
+        out = _run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"])
+        if out is not None:
+            used = 0.0
+            for line in out.splitlines():
+                pid, _, mib = line.partition(",")
+                if pid.strip() in {str(p) for p in pids}:
+                    try:
+                        used += float(mib) / 1024
+                    except ValueError:
+                        pass
+            return used
+    out = _run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+    if out is not None:
+        try:
+            return sum(float(x) for x in out.split()) / 1024
+        except ValueError:
+            return None
+    out = _run(["rocm-smi", "--showmeminfo", "vram", "--json"])
+    try:
+        cards = json.loads(out) if out else None
+    except ValueError:
+        return None
+    if not isinstance(cards, dict):
+        return None
+    used = [_bytes(d.get("VRAM Total Used Memory (B)")) for k, d in cards.items()
+            if k.startswith("card") and isinstance(d, dict)]
+    return sum(u for u in used if u) / GB if any(used) else None
 
 
 @functools.lru_cache(maxsize=1)
@@ -73,11 +202,19 @@ def detect():
         except (OSError, subprocess.TimeoutExpired):
             pass
         os_name = "macOS " + platform.mac_ver()[0]
-    else:  # Linux and others: CPU-side facts only
+    else:  # Linux and others: the CPU side, plus Nvidia/AMD cards if their tools are installed
         chip = platform.processor() or platform.machine()
         ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / GB
         p, e, gpu_cores, limit = os.cpu_count() or 1, 0, None, ram * 0.9
         os_name = platform.system()
+        gpus = discrete_gpus()
+        if gpus:
+            names = sorted({n for n, _ in gpus})
+            gpu_name = " + ".join(f"{sum(n == x for n, _ in gpus)}× {x}" if sum(n == x for n, _ in gpus) > 1 else x
+                                  for x in names)
+            mid = os.environ.get("EVALS_MACHINE") or gpu_id(gpus, ram)
+            return Machine(mid, chip, round(ram, 1), round(sum(g for _, g in gpus), 1), p, e, None, os_name,
+                           gpu_name=gpu_name, discrete=True)
     mid = os.environ.get("EVALS_MACHINE") or machine_id(chip, ram)
     return Machine(mid, chip, round(ram, 1), round(limit, 1), p, e, gpu_cores, os_name)
 
@@ -195,14 +332,15 @@ def fit(model_path, machine=None, kv_type="f16", headroom_gb=4.0, extra_bytes=0,
     model_max = info["context_length"] or 131072
     max_ctx = int(min(room / per_tok, model_max, want_ctx or model_max)) if room > 0 else 0
     max_ctx = max_ctx // 1024 * 1024
+    of = " of VRAM" if machine.discrete else ""
     if max_ctx < MIN_CTX:
         need = fixed + MIN_CTX * per_tok / GB
         return Fit(False, max_ctx, round(need, 1), round(available, 1),
                    f"doesn't fit on {machine.id}: needs ~{need:.0f} GB at {MIN_CTX // 1024}k context, "
-                   f"{available:.0f} GB available")
+                   f"{available:.0f} GB{of} available")
     need = fixed + max_ctx * per_tok / GB
     return Fit(True, max_ctx, round(need, 1), round(available, 1),
-               f"fits on {machine.id} up to {max_ctx // 1024}k context (~{need:.0f} of {available:.0f} GB)")
+               f"fits on {machine.id} up to {max_ctx // 1024}k context (~{need:.0f} of {available:.0f} GB{of})")
 
 
 # ---------------------------------------------------------------- memory pressure
@@ -285,6 +423,26 @@ def tree_cpu_seconds(pid):
                 tree.add(child)
                 frontier.append(child)
     return (sum(rows[p][1] for p in tree), sum(rows[p][2] for p in tree))
+
+
+def tree_pids(pid):
+    """A process and all its descendants (pids), or [pid] if ps can't be read."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return [pid]
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            children.setdefault(parts[1], []).append(parts[0])
+    tree, frontier = {str(pid)}, [str(pid)]
+    while frontier:
+        for child in children.get(frontier.pop(), []):
+            if child not in tree:
+                tree.add(child)
+                frontier.append(child)
+    return sorted(int(p) for p in tree)
 
 
 def group_cpu_seconds(pgid):

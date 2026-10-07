@@ -902,6 +902,153 @@ class Unavailable(unittest.TestCase):
             self.assertIn("works", tuieval(ws, "pta").stdout)
 
 
+class DiscreteGPU(unittest.TestCase):
+    """Nvidia and AMD cards on Linux, read from their vendors' tools (faked here, so no GPU is needed)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bin = os.path.join(self.tmp.name, "bin")
+        os.makedirs(self.bin)
+        self.path = os.environ["PATH"]
+        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin:/bin"   # only the fakes, never a real GPU tool
+
+    def tearDown(self):
+        os.environ["PATH"] = self.path
+        self.tmp.cleanup()
+
+    def tool(self, name, script):
+        path = os.path.join(self.bin, name)
+        write(path, "#!/bin/sh\n" + script)
+        os.chmod(path, 0o755)
+
+    def test_nvidia(self):
+        from tuieval import machines
+        self.tool("nvidia-smi", textwrap.dedent("""
+            case "$*" in
+              *query-gpu=name,memory.total*) printf 'NVIDIA GeForce RTX 4090, 24564\nNVIDIA GeForce RTX 4090, 24564\n' ;;
+              *query-compute-apps*) printf '4242, 18000\n999, 3000\n' ;;
+              *query-gpu=memory.used*) printf '18500\n200\n' ;;
+            esac
+        """))
+        gpus = machines.discrete_gpus()
+        self.assertEqual([n for n, _ in gpus], ["NVIDIA GeForce RTX 4090"] * 2)
+        self.assertAlmostEqual(sum(g for _, g in gpus), 47.98, places=1)
+        self.assertEqual(machines.gpu_id(gpus, 127.6), "2xrtx4090-128gb")
+        self.assertAlmostEqual(machines.vram_used_gb([4242, 4243]), 18000 / 1024)   # the server's own
+        self.assertAlmostEqual(machines.vram_used_gb(), 18700 / 1024)              # the whole machine
+
+    def test_amd(self):
+        from tuieval import machines
+        self.tool("amd-smi", "exit 1\n")                                         # older ROCm: rocm-smi
+        self.tool("rocm-smi", textwrap.dedent("""
+            case "$*" in
+              *showproductname*) echo '{"card0": {"VRAM Total Memory (B)": "25753026560", "Card Series": "Radeon RX 7900 XTX"}, "system": {}}' ;;
+              *) echo '{"card0": {"VRAM Total Used Memory (B)": "4294967296"}}' ;;
+            esac
+        """))
+        self.assertEqual(machines.discrete_gpus(), [("Radeon RX 7900 XTX", 25753026560 / 2**30)])
+        self.assertEqual(machines.gpu_id(machines.discrete_gpus(), 64), "rx7900xtx-64gb")
+        self.assertAlmostEqual(machines.vram_used_gb([1]), 4.0)                    # machine-wide on AMD
+        self.tool("amd-smi", "echo '[{\"gpu\": 0, \"asic\": {\"market_name\": \"Radeon PRO W7900\"}, "
+                             "\"vram\": {\"size\": {\"value\": 49152, \"unit\": \"MB\"}}}]'\n")
+        self.assertEqual(machines.discrete_gpus(), [("Radeon PRO W7900", 48.0)])
+
+    def test_missing_or_broken_tools_mean_no_gpu(self):
+        from tuieval import machines
+        self.assertEqual(machines.discrete_gpus(), [])
+        self.assertIsNone(machines.vram_used_gb([1]))
+        self.tool("nvidia-smi", "echo 'NVIDIA-SMI has failed because it could not communicate with the driver'\nexit 9\n")
+        self.tool("rocm-smi", "echo 'not json'\n")
+        self.assertEqual(machines.discrete_gpus(), [])
+
+    def test_sizing_ids_and_overrides(self):
+        from tuieval import engine, machines
+        gpu = machines.Machine("rtx4090-128gb", "x86_64", 128.0, 24.0, 16, 0, None, "Linux",
+                               gpu_name="NVIDIA GeForce RTX 4090", discrete=True)
+        self.assertIn("NVIDIA GeForce RTX 4090 · 24 GB VRAM", gpu.summary)
+        ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", ws)
+        real = machines.detect
+        machines.detect = lambda: gpu
+        try:
+            e = engine.Engine(root=ws)
+            self.assertEqual((e.machine().id, e.headroom_gb(e.machine())), ("rtx4090-128gb", 1.5))
+            self.assertEqual(e.memory_available_gb(), 22.5)                       # VRAM, not 128 GB of RAM
+            os.makedirs(os.path.join(ws, "tuning", "x8664-128gb"))                # recorded before detection
+            self.assertEqual(e.machine().id, "x8664-128gb")                        # keeps its results' id
+            with open(os.path.join(ws, "models.toml"), "a") as f:
+                f.write("\n[machines.x8664-128gb]\ngpu_memory_gb = 20\nmemory_headroom_gb = 2\n")
+            e = engine.Engine(root=ws)
+            self.assertEqual((e.machine().gpu_limit_gb, e.memory_available_gb()), (20.0, 18.0))
+        finally:
+            machines.detect = real
+    def test_doctor_and_vram_peak(self):
+        import contextlib, io, threading
+        from tuieval import doctor, engine, machines
+        self.tool("nvidia-smi", "printf 'NVIDIA GeForce RTX 4090, 24564\\n'\n")
+        gpu = machines.Machine("x8664-128gb", "x86_64", 128.0, 24.0, 16, 0, None, "Linux",
+                               gpu_name="NVIDIA GeForce RTX 4090", discrete=True)
+        ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", ws)
+        real, real_vram = machines.detect, machines.vram_used_gb
+        machines.detect = lambda: gpu
+        env = dict(os.environ)
+        os.environ.update(TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS="", NO_COLOR="1")
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                doctor.check()
+            text = out.getvalue()
+            self.assertIn("NVIDIA GeForce RTX 4090 · 24 GB VRAM", text)
+            self.assertIn("sized to 24 GB of VRAM, keeping 1.5 GB free", text)
+            self.assertIn("EVALS_MACHINE=rtx4090-128gb", text)                    # an id kept from before
+            machines.vram_used_gb = lambda pids=None: 12.5
+            e, info, stop = engine.Engine(root=ws), {}, threading.Event()
+            proc = subprocess.Popen(["sleep", "5"])
+            try:
+                e._watch_memory(proc, "m", stop, [0.0], info)
+                time.sleep(1)
+            finally:
+                stop.set()
+                proc.kill()
+                proc.wait()
+            self.assertEqual(info.get("vram_peak_gb"), 12.5)
+        finally:
+            machines.detect, machines.vram_used_gb = real, real_vram
+            os.environ.clear()
+            os.environ.update(env)
+
+    def test_fit_messages_name_vram(self):
+        from tuieval import machines
+        path = os.path.join(self.tmp.name, "m.gguf")
+        fake_gguf(path, size=1000)
+        gpu = lambda gb: machines.Machine("rtx4090-128gb", "x86_64", 128.0, gb, 16, 0, None, "Linux",
+                                          gpu_name="NVIDIA GeForce RTX 4090", discrete=True)
+        ok, no = machines.fit(path, gpu(24.0), headroom_gb=1.5), machines.fit(path, gpu(1.2), headroom_gb=0.1)
+        self.assertTrue(ok.fits and ok.note.endswith("GB of VRAM)"), ok.note)
+        self.assertTrue(not no.fits and no.note.endswith("GB of VRAM available"), no.note)
+        mac = machines.Machine("m3max-64gb", "Apple M3 Max", 64.0, 48.0, 12, 4, 40, "macOS")
+        self.assertNotIn("VRAM", machines.fit(path, mac).note)
+
+    def test_vram_peak_reaches_the_pta_index(self):
+        from tuieval import engine, pta
+        sittings = [{"started": 1, "wall_s": 10, "vram_peak_gb": 18.2, "peak_rss_mb": 2048},
+                    {"started": 2, "wall_s": 10, "vram_peak_gb": 21.5, "peak_rss_mb": 1900}]
+        run = engine.Engine.sittings_summary(sittings)
+        self.assertEqual(run["vram_peak_gb"], 21.5)                   # the peak over every sitting is kept
+        infos = [{"label": "gpu", "vram_peak_gb": run["vram_peak_gb"], "peak_rss_mb": run["peak_rss_mb"]},
+                 {"label": "mac", "peak_rss_mb": 25600}]
+        self.assertEqual(pta.memory_gb(infos), {"gpu": 21.5, "mac": 25.0})   # VRAM where it was measured
+
+    def test_mac_is_unchanged(self):
+        from tuieval import engine, machines
+        e = engine.Engine.__new__(engine.Engine)
+        e.cfg = {"machines": {}}
+        mac = machines.Machine("m3max-64gb", "Apple M3 Max", 64.0, 48.0, 12, 4, 40, "macOS")
+        self.assertFalse(mac.discrete)                                             # Macs are unchanged
+        self.assertEqual(e.headroom_gb(mac), 4.0)
+
+
 class FirstRun(unittest.TestCase):
     """A new user's first run fails fast with the fix, never hangs or shows a bare Python error."""
 
@@ -1201,7 +1348,7 @@ class WarmTune(unittest.TestCase):
         fake_gguf(f"{d}/new.gguf", size=1000)
         fake_gguf(f"{d}/sib.gguf", size=1100)
         fake_gguf(f"{d}/other.gguf", embedding=4096, size=1000)
-        machine = types.SimpleNamespace(id="mac", summary="a Mac")
+        machine = types.SimpleNamespace(id="mac", summary="a Mac", discrete=False)
         eng = types.SimpleNamespace(
             cfg={"servers": {"llama": {"cmd": ["llama"], "tune": self.KNOBS}},
                  "models": [{"label": n, "server": "llama", "model": f"{d}/{n}.gguf"}
@@ -1212,6 +1359,7 @@ class WarmTune(unittest.TestCase):
         eng.serving = lambda m: types.SimpleNamespace(fits=True, ctx=8192, machine=machine, mtp_layers=1,
                                                       identity={"model_bytes": 1000})
         eng.knob_values = lambda mc: {}
+        eng.machine = lambda: machine
         eng.server_version = lambda m: "v1"
         eng.gpu_residency_gb = lambda: 24
 
