@@ -18,7 +18,7 @@ Day to day
   tuieval history             every verdict change, newest first
   tuieval items               tests that don't separate models or look broken
   tuieval capture LOG --pack  turn a real failure (logs/live/*.txt) into a new test
-  tuieval regrade             re-score stored answers after changing a grader
+  tuieval regrade             re-score stored answers after changing a grader (--only, --packs)
   tuieval list                the models tuieval knows, hidden ones separately (--packs: the packs)
   tuieval remove MODEL        remove models, or every hidden one (--hidden); archived in removed/
 

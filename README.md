@@ -130,6 +130,7 @@ tuieval selftest                              # check every test's reference and
 tuieval items                                 # tests that don't separate models or look broken
 tuieval capture logs/live/<file> --pack X     # turn a real failure into a new test
 tuieval regrade                               # re-score stored answers after changing a grader
+tuieval regrade --only <model> --packs X      # just one model's results (and packs)
 tuieval machines                              # this machine and others, fit and tuning per model
 tuieval tune <model>                          # fastest speed flags for a model on this machine
 tuieval export pi <model>                     # serve it in the pi coding agent with those flags
