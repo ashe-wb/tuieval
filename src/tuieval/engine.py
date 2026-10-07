@@ -987,16 +987,16 @@ class Engine:
                     del per_pack[name]
         return {l: p for l, p in out.items() if p}
 
-    def estimate_seconds(self, jobs):
-        """(seconds, notes): expected run time for the waiting jobs, estimated per pack.
+    def seconds_per_answer(self, jobs, waiting_only=True):
+        """({job key: expected seconds per answer}, borrowed, guessed, thin) for the waiting jobs.
         A pack the model has answered uses its own median time there. Otherwise the median of
         other models' times on that pack, scaled by how much slower or faster this model is than
-        them on packs both have answered. notes lists what made the estimate rough ([] = solid)."""
+        them on packs both have answered. The sets say which estimates are rough (see estimate_seconds)."""
         times = self.answer_times()
         med = {l: {p: statistics.median(ts) for p, ts in pp.items()} for l, pp in times.items()}
-        total, borrowed, guessed, thin = 0.0, set(), set(), set()
+        spr_of, borrowed, guessed, thin = {}, set(), set(), set()
         for j in jobs:
-            if j.status != "waiting":
+            if j.status in ("done", "skipped", "failed") or (waiting_only and j.status != "waiting"):
                 continue
             own = med.get(j.label, {})
             ref = {p: statistics.median(v[p] for l, v in med.items() if p in v and l != j.label)
@@ -1013,8 +1013,18 @@ class Engine:
             else:
                 spr = statistics.median(own.values()) if own else DEFAULT_SECONDS_PER_REQUEST
                 guessed.add((j.key, bool(own)))
-            done = len(self._done_keys(j)) if j.merge else 0
-            total += max(0, j.total - done) * spr
+            spr_of[j.key] = spr
+        return spr_of, borrowed, guessed, thin
+
+    def estimate_seconds(self, jobs):
+        """(seconds, notes): expected run time for the waiting jobs, estimated per pack
+        (seconds_per_answer). notes lists what made the estimate rough ([] = solid)."""
+        spr_of, borrowed, guessed, thin = self.seconds_per_answer(jobs)
+        total = 0.0
+        for j in jobs:
+            if j.key in spr_of:
+                done = len(self._done_keys(j)) if j.merge else 0
+                total += max(0, j.total - done) * spr_of[j.key]
         notes = []
         if borrowed:
             factors = sorted({f for _, f, _ in borrowed if f is not None})

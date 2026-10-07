@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The run's ETA adds up each pack's answers left × that model's time per answer there (its history, then its own times once it has 5 answers), instead of extrapolating from the first few answers.
 - Faster start on Macs: the GPU core count comes from `ioreg` instead of `system_profiler`, which took seconds on some Macs.
 - A model a server won't serve (HTTP 401-404, e.g. OpenRouter's "No endpoints found") is never judged on it: those answers don't count, and the model stops at once instead of failing every question.
 - PTA index: parsimony (tokens used) and speed (time), each 100 for the best and 15 points less per doubling, and accuracy per model, as bars: the first Results tab (where `r` lands), `tuieval pta` and the report. Server errors aren't answers, and models with few answers are left out unless picked.

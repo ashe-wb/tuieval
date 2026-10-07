@@ -12,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import types
 import time
 import unittest
 import urllib.request
@@ -199,6 +200,26 @@ class WorkspaceGraders(unittest.TestCase):
 
 
 class Units(unittest.TestCase):
+    def test_eta_goes_pack_by_pack(self):
+        from tuieval.tui import RunScreen
+        job = lambda key, label, total, done=0, status="waiting": types.SimpleNamespace(
+            key=key, label=label, total=total, done=done, status=status)
+        run = RunScreen.__new__(RunScreen)
+        run.parallel, run.rough = 1, {"local/new"}
+        run.jobs = [job("hosted/a", "hosted", 100, 100, "done"), job("local/a", "local", 200, 4, "running"),
+                    job("local/new", "local", 50)]
+        run.spr = {"local/a": 60.0, "local/new": 30.0}            # from history
+        run.live = {"local/a": [900.0, 800.0, 700.0, 1000.0]}       # its first answers are the slow ones
+        left, rough = run.eta_seconds()
+        self.assertEqual((left, rough), (196 * 60 + 50 * 30, True))  # history, not 4 slow answers: ~3.7h, not ~47h
+        run.live["local/a"].append(600.0)                            # 5 answers: its own average takes over
+        run.jobs[1].done = 5
+        self.assertEqual(run.eta_seconds()[0], 195 * 800 + 50 * 30)
+        run.parallel = 2
+        run.jobs.append(job("other/a", "other", 10))
+        run.spr["other/a"] = 10.0
+        self.assertEqual(run.eta_seconds()[0], (195 * 800 + 50 * 30 + 100) / 2)   # two models at a time
+
     def test_server_errors_never_judge_the_model(self):
         from tuieval import client
         no_endpoints = 'server returned HTTP 404: {"error":{"message":"No endpoints found for some/model."}}'

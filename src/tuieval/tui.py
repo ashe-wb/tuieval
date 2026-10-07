@@ -1855,6 +1855,8 @@ class RunScreen(Screen):
         self.current = ""
         self.req_first = None
         self.stats = []
+        self.spr, self.rough = None, set()   # job key -> expected seconds per answer (ETA), rough ones
+        self.live = {}                        # job key -> seconds per answer in this session
         self.mem = {}
         self.outcome = ""  # "Finished" or "Cancelled" once the queue is done
         self.ended = None
@@ -2037,6 +2039,8 @@ class RunScreen(Screen):
                            + (f"  [red]copy of repeat {r['identical_to_repeat'] + 1}[/red]"
                               if r.get("identical_to_repeat") is not None else ""))
             self.stats.append(r)
+            if r.get("total_s"):
+                self.live.setdefault(job.key, []).append(r["total_s"])
             self.recent_entries[row_key] = {"model": job.label, "pack": job.pack.name, "record": r,
                                             "pack_fp": job.pack.fingerprint}
             if recent.row_count > 500:
@@ -2187,6 +2191,34 @@ class RunScreen(Screen):
                            ("note", short_note(j.note))):
             q.update_cell(j.key, col, value, update_width=True)
 
+    LIVE_ANSWERS = 5   # a pack's own times this session take over from its history after this many
+
+    def eta_seconds(self):
+        """(seconds, rough): time left, pack by pack: answers left × seconds per answer. A pack's own
+        average this session once it has LIVE_ANSWERS of them, before that its history (Engine.
+        seconds_per_answer: this model's past times there, or other models' scaled). Divided by the
+        models running side by side. rough: some packs have no history of their own yet."""
+        new = [j for j in self.jobs if self.spr is None or (j.key not in self.spr and j.status not in
+                                                           ("done", "skipped", "failed"))]
+        if new:   # at the start, and for evals added to the run
+            spr, borrowed, guessed, _ = self.app.engine.seconds_per_answer(new, waiting_only=False)
+            self.spr = {**(self.spr or {}), **spr}
+            self.rough |= {k for k, *_ in borrowed} | {k for k, _ in guessed}
+        left, rough, models = 0.0, False, set()
+        for j in self.jobs:
+            if j.status in ("done", "skipped", "failed") or j.done >= j.total:
+                continue
+            live = self.live.get(j.key, [])
+            if len(live) >= self.LIVE_ANSWERS:
+                spr = sum(live) / len(live)
+            else:
+                spr = self.spr.get(j.key, engine.DEFAULT_SECONDS_PER_REQUEST)
+                rough |= j.key in self.rough
+            left += (j.total - j.done) * spr
+            models.add(j.label)
+        lanes = max(1, min(self.parallel or self.app.engine.parallel_models(), len(models)))
+        return left / lanes, rough
+
     def update_overall(self):
         done = sum(j.done for j in self.jobs)
         passed = sum(j.passed for j in self.jobs)
@@ -2194,9 +2226,9 @@ class RunScreen(Screen):
         self.query_one("#bar", ProgressBar).update(progress=done)
         elapsed = time.time() - self.started
         eta = ""
-        done_now = sum(j.done - j.resumed for j in self.jobs if j.started)   # answers from earlier sittings
-        if self.running and done_now > 0 and self.total > done:              # took no time in this one
-            eta = f" · ETA {fmt_secs(elapsed / done_now * (self.total - done))}"
+        if self.running and self.total > done:
+            left, rough = self.eta_seconds()
+            eta = f" · ETA {'~' if rough else ''}{fmt_secs(left)}"
         pct = f"{100 * passed / (passed + failed):.0f}%" if passed + failed else "-"
         recent = self.stats[-50:]
         tps = [r["gen_tps"] for r in recent if r.get("gen_tps")]
