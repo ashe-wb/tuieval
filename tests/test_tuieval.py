@@ -200,6 +200,15 @@ class WorkspaceGraders(unittest.TestCase):
 
 
 class Units(unittest.TestCase):
+    def test_settings_note_names_only_what_differs(self):
+        from tuieval import compare
+        infos = [{"label": m, "settings": {"temperature": 1.0, **extra}} for m, extra in
+                 (("a", {}), ("b", {}), ("c", {"effort": "medium"}), ("d", {"effort": "medium"}),
+                  ("e", {"effort": "medium"}), ("f", {"effort": "medium"}), ("g", {}), ("h", {}), ("i", {}),
+                  ("j", {"penalty": 1.5}))]
+        self.assertEqual(compare.settings_notes(infos),
+                         ["Settings differ: effort medium on 4 models; penalty 1.5 on j."])
+
     def test_eta_goes_pack_by_pack(self):
         from tuieval.tui import RunScreen
         job = lambda key, label, total, done=0, status="waiting": types.SimpleNamespace(
@@ -747,15 +756,27 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual((by["slow"]["P"], by["fast"]["P"]), (100, 70))          # 4x the tokens: two doublings
         self.assertEqual((pta.score(2, 1), pta.score(1000, 1)), (85, 0))
         header, table = pta.table(res)
-        self.assertEqual(header[1:4], ["P parsimony /100", "T speed /100", "A accuracy %"])
+        self.assertEqual(header[1:4], ["tokens/answer", "time/answer", "answers right"])
         cells = {r[0]: r for r in table}
-        self.assertEqual(cells["fast"][1:4], ["70", "100", "50%"])
-        self.assertEqual((cells["slow"][4], cells["fast"][5][-1]), ("20 ★", "★"))   # fewest tokens, fastest
+        self.assertEqual((cells["slow"][1], cells["fast"][1:3]), ("10 ★", ["40", "2.0s ★"]))   # per answer
         bars = pta.bars(res, 10, markup=False)
-        self.assertEqual(bars[0].split(), ["P", "parsimony", "T", "speed", "A", "accuracy"])
-        self.assertEqual(bars[2], "fast  " + "███████░░░   70  " + "██████████  100  " + "█████░░░░░  50%")
+        self.assertEqual(bars[0].split(), ["P", "parsimony", "(tokens)", "T", "time", "A", "accuracy"])
+        self.assertEqual((bars[0].index("P parsimony"), bars[0].index("T time")),   # each bar starts under
+                         (bars[2].index("███████░░░"), bars[2].index("██████████")))  # its heading
+        # the bar is the score (4x the tokens: 70); beside it, how many times the best
+        self.assertEqual(bars[2].split(), ["fast", "███████░░░", "4.0×", "██████████", "1.0×", "█████░░░░░", "50.0%"])
+        self.assertEqual((pta.times(1), pta.times(9.84), pta.times(27.9)), ("1.0×", "9.8×", "28×"))
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
+
+    def test_accuracy_never_rounds_up_to_perfect(self):
+        from tuieval import compare, pta
+        self.assertEqual([compare.pct(f) for f in (467 / 469, 1, 0, 0.5)], ["99.6%", "100%", "0%", "50.0%"])
+        row = lambda model, a: {"model": model, "P": 100, "T": 100, "A": a, "tokens_x": 1, "time_x": 1}
+        bars = pta.bars({"models": [row("two-wrong", 100 * 467 / 469), row("perfect", 100.0)]}, 10, markup=False)
+        two_wrong, perfect = bars[1].split(), bars[2].split()
+        self.assertEqual((two_wrong[-2], two_wrong[-1]), ("█████████░", "99.6%"))   # not a full bar
+        self.assertEqual((perfect[-2], perfect[-1]), ("██████████", "100%"))
 
     def test_server_errors_and_models_with_few_answers(self):
         from tuieval import pta
@@ -802,11 +823,10 @@ class PTAIndex(unittest.TestCase):
                 wrong.stop()
             out = tuieval(ws, "pta").stdout
             self.assertIn("Compared on the 4 questions all 2 model(s) answered", out)
-            table = {l.split()[0]: l.split()[1:4] for l in out.splitlines() if l.startswith(("good ", "hosted "))}
-            self.assertEqual(table["good"], ["100", "100", "100%"])
-            self.assertEqual(table["hosted"][0], "100")         # the mock says as much either way
-            self.assertLess(int(table["hosted"][1]), 100)   # slower in total
-            self.assertEqual(table["hosted"][2], "0%")
+            bars = {l.split()[0]: l for l in out.splitlines() if "█" in l}
+            self.assertEqual((bars["good"].count("1.0×"), "100%" in bars["good"]), (2, True))
+            self.assertEqual(bars["hosted"].count("1.0×"), 1)   # as many tokens (the mock), but slower
+            self.assertIn(" 0%", bars["hosted"])
             self.assertIn("P parsimony", out)
             self.assertIn("4/4", tuieval(ws, "pta", "--only", "good").stdout)
             report = os.path.join(tmp, "r.md")
@@ -825,7 +845,15 @@ class PTAIndex(unittest.TestCase):
                         t = app.screen.query_one("#pta", DataTable)
                         rows = [[str(c) for c in t.get_row_at(i)] for i in range(t.row_count)]
                         tri = str(app.screen.query_one("#pta-bars", Static).render())
-                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri,
+                        app.screen.query_one("#pq-disagree").value = True       # right vs wrong on all 4
+                        await pilot.pause(0.3)
+                        pq = app.screen.query_one("#per-question", DataTable)
+                        both = pq.row_count
+                        app.pq_models = {"good"}                                # one model never disagrees
+                        app.screen.fill_per_question()
+                        await pilot.pause(0.3)
+                        alone = pq.row_count
+                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone],
                                           "tab": app.screen.query_one(TabbedContent).active}))
                 asyncio.run(go())
             """)
@@ -834,8 +862,9 @@ class PTAIndex(unittest.TestCase):
             got = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
             self.assertIsInstance(got, dict, got)
             self.assertTrue(got["bars"])
+            self.assertEqual(got["disagree"], [4, 0])
             self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
-            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100%"])
+            self.assertEqual([(r[0], r[3]) for r in got["rows"]][0], ("good", "4/4"))
 
 
 class Unavailable(unittest.TestCase):
@@ -935,19 +964,21 @@ class FirstRun(unittest.TestCase):
         code = textwrap.dedent("""
             import asyncio
             from tuieval.tui import EvalsApp
-            from textual.widgets import TabbedContent
+            from textual.widgets import TabbedContent, TabPane
             async def go():
                 app = EvalsApp({})
                 async with app.run_test(size=(140, 40)) as pilot:
                     await pilot.pause()
                     await pilot.press("r")
                     await pilot.pause()
-                    print(type(app.screen).__name__, app.screen.query_one(TabbedContent).active)
+                    tc = app.screen.query_one(TabbedContent)
+                    tabs = " | ".join(str(tc.get_tab(p.id).label) for p in tc.query(TabPane))
+                    print(type(app.screen).__name__, tc.active, "|", tabs)
             asyncio.run(go())
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
-        self.assertEqual(out, "ResultsScreen tab-pta")
+        self.assertEqual(out, "ResultsScreen tab-pta | PTA index | Production readiness | Per question | Failures")
 
     def test_stream_follows_only_at_the_bottom(self):
         code = textwrap.dedent("""

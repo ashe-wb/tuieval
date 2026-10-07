@@ -118,7 +118,7 @@ See **[docs/models.md](docs/models.md)** for servers, OpenRouter endpoint pinnin
 1. **Pick packs and models** (space ticks; type to filter models by label or tag). Each model shows a short code per use case, e.g. `C✓ S?` (✓ pass, ✗ fail, ? inconclusive; grey = from earlier results). To run only some tests of a pack, highlight it and press `e`. Runs of different tests add up, and the pack can PASS once all its tests have run.
 2. **Pick a tier** (Smoke to check setup, Screen, Certify) and **press `s`**. The line above the buttons shows how many answers that is and roughly how long it will take. For each model, tuieval starts its server (or uses a running one), checks the right model is loaded, runs every selected pack, then stops it.
 3. **Watch the run:** progress with ETA, live score, tok/s, TTFT and memory, the current test with reasoning and answer side by side, recent results with the grader's reason. `k` skips a model, `c` cancels (finished work is kept and resumes next time). `n` sets up more evals while it runs: add them to this run (same tier) or queue them as the next run.
-4. **Press `r` for results:** production readiness, verdict history, scorecard, speed & tokens (★ marks models nothing beats on both accuracy and time), per question, is the difference real?, tests that separate models, by difficulty, failures, and test quality.
+4. **Press `r` for results:** the PTA index (parsimony (tokens), time and accuracy as bars), production readiness, per question, and failures. `tuieval compare`, `tuieval history` and `tuieval items` have the rest: whether a difference is real, verdict history and test quality.
 
 Other keys: `t` tunes the ticked models' speed flags, `a` adds a model, `m` scans for GGUFs, `p` saves or loads a preset, `x` hides a model. `?` explains any screen.
 
@@ -150,7 +150,7 @@ tuieval help
 
 - **Start with Production readiness.** A single critical failure already means FAIL, whatever the accuracy: a model that breaks a hard rule once in 300 answers will do it in production. The Failures tab and `tuieval report` list exactly which answers failed.
 - **INCONCLUSIVE is not "nearly passed".** It says what's missing (usually a Certify run, or more trials).
-- **Trust "Is the difference real?" over raw percentages.** Differences of one or two tests are usually noise.
+- **Trust `tuieval compare --pairwise` over raw percentages.** Differences of one or two tests are usually noise.
 - **Read `trunc` before accuracy.** A model that runs out of tokens isn't wrong; it's thinking too long for the budget.
 - **Watch TTFT for interactive use.** A model that is 5% more accurate but takes 3 s longer to start answering may be the worse choice.
 

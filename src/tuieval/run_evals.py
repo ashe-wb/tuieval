@@ -373,11 +373,12 @@ def report_markdown(e, labels=None):
                              + f"; truncated {100 * ev['truncation']:.1f}%"
                              + (f"; consistency {100 * ev['consistency']:.0f}% of {ev['groups']} groups" if ev.get("consistency") is not None else ""))
                 recs = e.records(label, name)
+                from .compare import pct
                 levels = []
                 for lvl in ("easy", "medium", "hard"):
                     x = [r["pass"] for r in recs if r.get("difficulty") == lvl]
                     if x:
-                        levels.append(f"{lvl} {sum(x)}/{len(x)} ({100 * sum(x) / len(x):.0f}%)")
+                        levels.append(f"{lvl} {sum(x)}/{len(x)} ({pct(sum(x) / len(x))})")
                 if levels:
                     lines.append("  - by difficulty: " + ", ".join(levels))
                 for ex in ev.get("critical_examples", []):
@@ -389,7 +390,7 @@ def report_markdown(e, labels=None):
 
 def cmd_pta(argv):
     p = argparse.ArgumentParser(prog="tuieval pta",
-                                description="The PTA index: parsimony (tokens), speed and accuracy per model (0-100, higher is better), as a "
+                                description="The PTA index: parsimony (tokens), time and accuracy per model, as a "
                                             "bar per score for each model and a table, over the questions all the models answered.")
     p.add_argument("--only", help="comma-separated model labels (default: every model with results)")
     p.add_argument("--packs", help="comma-separated packs (default: all)")
@@ -413,7 +414,7 @@ def cmd_pta(argv):
         return
     out.print()
     for line in pta.bars(result, a.width):
-        out.print(line)
+        out.print(line, soft_wrap=True)   # a bar row stays one line (the terminal wraps it if it must)
     header, rows = pta.table(result)
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(header)]
     out.print()

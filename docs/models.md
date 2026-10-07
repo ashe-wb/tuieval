@@ -86,11 +86,13 @@ By default a run serves one model at a time. On a machine with room for more, se
 
 ## PTA index
 
-The **PTA index** puts parsimony (tokens), speed (time) and accuracy side by side, 0-100 each and higher is better, as a bar per score for each model, with the numbers and a table underneath. It's the first tab in Results, where `r` opens, and it's also `tuieval pta` and a section in `tuieval report`. There's no combined number; verdicts and critical failures stay in Production readiness.
+The **PTA index** puts parsimony (tokens), time and accuracy side by side, as a bar for each per model (longer is better), with a table underneath. It's the first tab in Results, where `r` opens, and it's also `tuieval pta` and a section in `tuieval report`. There's no combined number; verdicts and critical failures stay in Production readiness.
 
-- **P parsimony** (a score out of 100, not a percentage): from the tokens used, reasoning and answer, on every question compared (each question at its median over repeats). The fewest tokens score 100 (★ in the **tokens** column), and every doubling costs 15 points: `100 − 15 × log2(this model's tokens ÷ fewest)`, never below 0. Unlike speed it doesn't depend on your machine: it's how much a model says to get to an answer, which is what you pay for on an API and what fills its context.
-- **T speed** (a score out of 100, not a percentage): the same from the total time to answer those questions. The fastest model scores 100 (★ on its total time), and every doubling of the total time costs 15 points: `100 − 15 × log2(this model's total ÷ fastest total)`, never below 0 (about 100× slower). Twice as slow is 85, 10× slower is 50. Adding a faster model lowers the others. The table's **total time** column has the times themselves (lower is better).
-- **A accuracy** (a percentage): the share of answers to those questions that passed.
+- **P parsimony (tokens)**: the tokens used, reasoning and answer, on every question compared (each question at its median over repeats). Beside the bar: how many times the leanest model's, e.g. `2.4×` (`1.0×` is the leanest, ★ in the table's **tokens/answer**). Unlike time it doesn't depend on your machine: it's how much a model says to get to an answer, which is what you pay for on an API and what fills its context.
+- **T time**: the total time to answer those questions, as how many times the fastest model's, e.g. `28×` (★ in **time/answer**).
+- **A accuracy**: the share of answers to those questions that passed.
+
+The P and T bars use a log scale: full for the best, 15 points (of 100) shorter for every doubling, empty at about 100 times the best. So a model at 28× still shows a bar, and adding a better model shortens the others'.
 
 Models are compared on the questions all of them answered, so one that skipped some never looks faster. Server and connection errors aren't answers: a model with only those is listed as having none. A model with fewer than half as many answers as the most-answered one is left out (and listed), or it would shrink the shared questions for everyone. Pick the models and pack to compare in the TUI, or use `--only` and `--packs`: models you pick are always compared.
 
