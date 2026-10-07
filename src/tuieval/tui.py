@@ -335,6 +335,7 @@ Opens on [b]Per question[/b]. [b]Production readiness[/b] gives one verdict per 
 and what's missing when it's INCONCLUSIVE. The other tabs are the evidence:
   Scorecard              accuracy, critical failures and truncation per model and pack
   Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
+  PTA index              privacy, total time and accuracy per model (0-100 each), as a triangle
   Per question           every question, model by model
   Is the difference real? whether one model is really better than another, or it's noise
   Tests that separate    the questions that tell models apart
