@@ -65,10 +65,10 @@ def detect():
         # macOS default when unset: about 2/3 of RAM up to 36 GB, 3/4 above.
         limit = wired / 1024 if wired > 0 else ram * (0.75 if ram > 36 else 2 / 3)
         gpu_cores = None
-        try:
-            out = subprocess.run(["system_profiler", "SPDisplaysDataType"], capture_output=True, text=True,
-                                 timeout=15).stdout
-            m = re.search(r"Total Number of Cores:\s*(\d+)", out)
+        try:   # the GPU driver's own count: instant, where system_profiler can take seconds (CI's virtual Macs)
+            out = subprocess.run(["ioreg", "-rc", "AGXAccelerator", "-d1"], capture_output=True, text=True,
+                                 timeout=5).stdout
+            m = re.search(r'"gpu-core-count"\s*=\s*(\d+)', out)
             gpu_cores = int(m.group(1)) if m else None
         except (OSError, subprocess.TimeoutExpired):
             pass
