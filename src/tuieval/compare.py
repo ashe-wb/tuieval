@@ -154,10 +154,19 @@ def settings_notes(infos):
         per_model.setdefault(i["label"], i["settings"])
     keys = sorted({k for s in per_model.values() for k in s})
     differing = [k for k in keys if len({json.dumps(s.get(k)) for s in per_model.values()}) > 1]
-    if differing:
-        detail = "; ".join(f"{k}: " + ", ".join(f"{m}={per_model[m].get(k)}" for m in sorted(per_model))
-                           for k in differing)
-        notes.append(f"Settings differ between models ({detail}). Compare those models knowing that.")
+    parts = []
+    for k in differing:   # only the models that differ from the most common value, named when few
+        groups = collections.defaultdict(list)
+        for m in sorted(per_model):
+            groups[json.dumps(per_model[m].get(k))].append(m)
+        common = max(groups, key=lambda v: len(groups[v]))
+        for value, ms in sorted(groups.items()):
+            if value != common:
+                who = ", ".join(ms) if len(ms) <= 3 else f"{len(ms)} models"
+                shown = "unset" if value == "null" else json.loads(value)
+                parts.append(f"{k} {shown} on {who}")
+    if parts:
+        notes.append("Settings differ: " + "; ".join(parts) + ".")
     fps = collections.defaultdict(set)
     for i in infos:
         if i.get("pack"):

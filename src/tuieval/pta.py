@@ -32,12 +32,21 @@ def score(total, best):
     return max(0.0, 100 - POINTS_PER_DOUBLING * math.log2(total / best))
 
 
-def index(rows, models=None):
+def memory_gb(infos):
+    """{model: the most memory its server held in any run (GB)}, for models tuieval served (hosted: none)."""
+    out = {}
+    for i in infos:
+        if i.get("peak_rss_mb"):
+            out[i["label"]] = max(out.get(i["label"], 0), i["peak_rss_mb"] / 1024)
+    return out
+
+
+def index(rows, models=None, memory=None):
     """{"questions": n shared, "models": [{model, P, T, A, tokens, total_s, passed, answers, alongside,
-    fewest, fastest}],
+    fewest, fastest, tps, ttft, memory_gb}],
     "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
     most-answered model}, best accuracy first. models: the ones to compare (default: every model in rows
-    with enough answers; models named here are compared whatever their count)."""
+    with enough answers; models named here are compared whatever their count). memory: memory_gb()."""
     no_answers = sorted({r["model"] for r in rows} - {r["model"] for r in rows if not r.get("error")})
     rows = [r for r in rows if not r.get("error")]     # a server or connection error isn't an answer
     tests = compare.per_question(rows)
@@ -61,6 +70,10 @@ def index(rows, models=None):
                     "total_s": sum(c["secs"] or 0 for c in cells),
                     "passed": sum(c["passed"] for c in cells), "answers": answers,
                     "A": 100 * sum(c["passed"] for c in cells) / answers if answers else None,
+                    # generation speed and time to first token over the same answers (medians)
+                    "tps": compare.median(r.get("gen_tps") for c in cells for r in c["rows"]),
+                    "ttft": compare.median(r.get("ttft") for c in cells for r in c["rows"]),
+                    "memory_gb": (memory or {}).get(m),
                     # answers that ran while other models were served shared the machine's speed
                     "alongside": any(r.get("alongside") for c in cells for r in c["rows"])})
     fastest = min((x["total_s"] for x in out if x["total_s"] > 0), default=None)
@@ -124,12 +137,17 @@ def _score(v, unit=""):
 def table(result):
     """(header, rows) for a plain table of the index."""
     header = ["model", "P parsimony /100", "T speed /100", "A accuracy %", "tokens", "total time",
-              "answers right"]
+              "answers right", "tok/s", "TTFT s", "memory GB"]
     rows = [[x["model"], _score(x["P"]), _score(x["T"]), _score(x["A"], "%"),
              f"{round(x['tokens']):,}" + (" ★" if x.get("fewest") else ""),
              fmt_total(x["total_s"]) + (" ★" if x.get("fastest") else ""),
-             f"{x['passed']}/{x['answers']}"] for x in result["models"]]
+             f"{x['passed']}/{x['answers']}", _num(x.get("tps"), ".0f"), _num(x.get("ttft"), ".1f"),
+             _num(x.get("memory_gb"), ".1f")] for x in result["models"]]
     return header, rows
+
+
+def _num(v, fmt):
+    return "-" if v is None else format(v, fmt)
 
 
 def fmt_total(secs):
@@ -155,11 +173,11 @@ def scope_note(result, models):
 def for_engine(e, labels=None, packs=None, results_dir=None):
     """(result, models) from a workspace's finished results (results on their way out excluded)."""
     paths = [p for p in compare.default_paths(results_dir or e.results_dir) if not e.superseded(p)]
-    rows, _ = compare.load(paths) if paths else ([], [])
+    rows, infos = compare.load(paths) if paths else ([], [])
     if packs:
         rows = [r for r in rows if r["suite"] in packs]
     models = sorted({r["model"] for r in rows} & set(labels) if labels else {r["model"] for r in rows})
-    return index(rows, models if labels else None), models
+    return index(rows, models if labels else None, memory_gb(infos)), models
 
 
 def markdown(result, models):

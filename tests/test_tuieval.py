@@ -199,6 +199,15 @@ class WorkspaceGraders(unittest.TestCase):
 
 
 class Units(unittest.TestCase):
+    def test_settings_note_names_only_what_differs(self):
+        from tuieval import compare
+        infos = [{"label": m, "settings": {"temperature": 1.0, **extra}} for m, extra in
+                 (("a", {}), ("b", {}), ("c", {"effort": "medium"}), ("d", {"effort": "medium"}),
+                  ("e", {"effort": "medium"}), ("f", {"effort": "medium"}), ("g", {}), ("h", {}), ("i", {}),
+                  ("j", {"penalty": 1.5}))]
+        self.assertEqual(compare.settings_notes(infos),
+                         ["Settings differ: effort medium on 4 models; penalty 1.5 on j."])
+
     def test_server_errors_never_judge_the_model(self):
         from tuieval import client
         no_endpoints = 'server returned HTTP 404: {"error":{"message":"No endpoints found for some/model."}}'
@@ -804,7 +813,15 @@ class PTAIndex(unittest.TestCase):
                         t = app.screen.query_one("#pta", DataTable)
                         rows = [[str(c) for c in t.get_row_at(i)] for i in range(t.row_count)]
                         tri = str(app.screen.query_one("#pta-bars", Static).render())
-                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri,
+                        app.screen.query_one("#pq-disagree").value = True       # right vs wrong on all 4
+                        await pilot.pause(0.3)
+                        pq = app.screen.query_one("#per-question", DataTable)
+                        both = pq.row_count
+                        app.pq_models = {"good"}                                # one model never disagrees
+                        app.screen.fill_per_question()
+                        await pilot.pause(0.3)
+                        alone = pq.row_count
+                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone],
                                           "tab": app.screen.query_one(TabbedContent).active}))
                 asyncio.run(go())
             """)
@@ -813,6 +830,7 @@ class PTAIndex(unittest.TestCase):
             got = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
             self.assertIsInstance(got, dict, got)
             self.assertTrue(got["bars"])
+            self.assertEqual(got["disagree"], [4, 0])
             self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
             self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100%"])
 
@@ -914,19 +932,21 @@ class FirstRun(unittest.TestCase):
         code = textwrap.dedent("""
             import asyncio
             from tuieval.tui import EvalsApp
-            from textual.widgets import TabbedContent
+            from textual.widgets import TabbedContent, TabPane
             async def go():
                 app = EvalsApp({})
                 async with app.run_test(size=(140, 40)) as pilot:
                     await pilot.pause()
                     await pilot.press("r")
                     await pilot.pause()
-                    print(type(app.screen).__name__, app.screen.query_one(TabbedContent).active)
+                    tc = app.screen.query_one(TabbedContent)
+                    tabs = " | ".join(str(tc.get_tab(p.id).label) for p in tc.query(TabPane))
+                    print(type(app.screen).__name__, tc.active, "|", tabs)
             asyncio.run(go())
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
-        self.assertEqual(out, "ResultsScreen tab-pta")
+        self.assertEqual(out, "ResultsScreen tab-pta | PTA index | Production readiness | Per question | Failures")
 
     def test_stream_follows_only_at_the_bottom(self):
         code = textwrap.dedent("""

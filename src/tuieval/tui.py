@@ -19,6 +19,7 @@ Anywhere:      esc/q go back (q quits only on Setup), ctrl+q quits, w lists this
                tunes. Leaving a live run or tune keeps it going; the header shows its progress.
 """
 import argparse
+import collections
 import glob
 import json
 import os
@@ -331,16 +332,14 @@ with the model's reasoning and answer as they stream, then recent results with t
   v  with several models at a time: stream the next one (k skips the one streaming)""",
     "ResultsScreen": """[b]Results[/b]
 
-Opens on the [b]PTA index[/b]: parsimony (tokens), speed and accuracy per model, a bar each (0-100,
-longer = better). [b]Production readiness[/b] gives one verdict per model and use case, and what's
-missing when it's INCONCLUSIVE. The other tabs are the evidence:
-  Scorecard              accuracy, critical failures and truncation per model and pack
-  Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
-  Per question           every question, model by model
-  Is the difference real? whether one model is really better than another, or it's noise
-  Tests that separate    the questions that tell models apart
+  PTA index              parsimony (tokens), speed and accuracy per model, a bar each (0-100, longer =
+                         better), with tok/s, TTFT and memory in the table. Results open here.
+  Production readiness   one verdict per model and use case; the table says why and what to run next
+  Per question           every question, model by model (filters: pack, level, Models disagree)
   Failures               every wrong answer with the grader's reason; enter opens it in full
-  Test quality           tests nobody fails, everybody fails, or that look broken
+
+More in the terminal: tuieval compare (--pairwise: is a difference real), tuieval history,
+tuieval items (test quality).
 
 [b]Keys[/b]  esc back · ctrl+r refresh · w runs""",
     "TuneScreen": """[b]Tuning speed flags[/b]
@@ -2315,8 +2314,8 @@ class RunScreen(Screen):
 class ResultsScreen(Screen):
     BINDINGS = [Binding("escape", "app.pop_screen", "Back"), Binding("q", "app.pop_screen", "Back", show=False),
                 Binding("w", "runs", "Runs"), Binding("ctrl+r", "refresh", "Refresh")]
-    SORTS = [("Sort: token gap", "tokens"), ("Sort: time gap", "secs"),
-             ("Sort: most tokens", "most"), ("Sort: pack order", "order")]
+    SORTS = [("By token gap", "tokens"), ("By time gap", "secs"),
+             ("By most tokens", "most"), ("By pack order", "order")]
 
     def check_action(self, action, parameters):
         return bool(self.app.sessions) if action == "runs" else True
@@ -2361,22 +2360,6 @@ class ResultsScreen(Screen):
                              "measured there, or projected from token counts and that machine's tuned speeds.[/dim]")
                 yield DataTable(id="latency", zebra_stripes=True)
                 yield DataTable(id="readiness-detail", zebra_stripes=True, cursor_type="row")
-            with TabPane("Verdict history"):
-                yield Static("[dim]Every change in a model's verdict, newest first. Kept even after results are rerun "
-                             "or questions change; the evidence behind older verdicts is in results/<model>/history/.[/dim]")
-                yield DataTable(id="history", zebra_stripes=True, cursor_type="row")
-            with TabPane("Scorecard"):
-                yield DataTable(id="scorecard", zebra_stripes=True)
-            with TabPane("Speed & tokens"):
-                yield Select([("As measured (all machines)", "")] +
-                             [(f"{mc.id}{' (this machine)' if i == 0 else ''}", mc.id)
-                              for i, mc in enumerate(self.app.engine.machines())],
-                             id="speed-machine", allow_blank=False, value="")
-                yield Static("[dim]★ = no other model is both more accurate and faster per answer. "
-                             "Memory is the server's resident size (includes GPU-mapped weights on Apple Silicon). "
-                             "On another machine, times are measured there if the model ran there, otherwise "
-                             "projected from each answer's token counts and that machine's tuned speeds.[/dim]")
-                yield DataTable(id="speed", zebra_stripes=True)
             with TabPane("Per question", id="tab-per-question"):
                 with Horizontal(id="pq-controls"):
                     yield Select([("All packs", "")], id="pq-pack", allow_blank=False, value="")
@@ -2384,28 +2367,16 @@ class ResultsScreen(Screen):
                                  id="pq-level", allow_blank=False, value="")
                     yield Select(self.SORTS, id="pq-sort", allow_blank=False, value="tokens")
                     yield Button("Models: all", id="pq-models")
-                    yield Checkbox("Only questions all answered", False, id="pq-shared")
-                    yield Checkbox("Include unfinished", True, id="pq-partial")
+                    yield Checkbox("Answered by all", False, id="pq-shared")
+                    yield Checkbox("Models disagree", False, id="pq-disagree")
+                    yield Checkbox("In progress", True, id="pq-partial")
                 yield Static(id="pq-compare-title")
                 yield DataTable(id="pq-summary", zebra_stripes=True, cursor_type="none")
                 yield Static(id="pq-legend")
                 yield DataTable(id="per-question", zebra_stripes=True, cursor_type="cell")
-            with TabPane("Is the difference real?"):
-                yield DataTable(id="pairwise", zebra_stripes=True)
-            with TabPane("Tests that separate models"):
-                yield DataTable(id="separating", zebra_stripes=True)
-            with TabPane("By difficulty"):
-                yield Static("[dim]Pass rate per difficulty level. The level is your label only; models never see it. "
-                             "A strong model should hold up on HARD, not just EASY.[/dim]")
-                yield DataTable(id="difficulty", zebra_stripes=True)
             with TabPane("Failures"):
                 yield Static("[dim]Enter on a row shows the whole answer, its reasoning and what was checked.[/dim]")
                 yield DataTable(id="failures", zebra_stripes=True, cursor_type="row")
-            with TabPane("Test quality"):
-                yield Static("[dim]no signal: every model passed · suspicious: every model failed (check the test) · "
-                             "inverted: the weakest model beat the strongest · flaky: same model, different results "
-                             "across repeats[/dim]")
-                yield DataTable(id="quality", zebra_stripes=True)
         yield Footer()
 
     def on_mount(self):
@@ -2462,7 +2433,6 @@ class ResultsScreen(Screen):
 
     def fill(self):
         results_dir = self.results_dir or self.app.engine.results_dir
-        self.fill_history()
         paths = compare.default_paths(results_dir)
         self.partial_rows = compare.load_partials(results_dir)
         self.superseded = {p for p in compare.default_paths(results_dir) if self.app.engine.superseded(p)}
@@ -2479,40 +2449,13 @@ class ResultsScreen(Screen):
         smoke = os.path.abspath(results_dir) != os.path.abspath(self.app.engine.results_dir)
         info.update(f"{len(paths)} {'Smoke ' if smoke else ''}result files in {os.path.relpath(results_dir)}/" + banner
                     + "".join(f"\n[yellow]⚠ {n}[/yellow]" for n in notes))
-        header, table = compare.scorecard(rows)
-        t = self.query_one("#scorecard", DataTable)
-        t.add_columns(*header)
-        t.add_rows(table)
         self.rows, self.infos = rows, infos
-        self.fill_speed(self.query_one("#speed-machine", Select).value or "")
-        p = self.query_one("#pairwise", DataTable)
-        p.add_columns("Model A", "Model B", "A − B", "95% CI", "Verdict", "Shared tests")
-        for a, b, diff, lo, hi, call, n in compare.pairwise(rows):
-            color = "green" if call == "clear" else "dim"
-            p.add_row(a, b, f"{100 * diff:+.1f} pts", f"[{100 * lo:+.1f}, {100 * hi:+.1f}]",
-                      f"[{color}]{call}[/{color}]", str(n))
-        split, _ = compare.separating(rows)
-        sep = self.query_one("#separating", DataTable)
-        models = sorted({r["model"] for r in rows})
-        sep.add_columns("Test", *models)
-        for test, d in split:
-            sep.add_row(test, *[f"{sum(d[m])}/{len(d[m])}" if m in d else "-" for m in models])
         f = self.query_one("#failures", DataTable)
         f.add_columns("Model", "Level", "Test", "Reason")
         # compare.failures lists the failed rows in order, so they line up with fail_rows
         self.fail_rows = [r for r in rows if not r["ok"]]
         for model, test, reason, level in compare.failures(rows):
             f.add_row(model, diff_badge(level), test, rich_escape(reason[:130]))
-        dh, dt = compare.by_difficulty(rows)
-        dtab = self.query_one("#difficulty", DataTable)
-        dtab.add_columns("Model", "Pack", *[diff_badge(l) for l in compare.LEVELS])
-        for line in dt:
-            dtab.add_row(*line)
-        qt = self.query_one("#quality", DataTable)
-        qt.add_columns("Flags", "Test", *models)
-        if len(models) >= 2:
-            for test, flags, rates in compare.items(rows):
-                qt.add_row(", ".join(flags), test, *[f"{100 * rates[m]:.0f}%" if m in rates else "-" for m in models])
         self.fill_per_question()
         self.fill_pta()
         self.fill_readiness(results_dir)
@@ -2533,6 +2476,7 @@ class ResultsScreen(Screen):
     @on(Select.Changed, "#pq-sort")
     @on(Checkbox.Changed, "#pq-partial")
     @on(Checkbox.Changed, "#pq-shared")
+    @on(Checkbox.Changed, "#pq-disagree")
     def per_question_changed(self):
         if getattr(self, "rows", None) is not None:
             self.fill_per_question()
@@ -2592,7 +2536,7 @@ class ResultsScreen(Screen):
             self.query_one("#pta-left-out", Static).update("")
             return
         # none picked: every model with enough answers (pta.index leaves out the rest, and says so)
-        result = pta.index(rows, sorted(chosen) or None)
+        result = pta.index(rows, sorted(chosen) or None, pta.memory_gb(self.infos))
         self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
         self.query_one("#pta-bars", Static).update("\n".join(pta.bars(result)) if result["questions"] else "")
         self.query_one("#pta-left-out", Static).update(
@@ -2639,6 +2583,8 @@ class ResultsScreen(Screen):
         shown = sorted(chosen) if chosen else sorted({m for t in tests for m in t["cells"]})
         if self.query_one("#pq-shared", Checkbox).value:
             tests = [t for t in tests if all(m in t["cells"] for m in shown)]
+        if self.query_one("#pq-disagree", Checkbox).value:   # some models got it right, others didn't
+            tests = [t for t in tests if len({c["passed"] == c["n"] for c in t["cells"].values()}) > 1]
         self.fill_pq_summary(tests, shown)
         order = {}
         for name, pk in self.app.engine.packs.items():
@@ -2769,38 +2715,6 @@ class ResultsScreen(Screen):
             return
         self.app.push_screen(AnswerScreen(entries, what="repeat"))
 
-    @on(Select.Changed, "#speed-machine")
-    def machine_changed(self, event):
-        if getattr(self, "rows", None) is not None:
-            self.fill_speed(event.value or "")
-
-    def fill_speed(self, machine_id):
-        e = self.app.engine
-        speeds = {}
-        if machine_id:
-            mc = next(x for x in e.machines() if x.id == machine_id)
-            speeds = {m["label"]: (e.serving(m, mc).profile or {}).get("measured") for m in e.cfg["models"]}
-        header, table, _ = compare.speed(self.rows, self.infos, machine_id or None, speeds)
-        sp = self.query_one("#speed", DataTable)
-        sp.clear(columns=True)
-        sp.add_columns(*header)
-        for line in table:
-            sp.add_row(*([f"[yellow]{line[0]}[/yellow]"] + line[1:]))
-
-    def fill_history(self):
-        e = self.app.engine
-        t = self.query_one("#history", DataTable)
-        t.add_columns("When", "Model", "Use case", "Change", "Questions", "Why")
-        rank = {"FAIL": 0, "INCONCLUSIVE": 1, "NO DATA": 1, "PASS": 2}
-        for h in reversed(verdict.load_history(e)):
-            prev, now = h.get("previous"), h["status"]
-            change = f"[{VERDICT_STYLE[now]}]{now}[/]" if not prev else \
-                f"{prev} → [{VERDICT_STYLE[now]}]{now}[/]"
-            if prev and rank.get(now, 1) < rank.get(prev, 1):
-                change += "  [bold red]⚠ worse[/bold red]"
-            qs = "current" if verdict.is_current(h, e) else "[yellow]changed since[/yellow]"
-            t.add_row(h["time"].replace("T", " "), h["model"], h["use_case"], change, qs, "; ".join(h["reasons"])[:120])
-
     def fill_readiness(self, results_dir):
         style = {"PASS": "bold green", "FAIL": "bold red", "INCONCLUSIVE": "yellow", "NO DATA": "dim"}
         matrix = self.query_one("#readiness", DataTable)
@@ -2812,17 +2726,18 @@ class ResultsScreen(Screen):
             return
         help_text.update(self.READINESS_HELP)
         table = verdict.readiness(self.app.engine)
-        short = ["[b]In short[/b]"]
+        short = ["[b]In short[/b]"]   # one line per model; what to run next is in the table below
         for label, sentence, todo in verdict.plain_summary(table):
             short.append(f"  [b]{rich_escape(label)}[/b]: {rich_escape(sentence)}")
-            short += [f"     → {rich_escape(g)}: {rich_escape(what)}" for g, what, _ in todo]
         if any("Certify" in what for _, _, todo in verdict.plain_summary(table) for _, what, _ in todo):
             short.append("  [dim]To run Certify: in Setup tick the model and pack, choose Certify, press s.[/dim]")
         self.query_one("#readiness-short", Static).update("\n".join(short) if table else
                                                           "[dim]No verdicts yet: run something from Setup.[/dim]")
         groups = sorted({g for t in table.values() for g in t})
         matrix.add_columns("Model", *groups)
-        detail.add_columns("Model", "Use case", "Pack", "Verdict", "Why")
+        detail.add_columns("Model", "Use case", "Pack", "Verdict", "Answers right", "Why")
+        right = collections.Counter((r["model"], r["suite"]) for r in self.rows if r["ok"])
+        answered = collections.Counter((r["model"], r["suite"]) for r in self.rows)
         lat = verdict.latency_table(self.app.engine, None, table)
         machine_ids = [mc.id for mc in self.app.engine.machines()]
         lt = self.query_one("#latency", DataTable)
@@ -2839,7 +2754,9 @@ class ResultsScreen(Screen):
             for g, (_, packs) in gs.items():
                 for name, pv in packs.items():
                     if pv.status != "NO DATA":
-                        detail.add_row(label, g, name, f"[{style[pv.status]}]{pv.status}[/]", "; ".join(pv.reasons)[:160])
+                        n = answered[(label, name)]
+                        detail.add_row(label, g, name, f"[{style[pv.status]}]{pv.status}[/]",
+                                       f"{right[(label, name)]}/{n}" if n else "-", "; ".join(pv.reasons)[:160])
 
 
 # ------------------------------------------------------------------ app
@@ -2900,7 +2817,6 @@ class EvalsApp(App):
     #machine { padding: 0 1; height: auto; }
     #tune-status { padding: 0 1; height: auto; min-height: 2; background: $boost; }
     #tune-log { height: 1fr; }
-    #speed-machine { width: 60; margin: 0 1; }
     #results-top { height: auto; }
     #results-info { width: 1fr; height: auto; }
     #toggle-smoke { width: auto; min-width: 32; }
@@ -2911,7 +2827,7 @@ class EvalsApp(App):
     #pta { width: 1fr; height: auto; margin-top: 1; }
     #pta-left-out { height: auto; padding: 1 0 0 0; }
     #pq-controls Checkbox { width: auto; }
-    #pq-controls Select { width: 28; margin-right: 1; }
+    #pq-controls Select { width: 22; margin-right: 1; }
     #pq-models { margin-right: 1; min-width: 20; }
     #pq-compare-title { padding: 0 1; height: auto; }
     #pq-summary { height: auto; max-height: 10; }

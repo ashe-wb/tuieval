@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Results has four tabs: PTA index, Production readiness, Per question and Failures. The PTA table adds tok/s, TTFT and memory; Per question can show only where models disagree; the settings warning is one line. Scorecard, pairwise, history and test quality stay in `tuieval compare`, `history` and `items`.
 - A model a server won't serve (HTTP 401-404, e.g. OpenRouter's "No endpoints found") is never judged on it: those answers don't count, and the model stops at once instead of failing every question.
 - PTA index: parsimony (tokens used) and speed (time), each 100 for the best and 15 points less per doubling, and accuracy per model, as bars: the first Results tab (where `r` lands), `tuieval pta` and the report. Server errors aren't answers, and models with few answers are left out unless picked.
 - Run several models at a time: `parallel_models` per machine, **Models at a time** in the TUI, or `tuieval run --parallel N` (default 1). Models wait for memory to fit, and answers note what ran alongside them.

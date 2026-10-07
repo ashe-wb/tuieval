@@ -127,7 +127,7 @@ def ticket_route(answer, test, meta):
 - `critical=True` makes every test of this grader a critical trial (any of its failures *can* be critical). Otherwise only tests with `critical: true` or `expected: NOT_AVAILABLE` are.
 - `template` is the skeleton `tuieval capture` writes for a new test of this grader.
 
-A grader file can also add **Scorecard columns** (Results → Scorecard, and `tuieval compare`), for numbers your use case cares about that pass/fail doesn't show:
+A grader file can also add **Scorecard columns** (`tuieval compare`), for numbers your use case cares about that pass/fail doesn't show:
 
 ```python
 import json
@@ -175,7 +175,7 @@ Graders mark failures that should disqualify a model whatever its accuracy:
 
 ## Difficulty labels
 
-Every test has a `difficulty` of easy, medium or hard. It's for you, not the model: requests are built only from `input`, `image`, the system prompt and tools, so the label never reaches the model. The TUI shows it in the pack list (e.g. `12E 20M 8H`), next to the current question, in Recent results and Failures, and in Results → By difficulty.
+Every test has a `difficulty` of easy, medium or hard. It's for you, not the model: requests are built only from `input`, `image`, the system prompt and tools, so the label never reaches the model. The TUI shows it in the pack list (e.g. `12E 20M 8H`), next to the current question, in Recent results and Failures, and as a filter in Results → Per question.
 
 A useful convention: **easy** = one rule or a direct read; **medium** = arithmetic, one trap, or two conditions; **hard** = rules in conflict, multi-step reasoning, or misleading data. Once several models have run, `tuieval items` flags labels the results contradict ("easier than labelled": a hard test every model passes; "harder than labelled": an easy test most models fail). `tuieval selftest` warns about tests without a label.
 
