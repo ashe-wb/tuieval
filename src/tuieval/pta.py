@@ -33,11 +33,13 @@ def score(total, best):
 
 
 def memory_gb(infos):
-    """{model: the most memory its server held in any run (GB)}, for models tuieval served (hosted: none)."""
+    """{model: the most memory its server held in any run (GB)}, for models tuieval served (hosted: none).
+    On a discrete GPU that's its peak VRAM (vram_peak_gb), where the model lives; otherwise its resident memory."""
     out = {}
     for i in infos:
-        if i.get("peak_rss_mb"):
-            out[i["label"]] = max(out.get(i["label"], 0), i["peak_rss_mb"] / 1024)
+        gb = i.get("vram_peak_gb") or (i["peak_rss_mb"] / 1024 if i.get("peak_rss_mb") else None)
+        if gb:
+            out[i["label"]] = max(out.get(i["label"], 0), gb)
     return out
 
 
