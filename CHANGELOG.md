@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- PTA index: privacy, speed (100 for the fastest total time, 15 points less per doubling) and accuracy per model, a dot each on a triangle in Results, `tuieval pta` and the report. Server errors aren't answers, and models with few answers are left out unless picked.
+- PTA index: parsimony (tokens used) and speed (time), each 100 for the best and 15 points less per doubling, and accuracy per model, a dot each on a triangle in Results, `tuieval pta` and the report. Server errors aren't answers, and models with few answers are left out unless picked.
 - Run several models at a time: `parallel_models` per machine, **Models at a time** in the TUI, or `tuieval run --parallel N` (default 1). Models wait for memory to fit, and answers note what ran alongside them.
 - More evals during a run: `n` opens Setup, and Start adds them to the run going (same tier) or queues them after it.
 - A new workspace's `models.toml` is 23 lines: the llama, local and OpenRouter servers and the defaults are built in (docs/models.md lists them in full; a server defined in `models.toml` replaces the built-in one with that name). Existing workspaces keep their settings; built-in servers they don't define become available, and adding a model still prefers the workspace's own servers.

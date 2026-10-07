@@ -693,45 +693,38 @@ class AddToRun(unittest.TestCase):
 
 
 class PTAIndex(unittest.TestCase):
-    """The PTA index: privacy from where a model runs, time relative to the fastest total, accuracy,
-    all over the questions every compared model answered."""
-
-    def test_privacy(self):
-        from tuieval import pta
-        cfg = {"servers": {"llama": {"cmd": ["llama-server"]}, "lm": {"url": "http://localhost:1234/v1"},
-                           "box": {"url": "http://192.168.1.20:8000/v1"}, "mine": {"url": "http://192.168.1.20:8000/v1",
-                                                                                   "private": True},
-                           "or": {"url": "https://openrouter.ai/api/v1"}},
-               "models": [{"label": l, "server": l} for l in ("llama", "lm", "box", "mine", "or")]}
-        self.assertEqual([pta.privacy(cfg, l) for l in ("llama", "lm", "box", "mine", "or", "gone")],
-                         [100, 100, 0, 100, 0, None])
+    """The PTA index: parsimony from tokens and speed from time, each relative to the best on a log
+    scale, and accuracy, all over the questions every compared model answered."""
 
     def test_index_compares_shared_questions(self):
         from tuieval import pta
 
         def row(model, test, ok, secs, repeat=0):
             return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "latency": secs * 1000,
-                    "tokens": 10, "truncated": False, "gen_tps": None, "repeat": repeat}
+                    "tokens": 10 if model == "slow" else 40, "truncated": False, "gen_tps": None, "repeat": repeat}
         rows = [row("fast", "q1", True, 2), row("fast", "q2", False, 2),
                 row("slow", "q1", True, 8), row("slow", "q2", True, 4), row("slow", "q2", True, 6, repeat=1),
                 row("slow", "q3", True, 100)]               # only slow answered q3: not compared
-        res = pta.index(rows, lambda m: 100 if m == "slow" else 0)
+        res = pta.index(rows)
         self.assertEqual(res["questions"], 2)
         by = {x["model"]: x for x in res["models"]}
         self.assertEqual(by["fast"]["total_s"], 4)
         self.assertEqual(by["slow"]["total_s"], 13)      # q1 8 + q2 median of 4 and 6
         self.assertEqual(by["fast"]["T"], 100)
         self.assertAlmostEqual(by["slow"]["T"], 100 - 15 * math.log2(13 / 4))   # 15 points per doubling
-        self.assertEqual((pta.speed(2, 1), pta.speed(1000, 1)), (85, 0))
+        self.assertEqual((by["slow"]["tokens"], by["fast"]["tokens"]), (20, 80))   # medians over repeats
+        self.assertEqual((by["slow"]["P"], by["fast"]["P"]), (100, 70))          # 4x the tokens: two doublings
+        self.assertEqual((pta.score(2, 1), pta.score(1000, 1)), (85, 0))
         header, table = pta.table(res)
-        self.assertEqual(header[1:4], ["P privacy %", "T speed /100", "A accuracy %"])
-        self.assertEqual(dict((r[0], r[1:4]) for r in table)["fast"], ["0%", "100", "50%"])
-        self.assertIn("P 100% · T ", "\n".join(pta.legend(res)))
-        self.assertTrue(dict((r[0], r[4]) for r in table)["fast"].endswith("★"))   # the fastest total
+        self.assertEqual(header[1:4], ["P parsimony /100", "T speed /100", "A accuracy %"])
+        cells = {r[0]: r for r in table}
+        self.assertEqual(cells["fast"][1:4], ["70", "100", "50%"])
+        self.assertEqual((cells["slow"][4], cells["fast"][5][-1]), ("20 ★", "★"))   # fewest tokens, fastest
+        self.assertIn("P 70/100 · T 100/100 · A 50%", "\n".join(pta.legend(res)))
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
         lines = pta.triangle(res, 40)
-        self.assertIn("P[/b] privacy", lines[0])
+        self.assertIn("P[/b] parsimony", lines[0])
         for x in res["models"]:                      # a dot each, in its own colour
             self.assertTrue(any(f"[{x['color']}]" in l for l in lines), x)
 
@@ -744,7 +737,7 @@ class PTAIndex(unittest.TestCase):
         rows = ([row(m, f"q{i}") for m in ("a", "b") for i in range(10)] + [row("few", "q0", ok=False)]
                 + [row("down", f"q{i}", ok=False, error=True) for i in range(10)]
                 + [row("b", "q10", ok=False, error=True)])      # an error among real answers: not counted
-        res = pta.index(rows, lambda m: 0)
+        res = pta.index(rows)
         self.assertEqual([x["model"] for x in res["models"]], ["a", "b"])
         self.assertEqual(res["questions"], 10)                  # not shrunk to the one "few" answered
         self.assertEqual(res["left_out"], [("few", 1)])
@@ -753,7 +746,7 @@ class PTAIndex(unittest.TestCase):
         legend = "\n".join(pta.legend(res))
         self.assertIn("few (1 of 10)", legend)
         self.assertIn("only server errors: down", legend)
-        picked = pta.index(rows, lambda m: 0, ["a", "few"])      # picked by hand: compared anyway
+        picked = pta.index(rows, ["a", "few"])      # picked by hand: compared anyway
         self.assertEqual((picked["questions"], picked["left_out"]), (1, []))
 
     def test_dots(self):
@@ -798,16 +791,14 @@ class PTAIndex(unittest.TestCase):
             finally:
                 right.stop()
                 wrong.stop()
-            path = os.path.join(ws, "models.toml")    # as if "there" were a hosted API
-            write(path, read(path).replace(f"http://127.0.0.1:{wrong.port}", "https://api.example.com/v1"))
             out = tuieval(ws, "pta").stdout
             self.assertIn("Compared on the 4 questions all 2 model(s) answered", out)
             table = {l.split()[0]: l.split()[1:4] for l in out.splitlines() if l.startswith(("good ", "hosted "))}
-            self.assertEqual(table["good"], ["100%", "100", "100%"])
-            self.assertEqual(table["hosted"][0], "0%")
+            self.assertEqual(table["good"], ["100", "100", "100%"])
+            self.assertEqual(table["hosted"][0], "100")         # the mock says as much either way
             self.assertLess(int(table["hosted"][1]), 100)   # slower in total
             self.assertEqual(table["hosted"][2], "0%")
-            self.assertIn("P privacy", out)
+            self.assertIn("P parsimony", out)
             self.assertIn("4/4", tuieval(ws, "pta", "--only", "good").stdout)
             report = os.path.join(tmp, "r.md")
             tuieval(ws, "report", "-o", report)
@@ -825,7 +816,7 @@ class PTAIndex(unittest.TestCase):
                         t = app.screen.query_one("#pta", DataTable)
                         rows = [[str(c) for c in t.get_row_at(i)] for i in range(t.row_count)]
                         tri = str(app.screen.query_one("#pta-triangle", Static).render())
-                        print(json.dumps({"rows": rows, "triangle": "P privacy" in tri}))
+                        print(json.dumps({"rows": rows, "triangle": "P parsimony" in tri}))
                 asyncio.run(go())
             """)
             p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
@@ -833,7 +824,7 @@ class PTAIndex(unittest.TestCase):
             got = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
             self.assertIsInstance(got, dict, got)
             self.assertTrue(got["triangle"])
-            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100%", "100", "100%"])
+            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100%"])
 
 
 class FirstRun(unittest.TestCase):

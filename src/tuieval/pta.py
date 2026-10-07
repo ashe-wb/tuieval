@@ -1,14 +1,13 @@
-"""PTA index: privacy, speed (time) and accuracy per model, 0-100 each and higher is better, with each
-model a dot on a triangle.
+"""PTA index: parsimony, speed (time) and accuracy per model, 0-100 each and higher is better, with
+each model a dot on a triangle.
 
-    P  privacy   a percentage: 100 when prompts stay on machines you control: tuieval starts the server, its URL
-                 is this machine, or the server is marked private = true in models.toml. 0 otherwise
-                 (a hosted API: there's no partial privacy once prompts leave).
-    T  speed     a score out of 100 (not a percentage), from the total time to answer every question compared (each question at its median
-                 over repeats): 100 for the fastest model, and every doubling of its total time costs
-                 POINTS_PER_DOUBLING points (0 at about 100 times slower). A log scale, so models that
-                 are all much slower than the fastest still differ.
-    A  accuracy  a percentage: the share of answers to those questions that passed.
+    P  parsimony  a score out of 100, from the tokens (reasoning and answer) used on every question
+                  compared (each question at its median over repeats): 100 for the model that used the
+                  fewest, POINTS_PER_DOUBLING points less for every doubling (0 at about 100 times more).
+                  Unlike T it doesn't depend on the machine: it's how much a model says to get there.
+    T  speed      a score out of 100, the same from the total time to answer those questions: 100 for
+                  the fastest model. Log scales, so models that are all far behind the best still differ.
+    A  accuracy   a percentage: the share of answers to those questions that passed.
 
 Models are compared on the questions all of them answered, so one that skipped some never looks
 faster. Server and connection errors aren't answers. By default a model with fewer than half as many
@@ -18,20 +17,18 @@ and critical failures stay where they are (verdict.py).
 """
 import colorsys
 import math
-import urllib.parse
 
 from . import compare
 
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 MIN_SHARE = 0.5   # fewer answers than this share of the most-answered model's: left out by default
 POINTS_PER_DOUBLING = 15
 
 
-def speed(total_s, fastest_s):
-    """T: 100 for the fastest total, POINTS_PER_DOUBLING less for every doubling of time, never below 0."""
-    if not total_s or not fastest_s:
+def score(total, best):
+    """P and T: 100 for the best (lowest) total, POINTS_PER_DOUBLING less for every doubling, never below 0."""
+    if not total or not best:
         return None
-    return max(0.0, 100 - POINTS_PER_DOUBLING * math.log2(total_s / fastest_s))
+    return max(0.0, 100 - POINTS_PER_DOUBLING * math.log2(total / best))
 
 
 def colors(n):
@@ -43,21 +40,9 @@ def colors(n):
     return out
 
 
-def privacy(cfg, label):
-    """100 if a model's prompts stay on machines you control, else 0 (see the module docstring);
-    None for a model that's no longer in models.toml (where it ran isn't known)."""
-    m = next((m for m in cfg["models"] if m["label"] == label), None)
-    server = cfg["servers"].get(m["server"], {}) if m else {}
-    if not server:
-        return None
-    if server.get("cmd") or server.get("private"):
-        return 100
-    host = urllib.parse.urlparse(server.get("url", "")).hostname or ""
-    return 100 if host.lower() in LOCAL_HOSTS else 0
-
-
-def index(rows, privacy_of, models=None):
-    """{"questions": n shared, "models": [{model, P, T, A, total_s, passed, answers, alongside, color}],
+def index(rows, models=None):
+    """{"questions": n shared, "models": [{model, P, T, A, tokens, total_s, passed, answers, alongside,
+    fewest, fastest, color}],
     "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
     most-answered model}, best accuracy first. models: the ones to compare (default: every model in rows
     with enough answers; models named here are compared whatever their count)."""
@@ -80,14 +65,17 @@ def index(rows, privacy_of, models=None):
     for m in models:
         cells = [t["cells"][m] for t in shared]
         answers = sum(c["n"] for c in cells)
-        out.append({"model": m, "P": privacy_of(m), "total_s": sum(c["secs"] or 0 for c in cells),
+        out.append({"model": m, "tokens": sum(c["tokens"] or 0 for c in cells),
+                    "total_s": sum(c["secs"] or 0 for c in cells),
                     "passed": sum(c["passed"] for c in cells), "answers": answers,
                     "A": 100 * sum(c["passed"] for c in cells) / answers if answers else None,
                     # answers that ran while other models were served shared the machine's speed
                     "alongside": any(r.get("alongside") for c in cells for r in c["rows"])})
     fastest = min((x["total_s"] for x in out if x["total_s"] > 0), default=None)
+    fewest = min((x["tokens"] for x in out if x["tokens"] > 0), default=None)
     for x in out:
-        x["T"] = speed(x["total_s"], fastest)
+        x["P"], x["T"] = score(x["tokens"], fewest), score(x["total_s"], fastest)
+        x["fewest"] = bool(fewest) and x["tokens"] == fewest
         x["fastest"] = bool(fastest) and x["total_s"] == fastest
     out.sort(key=lambda x: (-(x["A"] or 0), -(x["T"] or 0), x["model"]))
     for x, c in zip(out, colors(len(out))):
@@ -195,7 +183,7 @@ def triangle(result, width=60):
             c.mark(*where[x["model"]], "●" if strong(x) else "○", x["color"])
     lines = c.text()
     pad = " " * max(0, cols // 2 - 5)
-    return ([f"{pad}[b]P[/b] privacy"] + lines
+    return ([f"{pad}[b]P[/b] parsimony"] + lines
             + [f"[b]T[/b] speed{' ' * max(1, cols - 16)}[b]A[/b] accuracy"])
 
 
@@ -207,7 +195,7 @@ def legend(result, width=60):
     for x in result["models"]:
         mark = f"[{x['color']}]{'●' if strong(x) else '○'}[/]" if x["model"] in where else " "
         same = [m for m, at in where.items() if m != x["model"] and at == where.get(x["model"])]
-        out.append(f"{mark} {x['model']}  P {_score(x['P'], '%')} · T {_score(x['T'], '/100')} · "
+        out.append(f"{mark} {x['model']}  P {_score(x['P'], '/100')} · T {_score(x['T'], '/100')} · "
                    f"A {_score(x['A'], '%')}"
                    + (f"  [dim](same spot as {', '.join(same)}: drawn as {len(same) + 1})[/dim]" if same else "")
                    + ("  [yellow](some answers ran alongside other models)[/yellow]" if x["alongside"] else ""))
@@ -227,14 +215,16 @@ def left_out_lines(result):
 
 
 def _score(v, unit=""):
-    """P and A are percentages (%), T a score out of 100 (/100: on a log scale, not a percentage)."""
+    """A is a percentage (%), P and T scores out of 100 (/100: on a log scale, not percentages)."""
     return "-" if v is None else f"{v:.0f}{unit}"
 
 
 def table(result):
     """(header, rows) for a plain table of the index."""
-    header = ["model", "P privacy %", "T speed /100", "A accuracy %", "total time", "answers right"]
-    rows = [[x["model"], _score(x["P"], "%"), _score(x["T"]), _score(x["A"], "%"),
+    header = ["model", "P parsimony /100", "T speed /100", "A accuracy %", "tokens", "total time",
+              "answers right"]
+    rows = [[x["model"], _score(x["P"]), _score(x["T"]), _score(x["A"], "%"),
+             f"{round(x['tokens']):,}" + (" ★" if x.get("fewest") else ""),
              fmt_total(x["total_s"]) + (" ★" if x.get("fastest") else ""),
              f"{x['passed']}/{x['answers']}"] for x in result["models"]]
     return header, rows
@@ -255,9 +245,9 @@ def scope_note(result, models):
     if not result["questions"]:
         return "These models have no question in common yet, so there's nothing to compare."
     return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
-            f"P and A are percentages. T speed is a score out of 100, not a percentage: 100 = the fastest total "
-            f"time (★), {POINTS_PER_DOUBLING} points less for each doubling of time; a faster model added lowers "
-            "the others.")
+            f"A is a percentage. P parsimony and T speed are scores out of 100, not percentages: 100 = the fewest "
+            f"tokens / the fastest total time (★), {POINTS_PER_DOUBLING} points less for each doubling; a better "
+            "model added lowers the others.")
 
 
 def for_engine(e, labels=None, packs=None, results_dir=None):
@@ -267,7 +257,7 @@ def for_engine(e, labels=None, packs=None, results_dir=None):
     if packs:
         rows = [r for r in rows if r["suite"] in packs]
     models = sorted({r["model"] for r in rows} & set(labels) if labels else {r["model"] for r in rows})
-    return index(rows, lambda m: privacy(e.cfg, m), models if labels else None), models
+    return index(rows, models if labels else None), models
 
 
 def markdown(result, models):

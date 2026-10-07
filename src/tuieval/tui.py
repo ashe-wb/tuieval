@@ -335,7 +335,7 @@ Opens on [b]Per question[/b]. [b]Production readiness[/b] gives one verdict per 
 and what's missing when it's INCONCLUSIVE. The other tabs are the evidence:
   Scorecard              accuracy, critical failures and truncation per model and pack
   Speed & tokens         time and tokens per answer (★ = nothing beats it on both accuracy and time)
-  PTA index              privacy, speed and accuracy per model (0-100, higher = better), a dot each on a triangle
+  PTA index              parsimony, speed and accuracy per model (0-100, higher = better), a dot each on a triangle
   Per question           every question, model by model
   Is the difference real? whether one model is really better than another, or it's noise
   Tests that separate    the questions that tell models apart
@@ -2370,10 +2370,10 @@ class ResultsScreen(Screen):
                 with Horizontal(id="pta-controls"):
                     yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
                     yield Button("Models: all", id="pta-models")
-                yield Static("[dim]P privacy %: 100% when prompts stay on machines you control (local, or a server "
-                             "marked private = true), 0% for a hosted API. T speed /100: a score, not a percentage: 100 "
-                             "for the fastest total time over the questions compared, lower = slower. A accuracy %: "
-                             "answers right. Higher is better for "
+                yield Static("[dim]P parsimony /100: tokens used (reasoning and answer) over the questions compared, "
+                             "100 for the fewest. T speed /100: 100 for the fastest total time. Both are scores, not "
+                             "percentages: 15 points less for each doubling. A accuracy %: answers right. Higher "
+                             "is better for "
                              "all three. Each "
                              "model is a dot pulled toward each corner by its score: filled when the three "
                              "average 50 or more. Verdicts and critical failures are in Production readiness.[/dim]")
@@ -2597,7 +2597,7 @@ class ResultsScreen(Screen):
             self.query_one("#pta-legend", Static).update("")
             return
         # none picked: every model with enough answers (pta.index leaves out the rest, and says so)
-        result = pta.index(rows, lambda m: pta.privacy(e.cfg, m), sorted(chosen) or None)
+        result = pta.index(rows, sorted(chosen) or None)
         self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
         self.query_one("#pta-triangle", Static).update("\n".join(pta.triangle(result, 48)) if result["questions"] else "")
         self.query_one("#pta-legend", Static).update("\n".join(pta.legend(result, 48)))
