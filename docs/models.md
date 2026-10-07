@@ -84,6 +84,16 @@ By default a run serves one model at a time. On a machine with room for more, se
 - In the TUI, one model's answers stream at a time: `v` switches to the next, `k` skips the one streaming. `tuieval run` prints one line per answer instead of streaming.
 - Only one run uses the machine at a time across tuieval windows; models at a time applies within a run.
 
+## PTA index
+
+The **PTA index** puts privacy, time and accuracy side by side, 0-100 each, as a radar triangle (Results → PTA index, `tuieval pta`, and a section in `tuieval report`). Each model is a triangle reaching each corner as far as its score: bigger means better all round. There's no combined number; verdicts and critical failures stay in Production readiness.
+
+- **P privacy**: 100 when prompts stay on machines you control (tuieval starts the server, its `url` is this machine, or the server has `private = true`, e.g. your own box on the network); 0 for a hosted API.
+- **T time**: the total time to answer every question compared (each question at its median over repeats), relative to the fastest model: `100 × fastest total ÷ this model's total`. Adding a faster model lowers the others.
+- **A accuracy**: the share of answers to those questions that passed.
+
+Models are compared on the questions all of them answered, so one that skipped some never looks faster. Pick the models and pack to compare in the TUI, or use `--only` and `--packs`.
+
 ## Tuning
 
 `tuieval tune <model>` (or `t` on the setup screen, for the ticked models) finds the fastest speed flags for a model on this machine:
@@ -130,6 +140,7 @@ On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM,
 |---|---|
 | `cmd` | command that starts the server (no `cmd` = an already-running server at `url`). Placeholders: `{model}`, `{served_name}`, `{port}`, `{mmproj}`, `{ctx}`, `{kv_type}`, `{root}` (the workspace), and the tune placeholders. An argument `env:NAME=value` sets an environment variable instead. |
 | `url` | an already-running server's base URL |
+| `private` | `true` for a server on a machine you control (e.g. your own box on the network): its models score 100 for privacy in the PTA index |
 | `port` | the port `cmd` serves on |
 | `cwd` | folder to start `cmd` in |
 | `model_is_path` | `model` is a file or folder: check it exists before starting |

@@ -382,7 +382,41 @@ def report_markdown(e, labels=None):
                     lines.append("  - by difficulty: " + ", ".join(levels))
                 for ex in ev.get("critical_examples", []):
                     lines.append(f"  - critical: {ex}")
+    from . import pta
+    lines += [""] + pta.markdown(*pta.for_engine(e, labels))
     return "\n".join(lines) + "\n"
+
+
+def cmd_pta(argv):
+    p = argparse.ArgumentParser(prog="tuieval pta",
+                                description="The PTA index: privacy, time and accuracy per model (0-100 each), as a "
+                                            "triangle and a table, over the questions all the models answered.")
+    p.add_argument("--only", help="comma-separated model labels (default: every model with results)")
+    p.add_argument("--packs", help="comma-separated packs (default: all)")
+    p.add_argument("--width", type=int, default=48, help="triangle width in characters (default 48)")
+    p.add_argument("--models")
+    p.add_argument("--results-dir")
+    a = p.parse_args(argv)
+    from rich.console import Console
+    from . import pta
+    e = engine.Engine(models_path=a.models, results_dir=a.results_dir)
+    labels = [x.strip() for x in a.only.split(",")] if a.only else None
+    packs = [x.strip() for x in a.packs.split(",")] if a.packs else None
+    result, models = pta.for_engine(e, labels, packs)
+    out = Console(highlight=False)
+    if not models:
+        sys.exit("no finished results to compare" + (" for those models or packs" if labels or packs else ""))
+    out.print(pta.scope_note(result, models))
+    if not result["questions"]:
+        return
+    out.print()
+    for line in pta.triangle(result, a.width) + [""] + pta.legend(result):
+        out.print(line)
+    header, rows = pta.table(result)
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(header)]
+    out.print()
+    for line in [header] + rows:
+        out.print("  ".join(c.ljust(w) for c, w in zip(line, widths)).rstrip(), markup=False)
 
 
 def cmd_report(argv):
@@ -666,7 +700,7 @@ def cmd_export(argv):
 COMMANDS = {"add": cmd_add, "list": cmd_list, "scan": cmd_scan, "regrade": cmd_regrade,
             "verdict": cmd_verdict, "report": cmd_report, "items": cmd_items, "selftest": cmd_selftest,
             "capture": cmd_capture, "history": cmd_history, "machines": cmd_machines, "tune": cmd_tune,
-            "export": cmd_export, "remove": cmd_remove}
+            "export": cmd_export, "remove": cmd_remove, "pta": cmd_pta}
 
 
 def parse_tests(text, pack_names, known):
