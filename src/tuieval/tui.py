@@ -10,7 +10,7 @@ Run screen:    live reasoning and answer, per-test ✓/✗, TTFT and tokens/s, p
                k skips the current model, c cancels everything, f pauses auto-scroll.
                r shows results at any time (also mid-run); n starts a new run when it ends.
                Enter on a Recent results row shows that answer in full.
-Results:       opens on the PTA index (parsimony, speed and accuracy per model, as bars). Per
+Results:       opens on the PTA index (parsimony, time and accuracy per model, as bars). Per
                question compares each model's tokens and seconds on the same question. ctrl+r
                reloads (it also reloads when a run's pack finishes). Enter on a Failures row or a
                Per question cell shows the answer: grading and checks, reasoning, answer, question.
@@ -332,8 +332,9 @@ with the model's reasoning and answer as they stream, then recent results with t
   v  with several models at a time: stream the next one (k skips the one streaming)""",
     "ResultsScreen": """[b]Results[/b]
 
-  PTA index              parsimony (tokens), speed and accuracy per model, a bar each (0-100, longer =
-                         better), with tok/s, TTFT and memory in the table. Results open here.
+  PTA index              parsimony (tokens), time and accuracy per model, a bar each (longer = better;
+                         2.4× = 2.4 times the best), with per-answer numbers, tok/s, TTFT and memory in
+                         the table. Results open here.
   Production readiness   one verdict per model and use case; the table says why and what to run next
   Per question           every question, model by model (filters: pack, level, Models disagree)
   Failures               every wrong answer with the grader's reason; enter opens it in full
@@ -2345,9 +2346,9 @@ class ResultsScreen(Screen):
                 with Horizontal(id="pta-controls"):
                     yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
                     yield Button("Models: all", id="pta-models")
-                yield Static("[dim]P parsimony: tokens used (reasoning and answer). T speed: total time. A accuracy: "
-                             "answers right. Longer bars are better for all three. Verdicts and critical failures "
-                             "are in Production readiness.[/dim]")
+                yield Static("[dim]P parsimony (tokens): tokens used, reasoning and answer. T time: total time. "
+                             "A accuracy: answers right. Verdicts and critical failures are in Production "
+                             "readiness.[/dim]")
                 yield Static(id="pta-note")
                 yield Static(id="pta-bars")
                 yield DataTable(id="pta", zebra_stripes=True, cursor_type="none")

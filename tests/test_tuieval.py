@@ -735,13 +735,16 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual((by["slow"]["P"], by["fast"]["P"]), (100, 70))          # 4x the tokens: two doublings
         self.assertEqual((pta.score(2, 1), pta.score(1000, 1)), (85, 0))
         header, table = pta.table(res)
-        self.assertEqual(header[1:4], ["P parsimony /100", "T speed /100", "A accuracy %"])
+        self.assertEqual(header[1:4], ["tokens/answer", "time/answer", "answers right"])
         cells = {r[0]: r for r in table}
-        self.assertEqual(cells["fast"][1:4], ["70", "100", "50%"])
-        self.assertEqual((cells["slow"][4], cells["fast"][5][-1]), ("20 ★", "★"))   # fewest tokens, fastest
+        self.assertEqual((cells["slow"][1], cells["fast"][1:3]), ("10 ★", ["40", "2.0s ★"]))   # per answer
         bars = pta.bars(res, 10, markup=False)
-        self.assertEqual(bars[0].split(), ["P", "parsimony", "T", "speed", "A", "accuracy"])
-        self.assertEqual(bars[2], "fast  " + "███████░░░   70  " + "██████████  100  " + "█████░░░░░  50%")
+        self.assertEqual(bars[0].split(), ["P", "parsimony", "(tokens)", "T", "time", "A", "accuracy"])
+        self.assertEqual((bars[0].index("P parsimony"), bars[0].index("T time")),   # each bar starts under
+                         (bars[2].index("███████░░░"), bars[2].index("██████████")))  # its heading
+        # the bar is the score (4x the tokens: 70); beside it, how many times the best
+        self.assertEqual(bars[2].split(), ["fast", "███████░░░", "4.0×", "██████████", "1.0×", "█████░░░░░", "50%"])
+        self.assertEqual((pta.times(1), pta.times(9.84), pta.times(27.9)), ("1.0×", "9.8×", "28×"))
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
 
@@ -790,11 +793,10 @@ class PTAIndex(unittest.TestCase):
                 wrong.stop()
             out = tuieval(ws, "pta").stdout
             self.assertIn("Compared on the 4 questions all 2 model(s) answered", out)
-            table = {l.split()[0]: l.split()[1:4] for l in out.splitlines() if l.startswith(("good ", "hosted "))}
-            self.assertEqual(table["good"], ["100", "100", "100%"])
-            self.assertEqual(table["hosted"][0], "100")         # the mock says as much either way
-            self.assertLess(int(table["hosted"][1]), 100)   # slower in total
-            self.assertEqual(table["hosted"][2], "0%")
+            bars = {l.split()[0]: l for l in out.splitlines() if "█" in l}
+            self.assertEqual((bars["good"].count("1.0×"), "100%" in bars["good"]), (2, True))
+            self.assertEqual(bars["hosted"].count("1.0×"), 1)   # as many tokens (the mock), but slower
+            self.assertIn(" 0%", bars["hosted"])
             self.assertIn("P parsimony", out)
             self.assertIn("4/4", tuieval(ws, "pta", "--only", "good").stdout)
             report = os.path.join(tmp, "r.md")
@@ -832,7 +834,7 @@ class PTAIndex(unittest.TestCase):
             self.assertTrue(got["bars"])
             self.assertEqual(got["disagree"], [4, 0])
             self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
-            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100%"])
+            self.assertEqual([(r[0], r[3]) for r in got["rows"]][0], ("good", "4/4"))
 
 
 class Unavailable(unittest.TestCase):
