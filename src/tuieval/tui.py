@@ -2365,6 +2365,19 @@ class ResultsScreen(Screen):
                              "On another machine, times are measured there if the model ran there, otherwise "
                              "projected from each answer's token counts and that machine's tuned speeds.[/dim]")
                 yield DataTable(id="speed", zebra_stripes=True)
+            with TabPane("PTA index", id="tab-pta"):
+                with Horizontal(id="pta-controls"):
+                    yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
+                    yield Button("Models: all", id="pta-models")
+                yield Static("[dim]P privacy: 100 when prompts stay on machines you control (local, or a server "
+                             "marked private = true), 0 for a hosted API. T time: total time for every question "
+                             "compared, relative to the fastest model (100). A accuracy: answers right. Bigger "
+                             "triangle = better all round; verdicts and critical failures are in Production "
+                             "readiness.[/dim]")
+                yield Static(id="pta-note")
+                with Horizontal(id="pta-body"):
+                    yield Static(id="pta-triangle")
+                    yield DataTable(id="pta", zebra_stripes=True, cursor_type="none")
             with TabPane("Per question", id="tab-per-question"):
                 with Horizontal(id="pq-controls"):
                     yield Select([("All packs", "")], id="pq-pack", allow_blank=False, value="")
@@ -2460,6 +2473,7 @@ class ResultsScreen(Screen):
             info.update("No results yet. Run an eval first." + banner)
             self.rows, self.infos = [], []
             self.fill_per_question()
+            self.fill_pta()
             return
         rows, infos = compare.load(paths)
         notes = compare.settings_notes(infos)
@@ -2501,6 +2515,7 @@ class ResultsScreen(Screen):
             for test, flags, rates in compare.items(rows):
                 qt.add_row(", ".join(flags), test, *[f"{100 * rates[m]:.0f}%" if m in rates else "-" for m in models])
         self.fill_per_question()
+        self.fill_pta()
         self.fill_readiness(results_dir)
 
     @on(DataTable.RowSelected, "#failures")
@@ -2524,6 +2539,7 @@ class ResultsScreen(Screen):
             self.fill_per_question()
 
     @on(Button.Pressed, "#pq-models")
+    @on(Button.Pressed, "#pta-models")
     def pick_models(self):
         counts = {}
         for t in getattr(self, "pq_all_tests", []):
@@ -2541,7 +2557,50 @@ class ResultsScreen(Screen):
                     self.query_one("#pq-shared", Checkbox).value = True
             # after the picker has closed: a table rebuilt under a modal keeps its header-only widths
             self.call_after_refresh(self.fill_per_question)
+            self.call_after_refresh(self.fill_pta)
         self.app.push_screen(ModelPickScreen(models, counts, self.app.pq_models), picked)
+
+    @on(Select.Changed, "#pta-pack")
+    def pta_changed(self):
+        if getattr(self, "rows", None) is not None:
+            self.fill_pta()
+
+    def fill_pta(self):
+        """The PTA index (pta.py) of the picked models (Models button, shared with Per question) on
+        the finished results, over the questions all of them answered."""
+        from . import pta
+        e = self.app.engine
+        rows = [r for r in self.rows if r.get("path") not in self.superseded]
+        packs = sorted({r["suite"] for r in rows})
+        sel = self.query_one("#pta-pack", Select)
+        options = [("All packs", "")] + [(e.packs[p].label if p in e.packs else p, p) for p in packs]
+        if [v for _, v in options] != getattr(self, "pta_pack_values", None):
+            self.pta_pack_values = [v for _, v in options]
+            current = sel.value
+            with sel.prevent(Select.Changed):
+                sel.set_options(options)
+                sel.value = current if current in self.pta_pack_values else ""
+        if sel.value:
+            rows = [r for r in rows if r["suite"] == sel.value]
+        present = {r["model"] for r in rows}
+        chosen = {m for m in self.app.pq_models if m in present}
+        self.query_one("#pta-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
+        models = sorted(chosen or present)
+        t = self.query_one("#pta", DataTable)
+        t.clear(columns=True)
+        if not models:
+            self.query_one("#pta-note", Static).update("No finished results to compare yet.")
+            self.query_one("#pta-triangle", Static).update("")
+            return
+        result = pta.index(rows, lambda m: pta.privacy(e.cfg, m), models)
+        extra = (f"  [yellow]{len(pta.COLORS)} models are drawn at most; pick fewer with Models.[/yellow]"
+                 if len(models) > len(pta.COLORS) else "")
+        self.query_one("#pta-note", Static).update(pta.scope_note(result, models) + extra)
+        self.query_one("#pta-triangle", Static).update(
+            "\n".join(pta.triangle(result, 48) + [""] + pta.legend(result)) if result["questions"] else "")
+        header, table = pta.table(result)
+        t.add_columns(*header)
+        t.add_rows(table)
 
     def fill_per_question(self):
         # a pack being rerun under new questions or settings: its old result file is on its way out,
@@ -2846,6 +2905,11 @@ class EvalsApp(App):
     #results-info { width: 1fr; height: auto; }
     #toggle-smoke { width: auto; min-width: 32; }
     #pq-controls { height: 3; }
+    #pta-controls { height: 3; }
+    #pta-controls Select { width: 28; margin-right: 1; }
+    #pta-body { height: auto; }
+    #pta-triangle { width: auto; padding: 1 2 0 0; }
+    #pta { width: 1fr; height: auto; margin-top: 1; }
     #pq-controls Checkbox { width: auto; }
     #pq-controls Select { width: 28; margin-right: 1; }
     #pq-models { margin-right: 1; min-width: 20; }

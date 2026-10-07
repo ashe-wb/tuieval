@@ -46,10 +46,10 @@ def free_port():
 
 
 class Mock:
-    def __init__(self, packs, mode, port=None):
+    def __init__(self, packs, mode, port=None, delay=0.0):
         self.port = port or free_port()
         self.proc = subprocess.Popen([sys.executable, os.path.join(HERE, "mock_server.py"), "--port", str(self.port),
-                                      "--packs", packs, "--mode", mode], stdout=subprocess.DEVNULL)
+                                      "--packs", packs, "--mode", mode, "--delay", str(delay)], stdout=subprocess.DEVNULL)
         for _ in range(100):
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{self.port}/v1/models", timeout=1)
@@ -674,6 +674,102 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(out["total"], 8)
         self.assertEqual(out["sessions"], 3)
         self.assertEqual(out["second"], [["a/other", "done"]])                  # queued: its own run after
+
+
+class PTAIndex(unittest.TestCase):
+    """The PTA index: privacy from where a model runs, time relative to the fastest total, accuracy,
+    all over the questions every compared model answered."""
+
+    def test_privacy(self):
+        from tuieval import pta
+        cfg = {"servers": {"llama": {"cmd": ["llama-server"]}, "lm": {"url": "http://localhost:1234/v1"},
+                           "box": {"url": "http://192.168.1.20:8000/v1"}, "mine": {"url": "http://192.168.1.20:8000/v1",
+                                                                                   "private": True},
+                           "or": {"url": "https://openrouter.ai/api/v1"}},
+               "models": [{"label": l, "server": l} for l in ("llama", "lm", "box", "mine", "or")]}
+        self.assertEqual([pta.privacy(cfg, l) for l in ("llama", "lm", "box", "mine", "or", "gone")],
+                         [100, 100, 0, 100, 0, None])
+
+    def test_index_compares_shared_questions(self):
+        from tuieval import pta
+
+        def row(model, test, ok, secs, repeat=0):
+            return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "latency": secs * 1000,
+                    "tokens": 10, "truncated": False, "gen_tps": None, "repeat": repeat}
+        rows = [row("fast", "q1", True, 2), row("fast", "q2", False, 2),
+                row("slow", "q1", True, 8), row("slow", "q2", True, 4), row("slow", "q2", True, 6, repeat=1),
+                row("slow", "q3", True, 100)]               # only slow answered q3: not compared
+        res = pta.index(rows, lambda m: 100 if m == "slow" else 0)
+        self.assertEqual(res["questions"], 2)
+        by = {x["model"]: x for x in res["models"]}
+        self.assertEqual(by["fast"]["total_s"], 4)
+        self.assertEqual(by["slow"]["total_s"], 13)      # q1 8 + q2 median of 4 and 6
+        self.assertEqual(by["fast"]["T"], 100)
+        self.assertAlmostEqual(by["slow"]["T"], 100 * 4 / 13)
+        self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
+        self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
+        lines = pta.triangle(res, 40)
+        self.assertIn("P[/b] privacy", lines[0])
+        self.assertTrue(any("[cyan]" in l for l in lines) and any("[magenta]" in l for l in lines))
+
+    def test_cli_report_and_tui(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            d = os.path.join(ws, "packs", "apps")
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), 'label = "apps"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"), "".join(
+                f"- {{id: {t}, input: question {t}, expected: 1, reference: 'ANSWER: 1', wrong: ['ANSWER: 2'], "
+                "difficulty: easy}\n" for t in "abcd"))
+            right = Mock(os.path.join(ws, "packs"), "oracle")
+            wrong = Mock(os.path.join(ws, "packs"), "wrong", delay=0.3)
+            try:
+                with open(os.path.join(ws, "models.toml"), "a") as f:
+                    f.write(f'\n[servers.here]\nurl = "http://127.0.0.1:{right.port}"\n'
+                            f'\n[servers.there]\nurl = "http://127.0.0.1:{wrong.port}"\n')
+                tuieval(ws, "add", "mock", "--server", "here", "--label", "good")
+                tuieval(ws, "add", "mock", "--server", "there", "--label", "hosted")
+                tuieval(ws, "run", "--tier", "certify")
+            finally:
+                right.stop()
+                wrong.stop()
+            path = os.path.join(ws, "models.toml")    # as if "there" were a hosted API
+            write(path, read(path).replace(f"http://127.0.0.1:{wrong.port}", "https://api.example.com/v1"))
+            out = tuieval(ws, "pta").stdout
+            self.assertIn("Compared on the 4 questions all 2 model(s) answered", out)
+            table = {l.split()[0]: l.split()[1:4] for l in out.splitlines() if l.startswith(("good ", "hosted "))}
+            self.assertEqual(table["good"], ["100", "100", "100"])
+            self.assertEqual(table["hosted"][0], "0")
+            self.assertLess(int(table["hosted"][1]), 100)   # slower in total
+            self.assertEqual(table["hosted"][2], "0")
+            self.assertIn("P privacy", out)
+            self.assertIn("4/4", tuieval(ws, "pta", "--only", "good").stdout)
+            report = os.path.join(tmp, "r.md")
+            tuieval(ws, "report", "-o", report)
+            self.assertIn("## PTA index", read(report))
+            code = textwrap.dedent("""
+                import asyncio, json
+                from tuieval.tui import EvalsApp, ResultsScreen
+                from textual.widgets import DataTable, Static
+                async def go():
+                    app = EvalsApp({})
+                    async with app.run_test(size=(180, 60)) as pilot:
+                        await pilot.pause()
+                        app.push_screen(ResultsScreen())
+                        await pilot.pause(0.5)
+                        t = app.screen.query_one("#pta", DataTable)
+                        rows = [[str(c) for c in t.get_row_at(i)] for i in range(t.row_count)]
+                        tri = str(app.screen.query_one("#pta-triangle", Static).render())
+                        print(json.dumps({"rows": rows, "triangle": "P privacy" in tri}))
+                asyncio.run(go())
+            """)
+            p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
+                               env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""))
+            got = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+            self.assertIsInstance(got, dict, got)
+            self.assertTrue(got["triangle"])
+            self.assertEqual([r[:4] for r in got["rows"]][0], ["good", "100", "100", "100"])
 
 
 class FirstRun(unittest.TestCase):
