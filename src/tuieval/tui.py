@@ -385,6 +385,9 @@ HELP = {
 [b]Models at a time[/b]: how many of the ticked models run side by side (blank: this machine's
 parallel_models in models.toml, default 1). Answers note the models they ran alongside.
 
+[b]Retest[/b]: ask the ticked questions again even if they're already answered (only the tests
+picked with e, if any). Without it, answered questions are skipped. Replaced answers go to history/.
+
 [b]Keys[/b]
   s  start (with a run going: add to it, or queue it)   r  results
   a  add a model (a GGUF, a model id, openrouter:<id>)  m  scan model folders for new GGUFs
@@ -646,7 +649,7 @@ class SetupScreen(Screen):
             yield Input("", id="repeat", type="integer", max_length=2, placeholder="1")
             yield Label("Models at a time")
             yield Input("", id="parallel", type="integer", max_length=1, placeholder="1")
-            yield Checkbox("Rerun existing results", id="force")
+            yield Checkbox("Retest (ask again, even if already answered)", id="force")
         yield Static(id="estimate")
         with Horizontal(id="buttons"):
             yield Button("Start  [s]", id="start", variant="success")
@@ -958,7 +961,7 @@ class SetupScreen(Screen):
         if not run:
             text += "\n[yellow]Nothing selected can run (see skipping).[/yellow]"
         elif rerun:
-            text += "\n[yellow]Everything selected has results; Start runs it again.[/yellow]"
+            text += "\n[yellow]Everything selected has results; Start retests it.[/yellow]"
         resumed = [j for j in run if "done earlier" in j.note]
         if resumed:
             text += f"   [yellow]{len(resumed)} pack(s) continue from earlier results[/yellow]"

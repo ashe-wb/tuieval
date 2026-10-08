@@ -11,6 +11,7 @@
     tuieval run --only my-model --packs my-pack,other-pack
     tuieval run --tags moe --packs my-pack        # models tagged "moe"
     tuieval run --packs my-pack --tests a,b       # only these tests of a pack (or --tests my-pack:a,other:b)
+    tuieval run --only my-model --packs my-pack --tests a --retest   # ask a question again
     tuieval run --preset nightly                  # a selection saved in the TUI (presets.toml)
     tuieval run --tier smoke --only my-model      # 3 tests per pack, 1 repeat: check paths and flags
     tuieval run --tier smoke --only openrouter:qwen/qwen3-32b   # any OpenRouter model, no models.toml edit
@@ -742,7 +743,8 @@ def main(argv=None):
     p.add_argument("--packs", help="comma-separated packs (default: all)")
     p.add_argument("--tests", help="comma-separated test ids to run instead of the tier's sample: id with one "
                                    "pack in --packs, else pack:id (and --packs defaults to those packs)")
-    p.add_argument("--force", action="store_true", help="rerun packs (or the --tests) that already have current results")
+    p.add_argument("--retest", "--force", action="store_true", dest="force",
+                   help="ask again even if already answered: the packs, or just the --tests (earlier answers go to history/)")
     p.add_argument("--repeat", type=int, help="times each question is asked, any tier (default: 1 for smoke and "
                                                   "screen, the pack's certification count for certify)")
     p.add_argument("--tier", choices=engine.TIERS, default="screen",

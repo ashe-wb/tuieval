@@ -380,6 +380,9 @@ class PickTests(unittest.TestCase):
         hist = os.listdir(os.path.join(self.ws, "results", "m", "history"))
         self.assertTrue(any(f.startswith("apps-") for f in hist), hist)
         self.assertEqual(self.status(), "certified")
+        self.server("oracle")
+        tuieval(self.ws, "run", "--tests", "apps:b", "--retest")                  # --retest = --force
+        self.assertEqual(self.rows(), {"a": True, "b": True, "c": True, "d": True})
 
     def test_cli_errors(self):
         self.server("oracle")
