@@ -803,6 +803,18 @@ class PTAIndex(unittest.TestCase):
         picked = pta.index(rows, ["a", "few"])      # picked by hand: compared anyway
         self.assertEqual((picked["questions"], picked["left_out"]), (1, []))
 
+    def test_results_sort_values(self):
+        from tuieval.tui import diff_badge, sort_cell, sort_key, sort_value
+        got = [sort_value(c) for c in ("1,234 ★", "3.1k", "2.4×", "4m10s", "1h02m", "12.5s", diff_badge("hard"),
+                                        "[bold green]PASS[/]", "[green]OK 12s[/] [dim]measured[/dim]",
+                                        "[bold red]doesn't fit[/]", "Top 10 holdings")]
+        self.assertEqual(got, [1234, 3100, 2.4, 250, 3720, 12.5, 3, 3, 12, float("inf"), "top 10 holdings"])
+        self.assertEqual([sort_value(c) for c in ("-", "[dim]-[/dim]", "[dim]no data[/]", "")], [None] * 4)
+        self.assertEqual(sort_value(sort_cell("[green]✓[/green] 3.1k 12s", 3100)), 3100)
+        cells = ["3/4", "-", "10/20", "4/4", "abc"]       # numbers, then text; empty cells last both ways
+        self.assertEqual(sorted(cells, key=sort_key), ["10/20", "3/4", "4/4", "abc", "-"])
+        self.assertEqual(sorted(cells, key=lambda c: sort_key(c, True)), ["4/4", "3/4", "10/20", "abc", "-"])
+
     def test_cli_report_and_tui(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = os.path.join(tmp, "ws")
@@ -857,8 +869,37 @@ class PTAIndex(unittest.TestCase):
                         app.screen.fill_per_question()
                         await pilot.pause(0.3)
                         alone = pq.row_count
+                        tab = app.screen.query_one(TabbedContent).active
+
+                        async def click_header(t, name):   # a real click on the column name
+                            i = next(i for i, c in enumerate(t.ordered_columns) if c.label.plain.startswith(name))
+                            x = sum(c.get_render_width(t) for c in t.ordered_columns[:i]) + 1
+                            await pilot.click(t, offset=(x, 0))
+                            await pilot.pause(0.2)
+                            return [str(t.get_row_at(r)[0]) for r in range(t.row_count)], \
+                                   [c.label.plain for c in t.ordered_columns]
+                        sorts = {}
+                        pta_t = app.screen.query_one("#pta", DataTable)
+                        sorts["up"], _ = await click_header(pta_t, "answers right")
+                        sorts["down"], sorts["labels"] = await click_header(pta_t, "answers right")
+                        app.pq_models = set()
+                        app.screen.fill_pta()                                   # rebuilt: still sorted
+                        await pilot.pause(0.2)
+                        sorts["kept"] = [str(pta_t.get_row_at(r)[0]) for r in range(pta_t.row_count)]
+                        app.screen.query_one(TabbedContent).active = "tab-failures"
+                        await pilot.pause(0.3)
+                        f = app.screen.query_one("#failures", DataTable)
+                        await click_header(f, "Test")
+                        sorts["tests"], _ = await click_header(f, "Test")
+                        sorts["tests"] = [str(f.get_row_at(r)[2]) for r in range(f.row_count)]
+                        f.focus()
+                        f.move_cursor(row=0)
+                        await pilot.press("enter")                              # opens the row shown, not the first failure
+                        await pilot.pause(0.3)
+                        s = app.screen
+                        sorts["opened"] = s.entries[s.index]["record"]["test"]
                         print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone],
-                                          "tab": app.screen.query_one(TabbedContent).active}))
+                                          "tab": tab, "sorts": sorts}))
                 asyncio.run(go())
             """)
             p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
@@ -869,6 +910,10 @@ class PTAIndex(unittest.TestCase):
             self.assertEqual(got["disagree"], [4, 0])
             self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
             self.assertEqual([(r[0], r[3]) for r in got["rows"]][0], ("good", "4/4"))
+            s = got["sorts"]   # a click on a column name sorts by it, a second click reverses
+            self.assertEqual((s["up"], s["down"], s["kept"]), (["hosted", "good"], ["good", "hosted"], ["good", "hosted"]))
+            self.assertIn("answers right ▼", s["labels"])
+            self.assertEqual((s["tests"][0], s["opened"]), ("apps: d", "d"))
 
 
 class Unavailable(unittest.TestCase):

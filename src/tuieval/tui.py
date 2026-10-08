@@ -39,6 +39,8 @@ from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
 import yaml
+from rich.cells import cell_len
+from rich.text import Text
 
 from . import compare
 from . import engine
@@ -179,6 +181,79 @@ def fmt_secs(secs):
     if secs >= 3600:
         return f"{secs // 3600}h{secs % 3600 // 60:02d}m"
     return f"{secs // 60}m{secs % 60:02d}s" if secs >= 60 else f"{secs}s"
+
+
+# -- sorting Results tables by a click on a column name
+SORT_ARROWS = (" ▲", " ▼")
+SORT_RANKS = {"EASY": 1, "MEDIUM": 2, "HARD": 3, "FAIL": 1, "INCONCLUSIVE": 2, "PASS": 3,
+              "DOESN'T FIT": float("inf")}
+
+
+class SortCell(Text):
+    """A table cell that sorts by its `sort_value` instead of what it shows."""
+
+
+def sort_cell(markup, value):
+    t = Text.from_markup(markup)
+    cell = SortCell(t.plain, spans=t.spans)
+    cell.sort_value = value
+    return cell
+
+
+def _sort_number(tok):
+    """1,234 · 3.1k · 2.4× · 12/20 · 4m10s · 1h02m · 12.5s as a number, else None."""
+    tok = tok.rstrip("★×%").replace(",", "")
+    if m := re.fullmatch(r"(\d+)/(\d+)", tok):    # answers right: the share, then the count
+        a, b = int(m[1]), int(m[2])
+        return (a / b if b else 0) + a * 1e-9
+    if (m := re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?", tok)) and any(m.groups()):
+        h, mi, s = m.groups()
+        return int(h or 0) * 3600 + int(mi or 0) * 60 + float(s or 0)
+    if m := re.fullmatch(r"(-?\d+(?:\.\d+)?)(k?)", tok):
+        return float(m[1]) * (1000 if m[2] else 1)
+    return None
+
+
+def sort_value(cell):
+    """What a Results cell sorts by: the number it shows, a rank for levels and verdicts, else its
+    text; None (always last) for an empty cell."""
+    if isinstance(cell, SortCell):
+        return cell.sort_value
+    plain = (cell.plain if isinstance(cell, Text) else Text.from_markup(str(cell)).plain).strip()
+    if plain.lower() in ("", "-", "no data", "unrated"):
+        return None
+    if plain.upper() in SORT_RANKS:
+        return SORT_RANKS[plain.upper()]
+    first = re.sub(r"^(OK|TOO SLOW) ", "", plain).split()[0]   # latency: by its p90 seconds
+    n = _sort_number(first)
+    return plain.casefold() if n is None else n
+
+
+class _Desc:
+    """Reverses the order of what it wraps (so empty cells stay last when sorting descending)."""
+    __slots__ = ("v",)
+
+    def __init__(self, v):
+        self.v = v
+
+    def __eq__(self, other):
+        return self.v == other.v
+
+    def __lt__(self, other):
+        return other.v < self.v
+
+
+def sort_key(cell, reverse=False):
+    v = sort_value(cell)
+    if v is None:
+        return (1,)
+    return (0, isinstance(v, str), _Desc(v) if reverse else v)
+
+
+def column_name(label):
+    """A column's label without the sort arrow."""
+    text = label.plain if isinstance(label, Text) else str(label)
+    return next((text[:-len(a)] for a in SORT_ARROWS if text.endswith(a)), text)
 
 
 class StreamView(TextArea):
@@ -339,6 +414,8 @@ with the model's reasoning and answer as they stream, then recent results with t
   Production readiness   one verdict per model and use case; the table says why and what to run next
   Per question           every question, model by model (filters: pack, level, Models disagree)
   Failures               every wrong answer with the grader's reason; enter opens it in full
+
+Click a column name to sort a table by it; click it again to reverse. Empty cells stay last.
 
 More in the terminal: tuieval compare (--pairwise: is a difference real), tuieval history,
 tuieval items (test quality).
@@ -2408,7 +2485,7 @@ class ResultsScreen(Screen):
                 yield DataTable(id="pq-summary", zebra_stripes=True, cursor_type="none")
                 yield Static(id="pq-legend")
                 yield DataTable(id="per-question", zebra_stripes=True, cursor_type="cell")
-            with TabPane("Failures"):
+            with TabPane("Failures", id="tab-failures"):
                 yield Static("[dim]Enter on a row shows the whole answer, its reasoning and what was checked.[/dim]")
                 yield DataTable(id="failures", zebra_stripes=True, cursor_type="row")
         yield Footer()
@@ -2417,6 +2494,8 @@ class ResultsScreen(Screen):
         self.rows, self.infos, self.partial_rows, self.superseded = [], [], [], set()
         if not hasattr(self.app, "pq_models"):
             self.app.pq_models = set()
+        if not hasattr(self.app, "result_sorts"):
+            self.app.result_sorts = {}   # table id -> (column name, descending), kept for this session
         self.fill()
 
     def on_screen_resume(self):
@@ -2488,15 +2567,17 @@ class ResultsScreen(Screen):
         f.add_columns("Model", "Level", "Test", "Reason")
         # compare.failures lists the failed rows in order, so they line up with fail_rows
         self.fail_rows = [r for r in rows if not r["ok"]]
-        for model, test, reason, level in compare.failures(rows):
-            f.add_row(model, diff_badge(level), test, rich_escape(reason[:130]))
+        for i, (model, test, reason, level) in enumerate(compare.failures(rows)):
+            f.add_row(model, diff_badge(level), test, rich_escape(reason[:130]), key=str(i))
         self.fill_per_question()
         self.fill_pta()
         self.fill_readiness(results_dir)
+        self.sort_tables()
 
     @on(DataTable.RowSelected, "#failures")
     def failure_selected(self, event):
-        entries = [answer_entry(r) for r in self.fail_rows]
+        # in the order shown, so [ and ] step through them as sorted
+        entries = [answer_entry(self.fail_rows[int(r.key.value)]) for r in event.data_table.ordered_rows]
         i = event.cursor_row
         if not entries[i]:
             self.notify("This result is in the old format and has no stored answer.", severity="warning")
@@ -2507,13 +2588,51 @@ class ResultsScreen(Screen):
     # -- per question: tokens and time for every model on the same question
     @on(Select.Changed, "#pq-pack")
     @on(Select.Changed, "#pq-level")
-    @on(Select.Changed, "#pq-sort")
     @on(Checkbox.Changed, "#pq-partial")
     @on(Checkbox.Changed, "#pq-shared")
     @on(Checkbox.Changed, "#pq-disagree")
     def per_question_changed(self):
         if getattr(self, "rows", None) is not None:
             self.fill_per_question()
+
+    @on(Select.Changed, "#pq-sort")
+    def pq_sort_changed(self):
+        """The Sort dropdown takes over from a column sorted by a click."""
+        self.app.result_sorts.pop("per-question", None)
+        self.per_question_changed()
+
+    @on(DataTable.HeaderSelected)
+    def header_selected(self, event):
+        """A click on a column name sorts by it; another click on it reverses the order."""
+        t, name = event.data_table, column_name(event.label)
+        prev = self.app.result_sorts.get(t.id)
+        self.app.result_sorts[t.id] = (name, not prev[1] if prev and prev[0] == name else False)
+        self.sort_table(t)
+
+    def sort_tables(self):
+        """After a table is rebuilt: sort it again by the column picked (if that column is still there)."""
+        for t in self.query(DataTable):
+            self.sort_table(t)
+
+    def sort_table(self, t):
+        name, desc = self.app.result_sorts.get(t.id, (None, False))
+        found = None
+        for col in t.ordered_columns:
+            base = column_name(col.label)
+            label = base + SORT_ARROWS[desc] if base == name else base
+            if col.label.plain != label:
+                col.label = Text(label)
+                w = cell_len(label)   # room for the arrow (a column keeps the width it was added with)
+                col.content_width = max(col.content_width, w)
+                if not col.auto_width:
+                    col.width = max(col.width, w)
+                t._require_update_dimensions = True
+            if base == name:
+                found = col
+        if found is not None:
+            t.sort(found.key, key=lambda cell: sort_key(cell, desc))
+        else:
+            t.refresh()
 
     @on(Button.Pressed, "#pq-models")
     @on(Button.Pressed, "#pta-models")
@@ -2579,6 +2698,7 @@ class ResultsScreen(Screen):
         for i, h in enumerate(header):   # sized to the contents: added before the rows, a column keeps its header's width
             t.add_column(h, width=max(len(h), *(len(r[i]) for r in table)) if table else None)
         t.add_rows(table)
+        self.sort_table(t)
 
     def fill_per_question(self):
         # a pack being rerun under new questions or settings: its old result file is on its way out,
@@ -2641,18 +2761,21 @@ class ResultsScreen(Screen):
             best = min((c["tokens"] for c in t["cells"].values() if c["tokens"] and c["passed"]), default=None)
             for m in models:
                 c = t["cells"].get(m)
-                cells.append(self.pq_cell(c, best, here) if c else "[dim]-[/dim]")
+                # a model's column sorts by its tokens
+                cells.append(sort_cell(self.pq_cell(c, best, here), c["tokens"] or None) if c else "[dim]-[/dim]")
             spread = t["spread"]["tokens"]
             sp = f"[yellow]{spread:.1f}×[/yellow]" if spread >= 3 else (f"{spread:.1f}×" if len(t["cells"]) > 1 else "")
             desc = t["cells"][next(iter(t["cells"]))]["rows"][0].get("raw", {}).get("description") or t["name"]
             table.add_row(rich_escape(desc[:48]), t["suite"], diff_badge(t["difficulty"]), sp, *cells, key=t["test"])
             self.pq_tests[t["test"]] = t
+        self.sort_table(table)
+        self.sort_table(self.query_one("#pq-summary", DataTable))
         self.query_one("#pq-legend", Static).update(
             f"[dim]{len(tests)} questions. Each cell: result (passes/answers if repeated), median tokens, median seconds. "
             "[green]bold[/green] = fewest tokens among passing answers · [red]cut[/red] = hit max_tokens · "
             "◐ = pack unfinished (not in scores) · dim seconds = hosted, or measured on another machine; tokens compare "
             "across machines, seconds don't. ×tokens = most / fewest tokens across models. Enter on a cell opens the "
-            "answers.[/dim]" + ("\n[yellow]Left out, being rerun with other questions or settings: " + ", ".join(
+            "answers. Click a column name to sort by it (a model's column: by its tokens).[/dim]" + ("\n[yellow]Left out, being rerun with other questions or settings: " + ", ".join(
                 f"{os.path.basename(os.path.dirname(p))} · {os.path.basename(p)[:-5]}" for p in sorted(self.superseded))
                 + ". Only the new run's answers (◐) are shown for these.[/yellow]" if self.superseded else ""))
 
