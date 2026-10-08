@@ -18,6 +18,7 @@ Day to day
   tuieval report              the verdicts with their evidence, as a markdown file
   tuieval history             every verdict change, newest first
   tuieval items               tests that don't separate models or look broken
+  tuieval logs                follow the server log of the model running now (live: its answers)
   tuieval capture LOG --pack  turn a real failure (logs/live/*.txt) into a new test
   tuieval regrade             re-score stored answers after changing a grader (--only, --packs)
   tuieval list                the models tuieval knows, hidden ones separately (--packs: the packs)
@@ -85,6 +86,9 @@ def main(argv=None):
     if cmd == "watch":
         from . import watch_proxy
         return watch_proxy.main(rest)
+    if cmd == "logs":
+        from . import logs
+        return logs.main(rest)
     from . import run_evals
     if cmd in run_evals.COMMANDS:
         return run_evals.COMMANDS[cmd](rest)

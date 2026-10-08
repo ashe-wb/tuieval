@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `tuieval logs` follows the server log of the model running now and moves on with the run; `logs live` shows each answer as it finishes, `--list` every log.
 - Results tables sort by a click on a column name; a second click reverses. Numbers, times and levels sort by value; empty cells stay last.
 - Nvidia and AMD GPUs on Linux: VRAM from `nvidia-smi`, `amd-smi` or `rocm-smi` sizes models (`gpu_memory_gb` overrides it), runs record peak VRAM, and `tuieval doctor` shows the GPU.
 - Results has four tabs: PTA index, Production readiness, Per question and Failures. The PTA table adds tok/s, TTFT and memory; Per question can show only where models disagree; the settings warning is one line. Scorecard, pairwise, history and test quality stay in `tuieval compare`, `history` and `items`.

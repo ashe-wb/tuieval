@@ -1705,5 +1705,88 @@ class Remove(unittest.TestCase):
                 self.assertTrue(os.path.exists(os.path.join(ws, "removed", kept, rel)), rel)
 
 
+
+class Logs(unittest.TestCase):
+    """tuieval logs: follows whichever model's server log is being written, without naming it."""
+
+    def test_follows_the_log_being_written(self):
+        from tuieval import logs
+        with tempfile.TemporaryDirectory() as d:
+            a, b = os.path.join(d, "model-a.log"), os.path.join(d, "model-b.log")
+            write(a, "a old\n")
+            write(b, "".join(f"b {i}\n" for i in range(50)))
+            os.utime(a, (time.time() - 60,) * 2)
+            f = logs.Follower(d, lines=3)
+            self.assertEqual(f.poll(), "── model-b ──\nb 47\nb 48\nb 49\n")   # the newest, its last lines
+            self.assertEqual(f.poll(), "")
+            with open(a, "a") as fh:
+                fh.write("a new\n")                                          # the run moved on to model a
+            self.assertEqual(f.poll(), "── model-a ──\na new\n")
+            with open(b, "a") as fh:
+                fh.write("half a li")                                          # a line still being written
+            self.assertEqual(f.poll(), "")
+            self.assertEqual(f.poll(), "── model-b ──\nhalf a li")             # unchanged since: shown anyway
+            write(os.path.join(d, "model-c.log"), "c starts\n")              # a model that never ran before
+            self.assertEqual(f.poll(), "── model-c ──\nc starts\n")
+            write(a, "fresh\n")                                               # replaced: read from the start
+            self.assertEqual(f.poll(), "── model-a ──\nfresh\n")
+            only = logs.Follower(d, lines=1, only=b)
+            self.assertEqual(only.poll(), "── model-b ──\nb 49\n")             # complete lines first
+            self.assertEqual((only.poll(), only.poll()), ("", "half a li"))     # held one poll, as above
+            with open(a, "a") as fh:
+                fh.write("ignored\n")
+            self.assertEqual(only.poll(), "")
+
+    def test_live_answers(self):
+        from tuieval import logs
+        with tempfile.TemporaryDirectory() as d:
+            def answer(name, done=True, age=0):
+                path = os.path.join(d, name + ".txt")
+                write(path, "MODEL: m\nPROMPT: the question\n\n=== REASONING ===\nthink\n\n=== ANSWER ===\n42\n"
+                      + ("\n=== 10 tokens, 1.0s, finish=stop ===\n" if done else ""))
+                os.utime(path, (time.time() - age,) * 2)
+            answer("20260101_100000_m_pack_old", age=20)
+            answer("20260101_100100_m_pack_last", age=10)
+            f = logs.LiveFollower(d)
+            first = f.poll()
+            self.assertIn("── 20260101_100100_m_pack_last ──\n=== REASONING ===", first)   # the latest one only
+            self.assertNotIn("_old", first)
+            self.assertNotIn("PROMPT", first)
+            answer("20260101_100200_m_pack_new", done=False)                  # still being written
+            self.assertEqual(f.poll(), "")
+            answer("20260101_100200_m_pack_new")
+            self.assertIn("=== ANSWER ===\n42", f.poll())
+
+    def test_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            self.assertIn("No server logs yet", tuieval(ws, "logs", "--list").stdout)
+            d = os.path.join(ws, "logs", "server")
+            os.makedirs(d, exist_ok=True)
+            for i, name in enumerate(("coder-q4", "coder-q5", "chat")):
+                write(os.path.join(d, name + ".log"), f"{name} line\n")
+                os.utime(os.path.join(d, name + ".log"), (time.time() - 100 + i,) * 2)
+            listed = tuieval(ws, "logs", "--list").stdout.splitlines()
+            self.assertEqual([l.split()[0] for l in listed], ["chat", "coder-q5", "coder-q4"])   # newest first
+            p = tuieval(ws, "logs", "coder", check=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("matches 2 logs", p.stderr)
+            self.assertIn("No server log matches", tuieval(ws, "logs", "nothing", check=False).stderr)
+            # following: the newest log, then whichever one grows; ctrl-c stops it cleanly
+            proc = subprocess.Popen([sys.executable, "-m", "tuieval", "logs", "-n", "1"], stdout=subprocess.PIPE,
+                                    text=True, env=dict(os.environ, TUIEVAL_HOME=ws))
+            try:
+                time.sleep(1.5)
+                with open(os.path.join(d, "coder-q4.log"), "a") as fh:
+                    fh.write("q4 server started\n")
+                time.sleep(1.5)
+            finally:
+                proc.send_signal(__import__("signal").SIGINT)
+                out, _ = proc.communicate(timeout=20)
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(out, "── chat ──\nchat line\n── coder-q4 ──\nq4 server started\n")
+
+
 if __name__ == "__main__":
     unittest.main()
