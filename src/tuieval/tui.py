@@ -332,9 +332,10 @@ with the model's reasoning and answer as they stream, then recent results with t
   v  with several models at a time: stream the next one (k skips the one streaming)""",
     "ResultsScreen": """[b]Results[/b]
 
-  PTA index              parsimony (tokens), time and accuracy per model, a bar each (longer = better;
-                         2.4× = 2.4 times the best), with per-answer numbers, tok/s, TTFT and memory in
-                         the table. Results open here.
+  PTA index              parsimony (tokens), time and accuracy per model, a bar each: tokens and time
+                         as long as they took (shorter is better; 2.4× = 2.4 times the best), accuracy
+                         longer is better. Per-answer numbers, tok/s, TTFT and memory in the table.
+                         Results open here.
   Production readiness   one verdict per model and use case; the table says why and what to run next
   Per question           every question, model by model (filters: pack, level, Models disagree)
   Failures               every wrong answer with the grader's reason; enter opens it in full

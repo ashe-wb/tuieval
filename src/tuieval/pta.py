@@ -1,4 +1,4 @@
-"""PTA index: parsimony (tokens), time and accuracy per model, a bar each (longer = better).
+"""PTA index: parsimony (tokens), time and accuracy per model, a bar each.
 
     P  parsimony (tokens)  the tokens (reasoning and answer) used on every question compared (each
                            question at its median over repeats), shown as how many times the leanest
@@ -7,8 +7,10 @@
                            model's ("28×").
     A  accuracy            the share of answers to those questions that passed (%).
 
-Behind the P and T bars is a 0-100 score: 100 for the best, POINTS_PER_DOUBLING points less for every
-doubling (0 at about 100 times more), so models far behind the best still get a visible bar.
+The P and T bars are as long as the tokens and time used (the model that used the most fills its bar,
+the others in proportion, at least one block), so shorter is better; the A bar: longer is better.
+P and T also carry a 0-100 score (100 for the best, POINTS_PER_DOUBLING points less for every
+doubling), used to order models with the same accuracy.
 
 Models are compared on the questions all of them answered, so one that skipped some never looks
 faster. Server and connection errors aren't answers. By default a model with fewer than half as many
@@ -93,9 +95,11 @@ def index(rows, models=None, memory=None):
             "most": most}
 
 
-# (letter, name, what the number beside the bar shows, colour); the bar itself is the 0-100 score
-LETTERS = (("P", "parsimony (tokens)", "tokens_x", "cyan"), ("T", "time", "time_x", "magenta"),
-           ("A", "accuracy", "A", "green"))
+# (letter, name, which way is better, what the bar measures, the number beside it, colour). P and T bars
+# are the amount itself (tokens, time: shorter is better); the A bar is the share right (longer is better).
+LETTERS = (("P", "parsimony (tokens)", "▼ shorter is better", "tokens", "tokens_x", "cyan"),
+           ("T", "time", "▼ shorter is better", "total_s", "time_x", "magenta"),
+           ("A", "accuracy", "▲ longer is better", "A", "A", "green"))
 
 
 def times(v):
@@ -103,26 +107,41 @@ def times(v):
     return "-" if v is None else f"{v:.1f}×" if v < 9.95 else f"{v:.0f}×"
 
 
+def _blocks(width, v, most):
+    """How many of width blocks a bar fills: v as a share of most, at least one block when v > 0."""
+    if not v or not most:
+        return 0
+    return max(1, min(width, round(width * v / most)))
+
+
 def bars(result, width=20, markup=True):
-    """Lines with a row per model and a bar per score (P, T, A), longer = better: the at-a-glance view.
-    Beside P and T, how many times the leanest / fastest model's tokens / time; beside A, the percentage.
-    markup=False gives plain text (the report)."""
+    """Lines with a row per model and a bar each for P, T and A: the at-a-glance view. The P and T bars
+    are proportional to tokens and time (the longest is the model that used most; shorter is better),
+    with how many times the leanest / fastest model's beside them; the A bar is the share of answers
+    right (longer is better, full only when every answer passed). markup=False gives plain text."""
     if not result["models"]:
         return []
     name_w = max(len(x["model"]) for x in result["models"])
-    # each column: the bar, a space, "100%" or "9.8×" (5), then a gap; at least as wide as its heading
-    cell_w = max(width + 9, *(len(f"{k} {name}") + 2 for k, name, _, _ in LETTERS))
-    head = " " * (name_w + 2) + "".join(f"{f'{k} {name}':<{cell_w}}" for k, name, _, _ in LETTERS)
-    lines = [f"[b]{head.rstrip()}[/b]" if markup else head.rstrip()]
+    # each column: the bar, a space, "100%" or "9.8×" (6), then a gap; at least as wide as its heading
+    cell_w = max(width + 9, *(len(t) + 2 for k, name, better, *_ in LETTERS for t in (f"{k} {name}", better)))
+    pad = " " * (name_w + 2)
+    head = pad + "".join(f"{f'{k} {name}':<{cell_w}}" for k, name, *_ in LETTERS)
+    sub = pad + "".join(f"{better:<{cell_w}}" for _, _, better, *_ in LETTERS)
+    lines = [f"[b]{head.rstrip()}[/b]" if markup else head.rstrip(), f"[dim]{sub.rstrip()}[/dim]" if markup else sub.rstrip()]
+    most = {m: max((x.get(m) or 0 for x in result["models"]), default=0) for _, _, _, m, _, _ in LETTERS}
     for x in result["models"]:
         cells = []
-        for k, _, shown, color in LETTERS:
-            v = x[k]
-            full = 0 if v is None else round(width * max(0, min(100, v)) / 100)
-            if v is not None and v < 100:   # full only when perfect (accuracy) or the best (P, T)
-                full = min(full, width - 1)
+        for k, _, _, measure, shown, color in LETTERS:
+            if k == "A":
+                v = x["A"]
+                full = 0 if v is None else round(width * max(0, min(100, v)) / 100)
+                if v is not None and v < 100:   # full only when every answer passed
+                    full = min(full, width - 1)
+                num = "-" if v is None else compare.pct(v / 100)
+            else:
+                full = _blocks(width, x.get(measure), most[measure])
+                num = times(x.get(shown))
             bar, rest = "█" * full, "░" * (width - full)
-            num = (("-" if v is None else compare.pct(v / 100)) if shown == "A" else times(x.get(shown)))
             bar = f"[{color}]{bar}[/][grey37]{rest}[/]" if markup else bar + rest
             cells.append(f"{bar} {num:>6}" + " " * (cell_w - width - 7))
         name = f"{x['model']:<{name_w}}"
@@ -183,8 +202,9 @@ def scope_note(result, models):
     if not result["questions"]:
         return "These models have no question in common yet, so there's nothing to compare."
     return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
-            "Longer bars are better. P parsimony (tokens) and T time: how many times the leanest / fastest "
-            "model's (1.0×, ★ in the table). A accuracy: answers right.")
+            "P parsimony (tokens) and T time: bars as long as the tokens / time used (shorter is better), "
+            "and how many times the leanest / fastest model's (1.0×, ★ in the table). A accuracy: answers right "
+            "(longer is better).")
 
 
 def for_engine(e, labels=None, packs=None, results_dir=None):

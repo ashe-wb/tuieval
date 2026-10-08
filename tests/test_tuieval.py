@@ -761,10 +761,14 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual((cells["slow"][1], cells["fast"][1:3]), ("10 ★", ["40", "2.0s ★"]))   # per answer
         bars = pta.bars(res, 10, markup=False)
         self.assertEqual(bars[0].split(), ["P", "parsimony", "(tokens)", "T", "time", "A", "accuracy"])
+        self.assertEqual(bars[1].split(), ["▼", "shorter", "is", "better"] * 2 + ["▲", "longer", "is", "better"])
+        slow, fast = bars[2], bars[3]
         self.assertEqual((bars[0].index("P parsimony"), bars[0].index("T time")),   # each bar starts under
-                         (bars[2].index("███████░░░"), bars[2].index("██████████")))  # its heading
-        # the bar is the score (4x the tokens: 70); beside it, how many times the best
-        self.assertEqual(bars[2].split(), ["fast", "███████░░░", "4.0×", "██████████", "1.0×", "█████░░░░░", "50.0%"])
+                         (fast.index("██████████"), fast.index("███░░░░░░░")))       # its heading
+        # P and T bars as long as tokens and time (shorter is better): fast used 4x the tokens of slow but
+        # took 4 s against 13 s, so it has the longest token bar and the shortest time bar
+        self.assertEqual(fast.split(), ["fast", "██████████", "4.0×", "███░░░░░░░", "1.0×", "█████░░░░░", "50.0%"])
+        self.assertEqual(slow.split()[1:5], ["██░░░░░░░░", "1.0×", "██████████", "3.2×"])
         self.assertEqual((pta.times(1), pta.times(9.84), pta.times(27.9)), ("1.0×", "9.8×", "28×"))
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
@@ -774,7 +778,7 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual([compare.pct(f) for f in (467 / 469, 1, 0, 0.5)], ["99.6%", "100%", "0%", "50.0%"])
         row = lambda model, a: {"model": model, "P": 100, "T": 100, "A": a, "tokens_x": 1, "time_x": 1}
         bars = pta.bars({"models": [row("two-wrong", 100 * 467 / 469), row("perfect", 100.0)]}, 10, markup=False)
-        two_wrong, perfect = bars[1].split(), bars[2].split()
+        two_wrong, perfect = bars[2].split(), bars[3].split()
         self.assertEqual((two_wrong[-2], two_wrong[-1]), ("█████████░", "99.6%"))   # not a full bar
         self.assertEqual((perfect[-2], perfect[-1]), ("██████████", "100%"))
 
