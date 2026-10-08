@@ -136,6 +136,8 @@ tuieval history                               # every verdict change over time
 tuieval compare --speed --pairwise --failures # scorecards
 tuieval selftest                              # check every test's reference and wrong answers
 tuieval items                                 # tests that don't separate models or look broken
+tuieval logs                                  # follow the server log of the model running now
+tuieval logs live                             # each answer as it finishes (--list: every log)
 tuieval capture logs/live/<file> --pack X     # turn a real failure into a new test
 tuieval regrade                               # re-score stored answers after changing a grader
 tuieval regrade --only <model> --packs X      # just one model's results (and packs)
