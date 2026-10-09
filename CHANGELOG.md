@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Retest asks per pack before it starts: from zero, continue or leave out. It now really starts from zero, and replaced smoke results go to history/.
 - Retest: the setup checkbox "Rerun existing results" is now "Retest (ask again, even if already answered)", and `tuieval run --retest` is the same (`--force` still works).
 - `tuieval logs` follows the server log of the model running now and moves on with the run; `logs live` shows each answer as it finishes, `--list` every log.
 - Results tables sort by a click on a column name; a second click reverses. Numbers, times and levels sort by value; empty cells stay last.

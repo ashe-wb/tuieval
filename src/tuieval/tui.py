@@ -386,7 +386,9 @@ HELP = {
 parallel_models in models.toml, default 1). Answers note the models they ran alongside.
 
 [b]Retest[/b]: ask the ticked questions again even if they're already answered (only the tests
-picked with e, if any). Without it, answered questions are skipped. Replaced answers go to history/.
+picked with e, if any). Without it, answered questions are skipped. Before anything moves, Start lists
+the packs with earlier answers and lets you choose for each: Zero (ask everything again), Continue
+(keep what's answered, ask the rest) or Leave out. Replaced answers go to history/, never deleted.
 
 [b]Keys[/b]
   s  start (with a run going: add to it, or queue it)   r  results
@@ -961,7 +963,9 @@ class SetupScreen(Screen):
         if not run:
             text += "\n[yellow]Nothing selected can run (see skipping).[/yellow]"
         elif rerun:
-            text += "\n[yellow]Everything selected has results; Start retests it.[/yellow]"
+            text += "\n[yellow]Everything selected has results; Start asks which packs to ask again.[/yellow]"
+        if force:
+            text += "\n[yellow]Retest: Start lists the packs that would start from zero and lets you choose.[/yellow]"
         resumed = [j for j in run if "done earlier" in j.note]
         if resumed:
             text += f"   [yellow]{len(resumed)} pack(s) continue from earlier results[/yellow]"
@@ -1040,32 +1044,32 @@ class SetupScreen(Screen):
         picks = self.current_picks(suites)
         sel = {"models": labels, "packs": suites, "repeat": repeat, "tier": tier, "force": force, "tests": picks,
                "parallel": self.parallel()}
-        jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks)
-        rerun = False
+        e = self.app.engine
+        jobs = e.plan(labels, suites, repeat, tier, True, picks)
         if not any(j.status == "waiting" for j in jobs):
-            # Everything selected already has results: Start means run it again (earlier results
-            # are kept in history/). Packs skipped for another reason (no vision, …) stay skipped.
-            jobs = self.app.engine.plan(labels, suites, repeat, tier, True, picks)
-            if not any(j.status == "waiting" for j in jobs):
-                reasons = sorted({j.note for j in jobs if j.status == "skipped"})
-                self.notify(f"Nothing selected can run: {'; '.join(reasons)}", severity="warning")
-                return
-            rerun = True
-        self.app.save_state(sel)
-        lost = [(j, what, n, why) for j in jobs if j.status == "waiting" for what, n, why in j.discards]
-        item = QueuedRun(sel, rerun, {(j.key, what) for j, what, _, _ in lost}, jobs, self.app.engine)
-        if not lost:
-            self.app.start_or_queue(item)
+            reasons = sorted({j.note for j in jobs if j.status == "skipped"})
+            self.notify(f"Nothing selected can run: {'; '.join(reasons)}", severity="warning")
             return
+        self.app.save_state(sel)
+        # Packs whose earlier answers a start would set aside (Retest, everything already done, or
+        # other questions or settings): the user picks per pack before anything moves.
+        rows, rerun = retest_rows(e, labels, suites, repeat, tier, picks, force)
 
-        def answer(yes):
-            if yes:
-                self.app.start_or_queue(item)
-        lines = "\n".join(f"• {j.label} · {j.pack.label}: {n} {what} answers — {why}" for j, what, n, why in lost)
-        self.app.push_screen(ConfirmScreen(
-            "These packs would start over: their earlier answers ran with other questions or settings.\n\n"
-            f"{lines}\n\nThe earlier answers move to results/<model>/history/ (kept, but no longer counted). "
-            "To resume instead, pick No and put the setting back in models.toml.\n\nStart over?"), answer)
+        def go(choices):
+            if choices is None:
+                return
+            item = QueuedRun(sel, {k for k, c in choices.items() if c == "zero"},
+                             {k for k, c in choices.items() if c == "leave"},
+                             {(r.key, what) for r in rows if choices.get(r.key) == "zero" for what, _, _ in r.base.discards},
+                             e)
+            if not item.jobs:
+                self.notify(f"Nothing to run: {item.problem}.", severity="warning")
+                return
+            self.app.start_or_queue(item)
+        if rows:
+            self.app.push_screen(RetestScreen(rows, force, rerun), go)
+        else:
+            go({})
 
     def action_tune(self):
         e = self.app.engine
@@ -1540,14 +1544,16 @@ def run_title(tier, models, packs):
 
 class QueuedRun:
     """A run waiting its turn. It's planned again when it starts, so it picks up what the runs before
-    it finished; it never sets aside answers that weren't confirmed when it was queued."""
+    it finished; it never sets aside answers that weren't confirmed when it was queued. retest: the
+    job keys to ask again from zero; leave: the ones left out."""
     kind = "Run"
 
-    def __init__(self, sel, rerun, accepted, jobs, eng):
-        self.sel, self.rerun, self.accepted = sel, rerun, accepted
+    def __init__(self, sel, retest, leave, accepted, eng):
+        self.sel, self.retest, self.leave, self.accepted = sel, retest, leave, accepted
         self.queued = time.time()
+        self.jobs, self.problem = self.plan(eng)
+        jobs = self.jobs or []
         self.title = run_title(sel["tier"], {j.label for j in jobs}, {j.pack.label for j in jobs})
-        self.jobs = jobs
         self.est = eng.estimate_seconds(jobs)[0]
 
     def tests(self, eng):
@@ -1566,11 +1572,11 @@ class QueuedRun:
     def plan(self, eng):
         """(jobs, None), or (None, why it can't run) now."""
         sel = self.sel
-        jobs = eng.plan(sel["models"], sel["packs"], sel["repeat"], sel["tier"], sel["force"] or self.rerun,
-                        self.tests(eng))
+        jobs = [j for j in eng.plan(sel["models"], sel["packs"], sel["repeat"], sel["tier"], self.retest,
+                                    self.tests(eng)) if j.key not in self.leave]
         waiting = [j for j in jobs if j.status == "waiting"]
         if not waiting:
-            return None, "nothing left to run (earlier runs finished it)"
+            return None, "every pack left is already done"
         new = sorted({j.key for j in waiting for what, _, _ in j.discards if (j.key, what) not in self.accepted})
         if new:
             return None, (f"it would now start over {', '.join(new)}, which wasn't confirmed when it was queued. "
@@ -1619,6 +1625,140 @@ class ChoiceScreen(ModalScreen):
 
     def action_cancel(self):
         self.dismiss(None)
+
+
+class RetestRow:
+    """A pack whose earlier answers a start could set aside. base: its job resuming; zero: from zero."""
+
+    def __init__(self, base, zero, finished, unfinished, choices, choice):
+        self.base, self.zero, self.finished, self.unfinished = base, zero, finished, unfinished
+        self.choices, self.choice = choices, choice
+        self.key = base.key
+
+    def earlier(self):
+        if self.base.discards:
+            return ", ".join(f"{n} {what}" for what, n, _ in self.base.discards)
+        parts = [f"{self.finished} finished"] * bool(self.finished) + \
+                [f"[yellow]{self.unfinished} unfinished[/yellow]"] * bool(self.unfinished)
+        return ", ".join(parts)
+
+    def happens(self):
+        b = self.base
+        if self.choice == "leave":
+            return "not run now"
+        if self.choice == "continue":
+            return "skipped: already done" if b.status == "done" else f"keeps {b.done}, asks the other {b.total - b.done}"
+        if b.discards:
+            why = "; ".join(sorted({why for _, _, why in b.discards}))
+            return f"[yellow]{why}[/yellow]; {sum(n for _, n, _ in b.discards)} → history/"
+        what = "picked tests asked again" if self.zero.redo else "asked again"
+        return f"{what}; {self.finished + self.unfinished} → history/"
+
+
+CHOICE_TEXT = {"zero": "[b red]Zero[/b red]", "continue": "[b green]Continue[/b green]", "leave": "[dim]Leave out[/dim]"}
+
+
+def retest_rows(eng, labels, packs, repeat, tier, picks, force):
+    """(rows, rerun): the packs Start would set earlier answers aside for, or could. rerun: Retest is
+    off but everything selected is done, so Start runs it again. A pack whose questions or settings
+    changed can't continue (Zero or Leave out); with Retest every pack with answers starts at Zero,
+    without it a pack that can resume continues."""
+    base = eng.plan(labels, packs, repeat, tier, False, picks)
+    zero = {j.key: j for j in eng.plan(labels, packs, repeat, tier, True, picks)}
+    rerun = not force and not any(j.status == "waiting" for j in base)
+    rows = []
+    for b in base:
+        z = zero[b.key]
+        if z.status != "waiting":
+            continue
+        finished, unfinished = eng.set_aside(z)
+        if b.discards:
+            rows.append(RetestRow(b, z, finished, unfinished, ["zero", "leave"], "zero"))
+        elif (force or rerun) and (finished or unfinished):
+            rows.append(RetestRow(b, z, finished, unfinished, ["zero", "continue"],
+                                  "zero" if force or b.status == "done" else "continue"))
+    return rows, rerun
+
+
+class RetestScreen(ModalScreen):
+    """Start's confirm when earlier answers would be set aside: a choice per model · pack. Dismisses
+    with {job key: "zero" | "continue" | "leave"}, or None on cancel."""
+    BINDINGS = [Binding("space", "toggle", "Toggle"), Binding("a", "all('zero')", "All from zero"),
+                Binding("c", "all('continue')", "All continue"), Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, rows, force, rerun):
+        super().__init__()
+        self.rows, self.force, self.rerun = rows, force, rerun
+
+    def compose(self) -> ComposeResult:
+        if self.force:
+            title = ("[b]Retest: choose what each pack does.[/b] Zero asks every question again; Continue keeps "
+                     "what's answered and asks the rest.")
+        elif self.rerun:
+            title = ("[b]Everything selected has results.[/b] Choose which packs to ask again (Zero) and which "
+                     "to keep (Continue).")
+        else:
+            title = ("[b]These packs can't continue:[/b] their earlier answers ran with other questions or "
+                     "settings. Start them from zero, or leave them out (put the setting back in models.toml "
+                     "to resume).")
+        with Vertical(id="dialog", classes="wide"):
+            yield Static(title)
+            yield DataTable(id="choices", cursor_type="row", zebra_stripes=True)
+            yield Static("[dim]space toggles the highlighted row · a all from zero · c all continue · "
+                         "Zero: earlier answers go to results/<model>/history/ (kept, not counted)[/dim]")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button(self.start_label(), id="start", variant="primary")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self):
+        t = self.query_one(DataTable)
+        t.add_column("Choice", key="choice", width=10)
+        t.add_column("Model", key="model")
+        t.add_column("Pack", key="pack")
+        t.add_column("Earlier answers", key="earlier")
+        t.add_column("What happens", key="happens")
+        for r in self.rows:
+            t.add_row(CHOICE_TEXT[r.choice], r.base.label, r.base.pack.label, r.earlier(), r.happens(), key=r.key)
+        self.update_start()
+        t.focus()
+
+    def redraw(self, r):
+        t = self.query_one(DataTable)
+        t.update_cell(r.key, "choice", CHOICE_TEXT[r.choice])
+        t.update_cell(r.key, "happens", r.happens(), update_width=True)
+        self.update_start()
+
+    def start_label(self):
+        n = collections.Counter(r.choice for r in self.rows)
+        parts = [f"{n[c]} {w}" for c, w in (("zero", "from zero"), ("continue", "continue"), ("leave", "left out"))
+                 if n[c]]
+        return f"Start ({', '.join(parts)})"
+
+    def update_start(self):
+        button = self.query_one("#start", Button)
+        button.label = self.start_label()
+        button.refresh(layout=True)
+
+    def action_toggle(self):
+        t = self.query_one(DataTable)
+        if not self.rows:
+            return
+        r = self.rows[t.cursor_row]
+        r.choice = r.choices[(r.choices.index(r.choice) + 1) % len(r.choices)]
+        self.redraw(r)
+
+    def action_all(self, choice):
+        for r in self.rows:
+            if choice in r.choices:
+                r.choice = choice
+                self.redraw(r)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+    @on(Button.Pressed)
+    def answer(self, event):
+        self.dismiss({r.key: r.choice for r in self.rows} if event.button.id == "start" else None)
 
 
 class ConfirmScreen(ModalScreen):
@@ -2955,7 +3095,8 @@ class EvalsApp(App):
     #reasoning { color: $text-muted; }
     StreamView { height: 1fr; border: none; padding: 0; }
     #tabs { height: 12; }
-    AddModelScreen, ConfirmScreen { align: center middle; }
+    AddModelScreen, ConfirmScreen, RetestScreen { align: center middle; }
+    RetestScreen #start { width: auto; }
     SelectionList > .selection-list--button, SelectionList > .selection-list--button-highlighted {
         color: $panel; background: $panel;
     }
@@ -3094,8 +3235,6 @@ class EvalsApp(App):
             if problem:
                 self.notify(f"Can't start {item.title}: {problem}", severity="warning", timeout=15)
                 return
-            if item.kind == "Run" and item.rerun:
-                self.notify("Everything selected had results; running it again.")
             self.add_session(screen)
             return
         run = self.active_session

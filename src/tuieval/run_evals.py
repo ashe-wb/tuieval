@@ -823,6 +823,10 @@ def main(argv=None):
             say(f"{j.key}: skipping ({j.note})")
         elif j.status == "done":
             say(f"{j.key}: done earlier ({j.passed}/{j.done} passed)")
+        elif j.fresh and any(e.set_aside(j)):
+            finished, unfinished = e.set_aside(j)
+            what = " and ".join(f"{n} {w}" for n, w in ((finished, "finished"), (unfinished, "unfinished")) if n)
+            say(f"{j.key}: retest from zero; its {what} answers move to history/")
 
     def stop(*_):
         say("stopping…", RED)

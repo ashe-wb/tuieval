@@ -427,6 +427,7 @@ class Job:
     settings: dict = dataclasses.field(default_factory=dict)  # sampling + serving identity (fingerprinted)
     merge: bool = True      # keep matching earlier results and only run what's missing
     redo: bool = False      # rerun the picked tests, keeping the pack's other answers
+    fresh: bool = False     # retest: an unfinished run's matching answers are set aside too, not resumed
     status: str = "waiting"  # waiting, loading, running, done, failed, skipped
     note: str = ""
     discards: list = dataclasses.field(default_factory=list)  # [(what, answers, why)] set aside on start
@@ -1059,6 +1060,8 @@ class Engine:
                 lines = [json.loads(l) for l in f if l.strip()]
             if lines and self._header_ok(lines[0], job):
                 keys |= {(r["test"], r["repeat"]) for r in lines[1:] if not client.server_error_row(r)}
+        if job.fresh:   # a retest asks these again
+            keys = {k for k in keys if k[0] not in self._redo_ids(job)}
         return keys & wanted
 
     def _stored(self, job):
@@ -1119,6 +1122,20 @@ class Engine:
             out.append(("unfinished", len(rows), why))
         return out
 
+    def set_aside(self, job):
+        """(finished, unfinished): earlier answers a retest of this job asks again, so they move to
+        history/ and stop counting: in its result file and its unfinished run, under the job's
+        questions and settings (only the picked tests' when it redoes those)."""
+        redo = self._redo_ids(job)
+        data = self._result(job.out_path)
+        finished = 0
+        if data and data["pack"]["fingerprint"] == job.pack.fingerprint and settings_match(data, job.settings):
+            finished = sum(r["test"] in redo for r in data["results"])
+        head, rows = self._partial_lines(job.out_path + ".partial.jsonl")
+        unfinished = sum(r["test"] in redo and not client.server_error_row(r) for r in rows) \
+            if self._header_ok(head, job) else 0
+        return finished, unfinished
+
     def superseded(self, path):
         """Is this result file about to be replaced? True when it no longer matches the current
         questions or settings and an unfinished run of the same pack does."""
@@ -1141,7 +1158,8 @@ class Engine:
         screen, the pack's certification repeats for certify). tests: {pack: [test ids]} runs just
         those tests of a pack instead of the tier's sample (unknown ids raise PackError). Earlier
         matching results are kept and only missing answers are run, unless force; force with
-        picked tests reruns those and keeps the pack's other answers."""
+        picked tests reruns those and keeps the pack's other answers. force is True, False, or the
+        keys ("label/pack") of the jobs to retest, the others resuming."""
         if tier not in TIERS:
             raise ValueError(f"tier must be one of {TIERS}")
         jobs = []
@@ -1151,9 +1169,11 @@ class Engine:
                 pack = self.packs[name]
                 reps = repeat or self.default_repeat(pack, tier)
                 picked = (tests or {}).get(name)
+                retest = force if isinstance(force, bool) else f"{label}/{name}" in force
                 job = Job(m, pack, reps, pack.pick(picked) if picked else pack.select(tier),
                           self.result_path(label, name, tier), effective_sampling(self.cfg, m), tier=tier,
-                          merge=not force or bool(picked), redo=force and bool(picked), settings=self.settings(m))
+                          merge=not retest or bool(picked), redo=retest and bool(picked), fresh=retest,
+                          settings=self.settings(m))
                 sv = self.serving(m)
                 status = self.result_status(label, name, tier)
                 job.discards = self._discards(job)
@@ -1171,11 +1191,11 @@ class Engine:
                     job.status, job.note = "skipped", f"{', '.join(missing)} not installed in tuieval's Python"
                 elif status and status.startswith("outdated"):
                     job.merge, job.redo, job.note = False, False, status.split(": ", 1)[-1] + ", rerunning"
-                    if not force:   # a rerun under the new settings already under way resumes
+                    if not retest:   # a rerun under the new settings already under way resumes
                         self._fill_progress(job)
                         if job.done:
                             job.note += f" ({job.done} of {job.total} done)"
-                elif not force:
+                elif not retest:
                     self._fill_progress(job)
                     if job.done >= job.total:
                         job.status, job.note = "done", "done earlier"
@@ -2092,11 +2112,16 @@ class Engine:
                 lines = [json.loads(l) for l in f if l.strip()]
             if lines and self._header_ok(lines[0], job):
                 new = [r for r in lines[1:] if not client.server_error_row(r)]
+                if job.fresh:   # a retest asks again what the unfinished run already answered
+                    stay = [r for r in new if r["test"] not in self._redo_ids(job)]
+                    if len(stay) < len(new):
+                        self._partial_to_history(job, keep=bool(stay))
+                        new = stay
+                        if stay:
+                            with open(partial, "w") as f:
+                                f.write("".join(json.dumps(l) + "\n" for l in [lines[0]] + stay))
             else:   # other questions or settings: kept in history/, not deleted
-                hist = os.path.join(os.path.dirname(job.out_path), "history")
-                os.makedirs(hist, exist_ok=True)
-                stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(partial)))
-                os.replace(partial, os.path.join(hist, f"{job.pack.name}-{stamp}.partial.jsonl"))
+                self._partial_to_history(job)
         if not os.path.isfile(partial):
             with contextlib.suppress(OSError):   # a fresh start: sittings of a discarded partial don't count
                 os.remove(self._sittings_path(job))
@@ -2224,10 +2249,23 @@ class Engine:
         job.note = f"{job.passed}/{job.done} passed"
         self.emit("job_done", job=job)
 
+    def _partial_to_history(self, job, keep=False):
+        """Keep an unfinished run that is set aside in history/; keep: copy it (some of its answers stay)."""
+        partial = job.out_path + ".partial.jsonl"
+        hist = os.path.join(os.path.dirname(job.out_path), "history")
+        os.makedirs(hist, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(partial)))
+        (shutil.copy2 if keep else os.replace)(partial, os.path.join(hist, f"{job.pack.name}-{stamp}.partial.jsonl"))
+
+    @staticmethod
+    def _redo_ids(job):
+        """The tests whose earlier answers a retest replaces: the picked ones, or all of them."""
+        return {t["id"] for t in job.tests} if job.redo else {t["id"] for t in job.pack.tests}
+
     def _archive(self, job, keep=False):
         """Keep a result file that is about to be replaced (rerun or outdated) in history/; keep:
-        copy it (some of its answers stay in the new file)."""
-        if job.tier == "smoke" or not os.path.isfile(job.out_path):
+        copy it (some of its answers stay in the new file). Smoke results too: nothing is deleted."""
+        if not os.path.isfile(job.out_path):
             return
         hist = os.path.join(os.path.dirname(job.out_path), "history")
         os.makedirs(hist, exist_ok=True)
