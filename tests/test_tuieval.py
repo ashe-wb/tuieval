@@ -411,6 +411,160 @@ class PickTests(unittest.TestCase):
         self.assertEqual(len(self.rows("other")), 1)     # no pick: the Screen sample (screen = 1)
 
 
+class Retest(unittest.TestCase):
+    """Retest starts from zero (an unfinished run's answers too), keeps every replaced answer in
+    history/ (smoke too), and the TUI asks per pack before anything moves."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        for name in ("apps", "other"):
+            d = os.path.join(self.ws, "packs", name)
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), f'label = "{name}"\nscreen = 4\n[certify]\nrepeat = 1\n'
+                                                '[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"), "".join(
+                f"- {{id: {t}, input: {name} question {t}, expected: 1, reference: 'ANSWER: 1', wrong: ['ANSWER: 2'], "
+                "difficulty: easy}\n" for t in "abcd"))
+        self.port = free_port()
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f'\n[servers.m]\nurl = "http://127.0.0.1:{self.port}"\n')
+        self.mock = Mock(os.path.join(self.ws, "packs"), "oracle", port=self.port)
+        tuieval(self.ws, "add", "mock", "--server", "m", "--label", "m")
+        tuieval(self.ws, "run", "--tier", "certify")
+        self.mock.stop()
+        self.mock = Mock(os.path.join(self.ws, "packs"), "wrong", port=self.port)   # retested answers fail
+
+    def tearDown(self):
+        self.mock.stop()
+        self.tmp.cleanup()
+
+    def path(self, pack, smoke=False):
+        return os.path.join(self.ws, "results", *(["smoke"] if smoke else []), "m", f"{pack}.json")
+
+    def passes(self, pack):
+        return {r["test"]: r["pass"] for r in json.loads(read(self.path(pack)))["results"]}
+
+    def unfinished(self, pack, tests):
+        """Turn a pack's finished answers for these tests into an unfinished run of the same settings."""
+        from tuieval import engine
+        e = engine.Engine(root=self.ws)
+        j = e.plan(["m"], [pack], None, "certify", False, {})[0]
+        rows = [r for r in json.loads(read(j.out_path))["results"] if r["test"] in tests]
+        write(j.out_path + ".partial.jsonl", "".join(json.dumps(l) + "\n" for l in [e._partial_header(j)] + rows))
+        os.remove(j.out_path)
+
+    def history(self, smoke=False):
+        d = os.path.join(self.ws, "results", *(["smoke"] if smoke else []), "m", "history")
+        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def test_cli_retest_starts_from_zero(self):
+        self.unfinished("apps", "ab")
+        out = tuieval(self.ws, "run", "--tier", "certify", "--packs", "apps", "--retest").stdout
+        self.assertIn("m/apps: retest from zero; its 2 unfinished answers move to history/", out)
+        self.assertNotIn("resuming", out)
+        self.assertEqual(self.passes("apps"), dict.fromkeys("abcd", False))        # all asked again
+        self.assertTrue(any(f.endswith(".partial.jsonl") for f in self.history()))
+
+    def test_picked_retest_keeps_the_rest_of_an_unfinished_run(self):
+        self.unfinished("apps", "abc")
+        tuieval(self.ws, "run", "--tier", "certify", "--tests", "apps:b", "--retest")
+        partial = self.path("apps") + ".partial.jsonl"
+        self.assertFalse(os.path.exists(partial))
+        self.assertEqual(self.passes("apps"), {"a": True, "b": False, "c": True})   # only b asked again
+        self.assertTrue(any(f.endswith(".partial.jsonl") for f in self.history()))   # a copy, b included
+
+    def test_smoke_retest_keeps_history(self):
+        tuieval(self.ws, "run", "--tier", "smoke", "--packs", "apps")
+        tuieval(self.ws, "run", "--tier", "smoke", "--packs", "apps", "--retest")
+        self.assertEqual(len(self.history(smoke=True)), 1)
+        self.assertEqual(tuieval(self.ws, "list").returncode, 0)
+
+    def tui(self, steps):
+        """Drive Setup with apps and other ticked for model m (Certify); steps runs against the screen."""
+        code = textwrap.dedent("""
+            import asyncio, json, time
+            from tuieval.tui import EvalsApp, RetestScreen, RunScreen
+            from textual.widgets import SelectionList, Checkbox
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    for p in ("apps", "other"):
+                        s.query_one("#suites", SelectionList).select(p)
+                    s.selected_models = {"m"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+                    out = {}
+            %s
+                    deadline = time.time() + 120
+                    while time.time() < deadline and (app.queue or (isinstance(app.active_session, RunScreen)
+                                                                    and app.active_session.running)):
+                        await pilot.pause(0.2)
+                    out["sessions"] = len(app.sessions)
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """) % textwrap.indent(textwrap.dedent(steps), " " * 8)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        return out
+
+    def test_tui_asks_per_pack(self):
+        self.unfinished("other", "ab")
+        out = self.tui("""
+            s.query_one("#force", Checkbox).value = True
+            await pilot.pause()
+            s.action_start()
+            await pilot.pause()
+            d = app.screen
+            out["asked"] = isinstance(d, RetestScreen)
+            out["rows"] = [(r.key, r.choice, r.finished, r.unfinished) for r in d.rows]
+            await pilot.press("down", "space")           # other: Continue
+            out["button"] = str(d.query_one("#start").label)
+            await pilot.press("escape")                  # cancel: nothing runs
+            await pilot.pause()
+            out["after_cancel"] = len(app.sessions)
+            s.action_start()
+            await pilot.pause()
+            await pilot.press("down", "space")
+            await pilot.pause()
+            app.screen.query_one("#start").press()
+            await pilot.pause()
+        """)
+        self.assertTrue(out["asked"])
+        self.assertEqual(out["rows"], [["m/apps", "zero", 4, 0], ["m/other", "zero", 0, 2]])
+        self.assertEqual(out["button"], "Start (1 from zero, 1 continue)")
+        self.assertEqual(out["after_cancel"], 0)
+        self.assertEqual(out["sessions"], 1)
+        self.assertEqual(self.passes("apps"), dict.fromkeys("abcd", False))                  # from zero
+        self.assertEqual(self.passes("other"), {"a": True, "b": True, "c": False, "d": False})   # continued
+
+    def test_tui_everything_done_or_settings_changed(self):
+        models = os.path.join(self.ws, "models.toml")
+        write(models, read(models).replace("temperature = 0.7", "temperature = 0.6"))
+        out = self.tui("""
+            s.query_one("#suites", SelectionList).deselect("other")
+            await pilot.pause()
+            s.action_start()
+            await pilot.pause()
+            d = app.screen
+            out["rows"] = [(r.key, r.choices, r.choice) for r in d.rows]
+            await pilot.press("space")                   # Leave out
+            await pilot.pause()
+            out["happens"] = d.rows[0].happens()
+            d.query_one("#start").press()
+            await pilot.pause()
+        """)
+        self.assertEqual(out["rows"], [["m/apps", ["zero", "leave"], "zero"]])
+        self.assertEqual(out["happens"], "not run now")
+        self.assertEqual(out["sessions"], 0)                       # nothing ran
+        self.assertEqual(self.passes("apps"), dict.fromkeys("abcd", True))
+
+
 class Parallel(unittest.TestCase):
     """Several models at a time (parallel_models / --parallel): each runs in its own lane on its own
     port, answers note the models they ran alongside, and the scheduler keeps the memory and
