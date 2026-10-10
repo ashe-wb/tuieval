@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: a question description or grader reason containing `[` no longer crashes the run screen.
 - Retest asks per pack before it starts: from zero, continue or leave out. It now really starts from zero, and replaced smoke results go to history/.
 - Retest: the setup checkbox "Rerun existing results" is now "Retest (ask again, even if already answered)", and `tuieval run --retest` is the same (`--force` still works).
 - `tuieval logs` follows the server log of the model running now and moves on with the run; `logs live` shows each answer as it finishes, `--list` every log.

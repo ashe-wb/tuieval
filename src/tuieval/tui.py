@@ -2239,9 +2239,10 @@ class RunScreen(Screen):
             self.req_started, self.req_tokens, self.req_first = time.time(), 0, None
             job = d["job"]
             rep_note = f" · repeat {d['repeat'] + 1}/{job.repeat}" if job.repeat > 1 else ""
-            self.current = (f"[b]{job.label}[/b] · {job.pack.label} · test {job.done + 1}/{job.total}{rep_note}"
+            self.current = (f"[b]{rich_escape(job.label)}[/b] · {rich_escape(job.pack.label)} · test "
+                            f"{job.done + 1}/{job.total}{rep_note}"
                             f"{'  [magenta]🖼 image[/magenta]' if d['has_image'] else ''}\n"
-                            f"{diff_badge(d.get('difficulty', 'unrated'))}  {d['test']}")
+                            f"{diff_badge(d.get('difficulty', 'unrated'))}  {rich_escape(d['test'])}")
         elif kind == "request_done":
             if self.watched(kind, d):
                 self.flush_streams()
@@ -2251,12 +2252,12 @@ class RunScreen(Screen):
             # follow new rows unless you're browsing an older one
             at_end = not recent.has_focus or recent.cursor_row >= recent.row_count - 1
             calls = f"  [cyan]→ {r['tool_calls'][0]['name']}()[/cyan]" if r.get("tool_calls") else ""
-            row_key = recent.add_row(mark, diff_badge(r.get("difficulty", "unrated")), r["description"][:50], job.label,
+            row_key = recent.add_row(mark, diff_badge(r.get("difficulty", "unrated")), rich_escape(r["description"][:50]), job.label,
                            str(r.get("completion_tokens") or ""),
                            (f"{r['ttft_s']:.1f}" + (" ⟲" if r.get("cached_tokens") else ""))
                            if r.get("ttft_s") is not None else "",
                            f"{r['gen_tps']:.0f}" if r.get("gen_tps") else "", f"{r['total_s']:.0f}",
-                           r["reason"][:90] + calls
+                           rich_escape(r["reason"][:90]) + calls
                            + (f"  [red]copy of repeat {r['identical_to_repeat'] + 1}[/red]"
                               if r.get("identical_to_repeat") is not None else ""))
             self.stats.append(r)
@@ -2364,7 +2365,7 @@ class RunScreen(Screen):
             self.event("[bold yellow]REUSE[/bold yellow] " + msg)
             self.notify(msg, severity="warning", timeout=20)
         elif kind == "identical_answer":
-            msg = (f"{d['label']} · {d['pack']} · {d['test']}: repeat {d['repeat'] + 1} is an exact copy of repeat "
+            msg = (f"{d['label']} · {d['pack']} · {rich_escape(d['test'])}: repeat {d['repeat'] + 1} is an exact copy of repeat "
                    f"{d['same'] + 1}, so the server may be returning cached answers rather than fresh ones.")
             self.event("[bold red]COPY[/bold red] " + msg)
             self.notify(msg, severity="error", timeout=20)
@@ -2711,7 +2712,7 @@ class ResultsScreen(Screen):
         # compare.failures lists the failed rows in order, so they line up with fail_rows
         self.fail_rows = [r for r in rows if not r["ok"]]
         for i, (model, test, reason, level) in enumerate(compare.failures(rows)):
-            f.add_row(model, diff_badge(level), test, rich_escape(reason[:130]), key=str(i))
+            f.add_row(model, diff_badge(level), rich_escape(test), rich_escape(reason[:130]), key=str(i))
         self.fill_per_question()
         self.fill_pta()
         self.fill_readiness(results_dir)

@@ -735,6 +735,56 @@ class Parallel(unittest.TestCase):
         self.assertEqual(sum(r["pass"] for r in self.results("b")["results"]), 6)
 
 
+class MarkupInText(unittest.TestCase):
+    """Brackets in a description or a grader's reason are shown as text: an unmatched
+    "[" once crashed the run screen (it swallowed the "[dim]" of the line after it)."""
+
+    def test_run_screen_shows_brackets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            d = os.path.join(ws, "packs", "br")
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), 'label = "Brackets"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"),
+                  "- {id: a, description: 'notional in [t - 10 s, t), excluding ties', input: q a, expected: 1, "
+                  "reference: 'ANSWER: 1', wrong: ['ANSWER: [2'], difficulty: hard}\n"
+                  "- {id: b, description: 'window [a, b) then [/dim] text', input: q b, expected: 1, "
+                  "reference: 'ANSWER: 1', wrong: ['ANSWER: [2'], difficulty: hard}\n")
+            mock = [sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                    os.path.join(ws, "packs"), "--model", "{served_name}", "--mode", "wrong", "--delay", "0.2"]
+            with open(os.path.join(ws, "models.toml"), "a") as f:
+                f.write(f'\n[servers.mk]\ncmd = {json.dumps(mock)}\nport = {free_port()}\n'
+                        '\n[[models]]\nlabel = "m"\nserver = "mk"\nmodel = "m"\n')
+            code = textwrap.dedent("""
+                import asyncio, json, time
+                from tuieval.tui import EvalsApp, RunScreen
+                from textual.widgets import SelectionList
+                async def go():
+                    app = EvalsApp({})
+                    async with app.run_test(size=(160, 50)) as pilot:
+                        await pilot.pause()
+                        s = app.screen
+                        s.query_one("#suites", SelectionList).select("br")
+                        s.selected_models = {"m"}
+                        s.refresh_models()
+                        s.query_one("#tier-certify").value = True
+                        await pilot.pause()
+                        s.action_start()
+                        deadline = time.time() + 240
+                        while time.time() < deadline:
+                            await pilot.pause(0.2)
+                            if isinstance(app.screen, RunScreen) and not app.screen.running:
+                                break
+                        print(json.dumps([(j.key, j.status, j.done) for j in app.screen.jobs]))
+                asyncio.run(go())
+            """)
+            p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=480,
+                               env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""))
+            self.assertNotIn("MarkupError", p.stderr + p.stdout)
+            self.assertEqual(json.loads(p.stdout.strip().splitlines()[-1]), [["m/br", "done", 2]], p.stderr[-2000:])
+
+
 class AddToRun(unittest.TestCase):
     """More evals while a run is going: added to it (they run after its other jobs) or queued after it."""
 
