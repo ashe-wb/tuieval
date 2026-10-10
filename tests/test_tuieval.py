@@ -1007,6 +1007,10 @@ class AddToRun(unittest.TestCase):
             import asyncio, json, time
             from tuieval.tui import EvalsApp, RunScreen, SetupScreen, ChoiceScreen
             from textual.widgets import SelectionList
+            async def setup(app, pilot):   # a dialog closing can take a moment on a slow machine
+                deadline = time.time() + 30
+                while not isinstance(app.screen, SetupScreen) and time.time() < deadline:
+                    await pilot.pause(0.1)
             async def go():
                 app = EvalsApp({})
                 async with app.run_test(size=(160, 50)) as pilot:
@@ -1033,7 +1037,7 @@ class AddToRun(unittest.TestCase):
                     await pilot.pause()
                     asked = isinstance(app.screen, ChoiceScreen)
                     app.screen.dismiss("add")
-                    await pilot.pause()
+                    await setup(app, pilot)
                     app.screen.query_one("#suites", SelectionList).deselect("apps")
                     app.screen.query_one("#suites", SelectionList).select("other")
                     app.screen.selected_models = {"a"}
@@ -1041,7 +1045,7 @@ class AddToRun(unittest.TestCase):
                     app.screen.action_start()
                     await pilot.pause()
                     app.screen.dismiss("queue")
-                    await pilot.pause()
+                    await setup(app, pilot)
                     app.screen.query_one("#tier-smoke").value = True    # another tier can't join: queued
                     await pilot.pause()
                     app.screen.action_start()
@@ -1122,10 +1126,10 @@ class AddToRun(unittest.TestCase):
                     if isinstance(s, ChoiceScreen):
                         s.dismiss("queue")
                     await pilot.pause()
-                    deadline = time.time() + 300
+                    deadline = time.time() + 300   # the queued runs start one after another: wait for all three
                     while time.time() < deadline:
                         await pilot.pause(0.2)
-                        if not run.running and not app.queue and not app.active_session:
+                        if len(app.sessions) == 3 and not app.queue and not any(x.running for x in app.sessions):
                             break
                     out["sessions"] = [[(j.key, j.status) for j in x.jobs] for x in app.sessions]
                     print(json.dumps(out))
