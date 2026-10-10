@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Early stop: `tuieval run --stop-early`, **Stop a pack once it fails** in Setup, or `stop_early = true` in a pack.toml ends a pack once its FAIL is certain (a critical failure, or an accuracy or truncation bar out of reach), asking first the questions models fail most. Verdicts also say FAIL when a partial run can no longer pass.
 - `tuieval compare --reference <model>`: every other model paired against one on the questions both answered, per pack and overall: the difference with a 95% CI, better/tie/worse, critical failures and tokens vs the reference. `--packs` limits any compare to some packs.
 - Fix: a question description or grader reason containing `[` no longer crashes the run screen.
 - Retest asks per pack before it starts: from zero, continue or leave out. It now really starts from zero, and replaced smoke results go to history/.
