@@ -5,6 +5,8 @@ Usage:
     tuieval compare --speed                  # speed & tokens table (TTFT, tok/s, tokens, memory)
     tuieval compare --machine m3max-64gb     # speed on another machine (measured there, or projected)
     tuieval compare --pairwise --failures    # is each difference real? which tests failed?
+    tuieval compare --reference MODEL        # every model paired against one: better, tie or worse
+    tuieval compare --packs coding,rag       # only these packs (works with every option)
     tuieval compare results/some-model/*.json    # specific files
 """
 import collections
@@ -409,6 +411,49 @@ def pairwise(rows, rng=None):
     return out
 
 
+def vs_reference(rows, ref, rng=None):
+    """Every other model against one reference model, paired on the questions both answered:
+    [{model, pack ("all" = every pack together), n, diff, lo, hi, verdict, crit, ref_crit, tokens}].
+
+    diff is the mean over shared questions of (pass rate - the reference's pass rate), with a 95%
+    bootstrap CI; verdict is "better" or "worse" when the CI excludes 0, else "tie". crit/ref_crit
+    count critical failures on those questions; tokens is the median of per-question token ratios
+    (median tokens over repeats, model / reference), so 0.5 means half the tokens."""
+    rng = rng or random.Random(0)
+    by = collections.defaultdict(lambda: collections.defaultdict(list))   # model -> test -> rows
+    suite = {}
+    for r in rows:
+        by[r["model"]][r["test"]].append(r)
+        suite[r["test"]] = r["suite"]
+    if ref not in by:
+        return []
+    out = []
+    for m in sorted(set(by) - {ref}):
+        shared = sorted(set(by[m]) & set(by[ref]))
+        for pack in sorted({suite[t] for t in shared}) + ["all"]:
+            tests = [t for t in shared if pack in ("all", suite[t])]
+            if not tests:
+                continue
+            rate = lambda model, t: statistics.fmean(r["ok"] for r in by[model][t])
+            diffs = [rate(m, t) - rate(ref, t) for t in tests]
+            lo, hi = bootstrap_ci(diffs, rng)
+            crit = lambda model: sum(r.get("severity") == "critical" for t in tests for r in by[model][t])
+            ratios = [a / b for t in tests
+                      if (a := median(r["tokens"] for r in by[m][t])) and (b := median(r["tokens"] for r in by[ref][t]))]
+            out.append({"model": m, "pack": pack, "n": len(tests), "diff": statistics.fmean(diffs), "lo": lo, "hi": hi,
+                        "verdict": "better" if lo > 0 else "worse" if hi < 0 else "tie",
+                        "crit": crit(m), "ref_crit": crit(ref), "tokens": median(ratios)})
+    return out
+
+
+def vs_reference_table(results, ref):
+    header = ["model", "pack", "questions", f"vs {ref}", "95% CI", "verdict", "critical (vs ref)", "tokens vs ref"]
+    table = [[x["model"], x["pack"], x["n"], f"{100 * x['diff']:+.1f} pts", f"{100 * x['lo']:+.1f} to {100 * x['hi']:+.1f}",
+              x["verdict"].upper() if x["pack"] == "all" else x["verdict"], f"{x['crit']} ({x['ref_crit']})",
+              _fmt(x["tokens"], ".2f") + ("×" if x["tokens"] is not None else "")] for x in results]
+    return header, table
+
+
 def failures(rows):
     return [(r["model"], r.get("name", r["test"]), ("TRUNCATED " if r["truncated"] and not r["reason"].startswith("TRUNCATED")
                                                     else "") + r["reason"], r.get("difficulty", "unrated"))
@@ -499,10 +544,22 @@ def main(argv):
     flags = {a for a in argv if a.startswith("--")}
     log_dir = argv[argv.index("--logs") + 1] if "--logs" in argv else None
     machine_arg = argv[argv.index("--machine") + 1] if "--machine" in argv else None
-    paths = [a for a in argv if not a.startswith("--") and a not in (log_dir, machine_arg)] or default_paths()
+    ref = argv[argv.index("--reference") + 1] if "--reference" in argv else None
+    only_packs = argv[argv.index("--packs") + 1].split(",") if "--packs" in argv else None
+    values = (log_dir, machine_arg, ref, ",".join(only_packs) if only_packs else None)
+    paths = [a for a in argv if not a.startswith("--") and a not in values] or default_paths()
+    if only_packs:
+        paths = [p for p in paths if os.path.basename(p)[:-len(".json")] in only_packs]
     if not paths:
         sys.exit(__doc__ + "\n(no results found in results/<model>/<pack>.json: run some evals first)")
     rows, infos = load(paths)
+    if ref:
+        if ref not in {r["model"] for r in rows}:
+            sys.exit(f"no results for reference model {ref!r}" + (f" in {', '.join(only_packs)}" if only_packs else ""))
+        print(f"Paired against {ref} on the questions both answered (pass rate per question, repeats averaged;"
+              "\n95% bootstrap CI over questions; BETTER/WORSE only when the CI excludes 0):")
+        print_table(*vs_reference_table(vs_reference(rows, ref, random.Random(0)), ref))
+        return
     rng = random.Random(0)
     from . import packs as packs_mod
     packs_mod.load_packs(errors=[])   # loads the workspace's graders, and their Scorecard columns

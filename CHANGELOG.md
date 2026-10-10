@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `tuieval compare --reference <model>`: every other model paired against one on the questions both answered, per pack and overall: the difference with a 95% CI, better/tie/worse, critical failures and tokens vs the reference. `--packs` limits any compare to some packs.
 - Fix: a question description or grader reason containing `[` no longer crashes the run screen.
 - Retest asks per pack before it starts: from zero, continue or leave out. It now really starts from zero, and replaced smoke results go to history/.
 - Retest: the setup checkbox "Rerun existing results" is now "Retest (ask again, even if already answered)", and `tuieval run --retest` is the same (`--force` still works).

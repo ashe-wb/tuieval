@@ -13,7 +13,7 @@ Start here
   tuieval verdict             which model is ready for what, and what to run next
 
 Day to day
-  tuieval compare [...]       scorecards (--speed, --pairwise, --failures)
+  tuieval compare [...]       scorecards (--speed, --pairwise, --reference M, --failures)
   tuieval pta                 the PTA index: parsimony (tokens), time and accuracy per model, as bars
   tuieval report              the verdicts with their evidence, as a markdown file
   tuieval history             every verdict change, newest first

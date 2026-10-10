@@ -209,6 +209,29 @@ class Units(unittest.TestCase):
         self.assertEqual(compare.settings_notes(infos),
                          ["Settings differ: effort medium on 4 models; penalty 1.5 on j."])
 
+    def test_vs_reference_pairs_on_shared_questions(self):
+        from tuieval import compare
+        row = lambda m, pack, t, ok, tokens=100, sev=None, rep=0: {
+            "model": m, "suite": pack, "test": f"{pack}: {t}", "ok": ok, "tokens": tokens, "severity": sev, "repeat": rep}
+        rows = [row("ref", "a", f"q{i}", i < 10) for i in range(20)]                       # ref: 10/20 on a
+        rows += [row("good", "a", f"q{i}", True, tokens=50) for i in range(20)]            # good: 20/20, half the tokens
+        rows += [row("same", "a", f"q{i}", i < 10) for i in range(20)]
+        rows += [row("bad", "a", f"q{i}", False, sev="critical" if i == 0 else None) for i in range(20)]
+        rows += [row("ref", "b", "x", True), row("good", "b", "x", False), row("good", "b", "x", True, rep=1)]
+        rows += [row("good", "b", "only-good", True)]                                      # not shared: ignored
+        res = {(x["model"], x["pack"]): x for x in compare.vs_reference(rows, "ref")}
+        self.assertEqual(res["good", "a"]["verdict"], "better")
+        self.assertAlmostEqual(res["good", "a"]["diff"], 0.5)
+        self.assertEqual(res["good", "a"]["tokens"], 0.5)
+        self.assertEqual(res["same", "a"]["verdict"], "tie")
+        self.assertEqual((res["bad", "a"]["verdict"], res["bad", "a"]["crit"], res["bad", "a"]["ref_crit"]), ("worse", 1, 0))
+        self.assertEqual(res["good", "b"]["n"], 1)
+        self.assertAlmostEqual(res["good", "b"]["diff"], -0.5)                             # repeats averaged
+        self.assertEqual(res["good", "all"]["n"], 21)
+        self.assertEqual(compare.vs_reference(rows, "nobody"), [])
+        header, table = compare.vs_reference_table([res["good", "all"]], "ref")
+        self.assertEqual(table[0][5], "BETTER")
+
     def test_eta_goes_pack_by_pack(self):
         from tuieval.tui import RunScreen
         job = lambda key, label, total, done=0, status="waiting": types.SimpleNamespace(
