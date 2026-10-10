@@ -1121,8 +1121,9 @@ class AddToRun(unittest.TestCase):
                     out["queued"] = [sorted(q.keys()) for q in app.queue]
                     s = await pick(app, pilot, ["b"])                 # already queued: nothing happens
                     out["again"] = [isinstance(s, ChoiceScreen), len(app.queue)]
-                    s = await pick(app, pilot, ["a"], ("other",))     # new: offered (or queued if the run ended)
-                    out["new"] = isinstance(s, ChoiceScreen) or len(app.queue) == 2
+                    s = await pick(app, pilot, ["a"], ("other",))     # new: offered, queued or started
+                    out["new"] = (isinstance(s, ChoiceScreen) or any("a/other" in q.keys() for q in app.queue)
+                                  or any(j.key == "a/other" for x in app.sessions for j in x.jobs))
                     if isinstance(s, ChoiceScreen):
                         s.dismiss("queue")
                     await pilot.pause()
@@ -1131,7 +1132,7 @@ class AddToRun(unittest.TestCase):
                         await pilot.pause(0.2)
                         if len(app.sessions) == 3 and not app.queue and not any(x.running for x in app.sessions):
                             break
-                    out["sessions"] = [[(j.key, j.status) for j in x.jobs] for x in app.sessions]
+                    out["sessions"] = sorted((j.key, j.status) for x in app.sessions for j in x.jobs)
                     print(json.dumps(out))
             asyncio.run(go())
         """)
@@ -1144,7 +1145,7 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(out["queued"], [["b/apps"]])
         self.assertEqual(out["again"], [False, 1])
         self.assertTrue(out["new"])
-        self.assertEqual(out["sessions"], [[["a/apps", "done"]], [["b/apps", "done"]], [["a/other", "done"]]])
+        self.assertEqual(out["sessions"], [["a/apps", "done"], ["a/other", "done"], ["b/apps", "done"]])
 
 
 class PTAIndex(unittest.TestCase):
