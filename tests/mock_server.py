@@ -9,6 +9,8 @@ fixed   always "ANSWER: 42"
 unavailable  HTTP 404 "No endpoints found" for every chat request
 
 Streams like llama.cpp: reasoning_content then content deltas, usage and timings at the end.
+An answer longer than the request's max_tokens (one token per word) is cut off with finish
+"length". --max-output N also serves an OpenRouter-style endpoints list with that output limit.
 """
 import argparse
 import json
@@ -47,7 +49,7 @@ def reply_for(test, mode):
 
 
 class Handler(BaseHTTPRequestHandler):
-    answers, mode, model, delay = {}, "oracle", "mock", 0.0
+    answers, mode, model, delay, max_output = {}, "oracle", "mock", 0.0, None
 
     def log_message(self, *a):
         pass
@@ -63,6 +65,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.rstrip("/") in ("/v1/models", "/models"):
             return self._json({"data": [{"id": self.model}]})
+        if self.max_output and self.path.rstrip("/").endswith("/endpoints"):
+            return self._json({"data": {"endpoints": [{"tag": "mock/fp16", "quantization": "fp16", "status": 0,
+                                                       "max_completion_tokens": self.max_output}]}})
         if self.path == "/health":
             return self._json({"status": "ok", "model": self.model})
         self._json({"error": "not found"}, 404)
@@ -82,6 +87,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.mode == "unavailable":   # like OpenRouter with no provider serving the model
             return self._json({"error": {"message": f"No endpoints found for {self.model}.", "code": 404}}, 404)
         text, calls = reply_for(test, self.mode)
+        finish = "tool_calls" if calls else "stop"
+        if req.get("max_tokens") and len(text.split()) > req["max_tokens"]:
+            text, finish = " ".join(text.split()[:req["max_tokens"]]), "length"
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -98,7 +106,7 @@ class Handler(BaseHTTPRequestHandler):
             send({"choices": [{"delta": {"tool_calls": [{"index": i, "function": {
                 "name": c["name"], "arguments": json.dumps(c.get("arguments") or {})}}]}}]})
         words = max(1, len(text.split()) + 3)
-        send({"choices": [{"delta": {}, "finish_reason": "tool_calls" if calls else "stop"}],
+        send({"choices": [{"delta": {}, "finish_reason": finish}],
               "usage": {"prompt_tokens": len(str(content).split()), "completion_tokens": words},
               "timings": {"predicted_n": words, "predicted_per_second": 50.0, "prompt_n": 10,
                           "prompt_per_second": 500.0, "cache_n": 0}})
@@ -119,8 +127,10 @@ def main(argv=None):
     p.add_argument("--mode", choices=("oracle", "wrong", "fixed", "unavailable"), default="oracle")
     p.add_argument("--model", default="mock")
     p.add_argument("--delay", type=float, default=0.0, help="seconds each answer takes")
+    p.add_argument("--max-output", type=int)
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
     Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
+    Handler.max_output = a.max_output
     srv = Server(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:

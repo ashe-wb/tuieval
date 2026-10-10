@@ -50,6 +50,7 @@ class Pack:
     screen: int            # tests in a screening run
     certify_repeat: int    # repeats in a certification run (0 = models.toml default)
     stop_early: bool = False   # stop the pack once its FAIL is certain (pack.toml stop_early)
+    max_tokens: int = 0    # output budget for this pack's answers (0 = [sampling] max_tokens)
 
     @property
     def modules(self):
@@ -135,12 +136,15 @@ NOT_FINGERPRINTED = {"reference", "wrong", "description", "category", "critical"
 DIFFICULTIES = ("easy", "medium", "hard")
 
 
-def _fingerprint(system, tools, grader, tests, images):
-    """Hash of what the model sees and what decides pass/fail."""
+def _fingerprint(system, tools, grader, tests, images, max_tokens=0):
+    """Hash of what the model sees and what decides pass/fail. A pack's own max_tokens counts
+    (it decides what gets cut off); packs without one keep the fingerprint they always had."""
     h = hashlib.sha256()
-    h.update(json.dumps({"system": system, "tools": tools, "grader": grader,
-                         "tests": [{k: v for k, v in t.items() if k not in NOT_FINGERPRINTED} for t in tests]},
-                        sort_keys=True, default=str).encode())
+    what = {"system": system, "tools": tools, "grader": grader,
+            "tests": [{k: v for k, v in t.items() if k not in NOT_FINGERPRINTED} for t in tests]}
+    if max_tokens:
+        what["max_tokens"] = max_tokens
+    h.update(json.dumps(what, sort_keys=True, default=str).encode())
     for path in sorted(images):
         with open(path, "rb") as f:
             h.update(f.read())
@@ -217,13 +221,16 @@ def load_pack(path):
     if tools and "tools" not in needs:
         needs = list(needs) + ["tools"]
     gate = {"min_accuracy": 0.8, **meta.get("gate", {})}
+    max_tokens = meta.get("max_tokens", 0)
+    if "max_tokens" in meta and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1):
+        raise PackError(f"{meta_path}: max_tokens must be a whole number above 0, not {max_tokens!r}")
     return Pack(name=name, path=path, label=meta.get("label", name), group=meta.get("group", "Other"),
                 description=meta.get("description", ""), grader=meta.get("grader", "answer"),
                 system=system, needs=list(needs), tools=tools, tests=tests,
-                fingerprint=_fingerprint(system, tools, meta.get("grader", "answer"), tests, images),
+                fingerprint=_fingerprint(system, tools, meta.get("grader", "answer"), tests, images, max_tokens),
                 gate=gate, screen=int(meta.get("screen", 10)),
                 certify_repeat=int(meta.get("certify", {}).get("repeat", 0)),
-                stop_early=bool(meta.get("stop_early", False)))
+                stop_early=bool(meta.get("stop_early", False)), max_tokens=max_tokens)
 
 
 def load_packs(packs_dir=None, errors=None):
