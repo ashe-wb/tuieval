@@ -1550,6 +1550,13 @@ def run_title(tier, models, packs):
             f"{', '.join(packs) if len(packs) <= 2 else f'{len(packs)} packs'}")
 
 
+def short_keys(keys, n=4):
+    """A few "model/pack" pairs as "model · pack", the rest counted."""
+    keys = sorted(keys)
+    shown = ", ".join(k.replace("/", " · ", 1) for k in keys[:n])
+    return rich_escape(shown + (f" and {len(keys) - n} more" if len(keys) > n else ""))
+
+
 class QueuedRun:
     """A run waiting its turn. It's planned again when it starts, so it picks up what the runs before
     it finished; it never sets aside answers that weren't confirmed when it was queued. retest: the
@@ -1557,12 +1564,28 @@ class QueuedRun:
     kind = "Run"
 
     def __init__(self, sel, retest, leave, accepted, eng):
-        self.sel, self.retest, self.leave, self.accepted = sel, retest, leave, accepted
+        self.sel, self.retest, self.leave, self.accepted = sel, retest, set(leave), accepted
         self.queued = time.time()
+        self.replan(eng)
+
+    def replan(self, eng):
         self.jobs, self.problem = self.plan(eng)
         jobs = self.jobs or []
-        self.title = run_title(sel["tier"], {j.label for j in jobs}, {j.pack.label for j in jobs})
+        self.title = run_title(self.sel["tier"], {j.label for j in jobs}, {j.pack.label for j in jobs})
         self.est = eng.estimate_seconds(jobs)[0]
+
+    def keys(self):
+        """The "model/pack" pairs it covers."""
+        return {f"{m}/{p}" for m in self.sel["models"] for p in self.sel["packs"]} - self.leave
+
+    def deliberate(self):
+        """Retest or picked questions: asked again on purpose, never treated as a duplicate."""
+        return bool(self.sel.get("force") or self.sel.get("tests"))
+
+    def drop(self, keys, eng):
+        """Leave these pairs out (they're already running or queued)."""
+        self.leave |= set(keys)
+        self.replan(eng)
 
     def tests(self, eng):
         """The picked tests that are still in their packs (a pack edited while queued drops the rest)."""
@@ -3236,8 +3259,32 @@ class EvalsApp(App):
         what = s.live_text() if s else "The last run is still stopping its server"
         return what + (f" (+{len(self.queue)} queued)" if self.queue else "")
 
+    def taken(self, tier):
+        """The "model/pack" pairs of this tier already in the run going (not finished) or in the queue."""
+        out = set()
+        run = self.active_session
+        if isinstance(run, RunScreen) and run.running and run.jobs and run.jobs[0].tier == tier:
+            out |= {j.key for j in run.jobs if j.status in ("waiting", "loading", "running")}
+        for q in self.queue:
+            if q.kind == "Run" and q.sel["tier"] == tier:
+                out |= q.keys()
+        return out
+
     # -- the queue: Start or t while something runs adds to it; each item starts when the one before ends
     def start_or_queue(self, item):
+        skipped = set()
+        if self.is_busy() and item.kind == "Run" and not item.deliberate():
+            mine = item.keys()
+            skipped = mine & self.taken(item.sel["tier"])
+            if skipped == mine:
+                self.notify(f"Already running or queued, so nothing was added: {short_keys(skipped)}.", timeout=10)
+                return
+            if skipped:
+                item.drop(skipped, self.engine)
+                if not item.jobs:
+                    self.notify(f"Nothing new to run: {item.problem}. Already running or queued: "
+                                f"{short_keys(skipped)}.", timeout=10)
+                    return
         if not self.is_busy():
             screen, problem = item.make(self.engine)
             if problem:
@@ -3256,11 +3303,11 @@ class EvalsApp(App):
                     self.add_to_run(run, item)
                 elif choice == "queue":
                     self.enqueue(item)
-            what = f"{', '.join(item.sel['models'][:4])}{' …' if len(item.sel['models']) > 4 else ''} · " \
-                   f"{', '.join(item.sel['packs'][:4])}{' …' if len(item.sel['packs']) > 4 else ''}"
+            what = short_keys(item.keys(), 6)
+            skip = (f"\n\nLeft out, already running or queued: {short_keys(skipped)}." if skipped else "")
             self.push_screen(ChoiceScreen(
                 f"A run is going: {run.live_text()}.\n\nAdd {what} to it? Its models run after the ones "
-                "already in it.\nOr queue it as a separate run that starts when this one ends.",
+                f"already in it.\nOr queue it as a separate run that starts when this one ends.{skip}",
                 [("add", "Add to this run", "success"), ("queue", f"Queue it as #{len(self.queue) + 1}", "primary"),
                  ("keep", "Cancel", "default")]), picked)
             return
@@ -3270,6 +3317,9 @@ class EvalsApp(App):
         jobs, problem = item.plan(self.engine)
         added, why = self.engine.add_jobs(jobs) if jobs else ([], problem)
         if not added:
+            if why and why.startswith("everything picked is already in the run"):
+                self.notify(f"Not added: {why}.", timeout=10)   # queueing it again would only duplicate it
+                return
             self.notify(f"Not added: {why}. Queued it instead.", severity="warning", timeout=10)
             self.enqueue(item)
             return
@@ -3281,6 +3331,8 @@ class EvalsApp(App):
     def enqueue(self, item):
         ahead = self.busy_text()
         self.queue.append(item)
+        if not self.active_session:   # the last run already ended (its server may still be stopping):
+            self.set_timer(0.3, self.start_next)   # nothing else would start the queue
         self.notify(f"Queued #{len(self.queue)}: {item.title}. It starts by itself after: {ahead}. "
                     "w shows the queue.", timeout=10)
         self.refresh_live()

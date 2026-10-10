@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Start while a run is going skips models and packs already running or queued (it says which); picking only those adds nothing. Retest and picked questions still go through.
+- Fix: something queued just as a run ended (while its server was stopping) now starts instead of waiting forever.
 - Hosted models (OpenRouter and other APIs) run beside local ones instead of waiting for a slot: up to `parallel_hosted` at a time (default 4, `--parallel-hosted N`). Local models can be added to a hosted-only run.
 - Early stop: `tuieval run --stop-early`, **Stop a pack once it fails** in Setup, or `stop_early = true` in a pack.toml ends a pack once its FAIL is certain (a critical failure, or an accuracy or truncation bar out of reach), asking first the questions models fail most. Verdicts also say FAIL when a partial run can no longer pass.
 - `tuieval compare --reference <model>`: every other model paired against one on the questions both answered, per pack and overall: the difference with a 95% CI, better/tie/worse, critical failures and tokens vs the reference. `--packs` limits any compare to some packs.

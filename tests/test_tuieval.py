@@ -1007,6 +1007,10 @@ class AddToRun(unittest.TestCase):
             import asyncio, json, time
             from tuieval.tui import EvalsApp, RunScreen, SetupScreen, ChoiceScreen
             from textual.widgets import SelectionList
+            async def setup(app, pilot):   # a dialog closing can take a moment on a slow machine
+                deadline = time.time() + 30
+                while not isinstance(app.screen, SetupScreen) and time.time() < deadline:
+                    await pilot.pause(0.1)
             async def go():
                 app = EvalsApp({})
                 async with app.run_test(size=(160, 50)) as pilot:
@@ -1033,7 +1037,7 @@ class AddToRun(unittest.TestCase):
                     await pilot.pause()
                     asked = isinstance(app.screen, ChoiceScreen)
                     app.screen.dismiss("add")
-                    await pilot.pause()
+                    await setup(app, pilot)
                     app.screen.query_one("#suites", SelectionList).deselect("apps")
                     app.screen.query_one("#suites", SelectionList).select("other")
                     app.screen.selected_models = {"a"}
@@ -1041,7 +1045,7 @@ class AddToRun(unittest.TestCase):
                     app.screen.action_start()
                     await pilot.pause()
                     app.screen.dismiss("queue")
-                    await pilot.pause()
+                    await setup(app, pilot)
                     app.screen.query_one("#tier-smoke").value = True    # another tier can't join: queued
                     await pilot.pause()
                     app.screen.action_start()
@@ -1072,6 +1076,76 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(out["total"], 8)
         self.assertEqual(out["sessions"], 3)
         self.assertEqual(out["second"], [["a/other", "done"]])                  # queued: its own run after
+
+
+    def test_tui_never_queues_the_same_thing_twice(self):
+        """Start while a run is going never adds or queues a model and pack already running or queued."""
+        code = textwrap.dedent("""
+            import asyncio, json, time
+            from tuieval.tui import EvalsApp, RunScreen, SetupScreen, ChoiceScreen
+            from textual.widgets import SelectionList
+            async def pick(app, pilot, models, packs=("apps",)):
+                deadline = time.time() + 30
+                while not isinstance(app.screen, SetupScreen) and time.time() < deadline:
+                    await pilot.pause(0.1)
+                s = app.screen
+                for p in ("apps", "other"):
+                    (s.query_one("#suites", SelectionList).select if p in packs
+                     else s.query_one("#suites", SelectionList).deselect)(p)
+                s.selected_models = set(models)
+                s.refresh_models()
+                await pilot.pause()
+                s.action_start()
+                await pilot.pause()
+                return app.screen
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    app.screen.query_one("#tier-certify").value = True
+                    await pick(app, pilot, ["a"])
+                    deadline = time.time() + 180
+                    while time.time() < deadline:
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and app.screen.counts()[0]:
+                            break
+                    run = app.screen
+                    await pilot.press("n")
+                    out = {}
+                    s = await pick(app, pilot, ["a"])                 # the same again: nothing happens
+                    out["same"] = [isinstance(s, ChoiceScreen), len(app.queue)]
+                    s = await pick(app, pilot, ["a", "b"])            # partly new: only b is offered
+                    out["partly"] = [isinstance(s, ChoiceScreen), "Left out" in str(getattr(s, "question", ""))]
+                    s.dismiss("queue")
+                    await pilot.pause()
+                    out["queued"] = [sorted(q.keys()) for q in app.queue]
+                    s = await pick(app, pilot, ["b"])                 # already queued: nothing happens
+                    out["again"] = [isinstance(s, ChoiceScreen), len(app.queue)]
+                    s = await pick(app, pilot, ["a"], ("other",))     # new: offered, queued or started
+                    out["new"] = (isinstance(s, ChoiceScreen) or any("a/other" in q.keys() for q in app.queue)
+                                  or any(j.key == "a/other" for x in app.sessions for j in x.jobs))
+                    if isinstance(s, ChoiceScreen):
+                        s.dismiss("queue")
+                    await pilot.pause()
+                    deadline = time.time() + 300   # the queued runs start one after another: wait for all three
+                    while time.time() < deadline:
+                        await pilot.pause(0.2)
+                        if len(app.sessions) == 3 and not app.queue and not any(x.running for x in app.sessions):
+                            break
+                    out["sessions"] = sorted((j.key, j.status) for x in app.sessions for j in x.jobs)
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertEqual(out["same"], [False, 0])
+        self.assertEqual(out["partly"], [True, True])
+        self.assertEqual(out["queued"], [["b/apps"]])
+        self.assertEqual(out["again"], [False, 1])
+        self.assertTrue(out["new"])
+        self.assertEqual(out["sessions"], [["a/apps", "done"], ["a/other", "done"], ["b/apps", "done"]])
 
 
 class PTAIndex(unittest.TestCase):
