@@ -2206,6 +2206,7 @@ class RunScreen(Screen):
         yield Footer()
 
     def on_mount(self):
+        self._queue_follow, self._queue_y = True, None   # follow_queue
         q = self.query_one("#queue", DataTable)
         for label, key in (("Model", "model"), ("Eval", "suite"), ("Status", "status"), ("Progress", "progress"),
                            ("✓", "pass"), ("✗", "fail"), ("Time", "time"), ("Note", "note")):
@@ -2523,6 +2524,25 @@ class RunScreen(Screen):
                 self.update_job(j)
         self.update_overall()
         self.refresh_current()
+        self.follow_queue()
+
+    def follow_queue(self):
+        """Keep the running model's row in view in the queue, unless you scrolled the queue yourself;
+        scrolling back to where the running row shows picks the following up again."""
+        q = self.query_one("#queue", DataTable)
+        keys = [r.key.value for r in q.ordered_rows]
+        now = next((i for i, k in enumerate(keys)
+                    if any(j.key == k and j.status in ("loading", "running") for j in self.jobs)), None)
+        if now is None:
+            return
+        if self._queue_y is not None and q.scroll_y != self._queue_y:   # you scrolled since we last did
+            seen = q.scroll_y <= now < q.scroll_y + max(1, q.scrollable_content_region.height - 1)
+            self._queue_follow = seen
+        if self._queue_follow:
+            q.scroll_to(y=max(0, now - 1), animate=False)
+            self._queue_y = max(0, min(now - 1, q.max_scroll_y))
+        else:
+            self._queue_y = q.scroll_y
 
     # -- actions
     def action_skip_model(self):

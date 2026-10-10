@@ -1148,6 +1148,71 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(out["sessions"], [["a/apps", "done"], ["a/other", "done"], ["b/apps", "done"]])
 
 
+class QueueFollows(unittest.TestCase):
+    """The run screen's queue keeps the running model in view unless you scroll it yourself."""
+
+    def test_queue_follows_the_running_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            for i in range(15):
+                d = os.path.join(ws, "packs", f"p{i:02}")
+                os.makedirs(d)
+                write(os.path.join(d, "pack.toml"), f'label = "p{i:02}"\norder = {i}\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+                write(os.path.join(d, "tests.yaml"), f"- {{id: a, input: q{i} a, expected: 1, reference: 'ANSWER: 1', difficulty: easy}}\n"
+                                                     f"- {{id: b, input: q{i} b, expected: 1, reference: 'ANSWER: 1', difficulty: easy}}\n")
+            mock = [sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                    os.path.join(ws, "packs"), "--model", "{served_name}", "--delay", "0.4"]
+            with open(os.path.join(ws, "models.toml"), "a") as f:
+                f.write(f'\n[servers.mk]\ncmd = {json.dumps(mock)}\nport = {free_port()}\n'
+                        '\n[[models]]\nlabel = "m"\nserver = "mk"\nmodel = "m"\n')
+            code = textwrap.dedent("""
+                import asyncio, json, time
+                from tuieval.tui import EvalsApp, RunScreen
+                from textual.widgets import SelectionList, DataTable
+                async def go():
+                    app = EvalsApp({})
+                    async with app.run_test(size=(160, 50)) as pilot:
+                        await pilot.pause()
+                        s = app.screen
+                        for i in range(15):
+                            s.query_one("#suites", SelectionList).select(f"p{i:02}")
+                        s.selected_models = {"m"}
+                        s.refresh_models()
+                        s.query_one("#tier-certify").value = True
+                        await pilot.pause()
+                        s.action_start()
+                        def at(run, n):
+                            return sum(j.status == "done" for j in run.jobs) >= n
+                        deadline = time.time() + 240
+                        while time.time() < deadline:
+                            await pilot.pause(0.2)
+                            if isinstance(app.screen, RunScreen) and at(app.screen, 12):
+                                break
+                        run = app.screen
+                        q = run.query_one("#queue", DataTable)
+                        await pilot.pause(1.5)
+                        followed = q.scroll_y
+                        q.scroll_to(y=0, animate=False)                  # you scroll up
+                        await pilot.pause(2.5)
+                        stayed = q.scroll_y
+                        q.scroll_to(y=q.max_scroll_y, animate=False)     # back to where it runs
+                        await pilot.pause(2.5)
+                        again = q.scroll_y
+                        while run.running and time.time() < deadline:
+                            await pilot.pause(0.2)
+                        print(json.dumps({"followed": followed, "stayed": stayed, "again": again}))
+                asyncio.run(go())
+            """)
+            p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=480,
+                               env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""))
+            out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+            self.assertIsInstance(out, dict, out)
+            self.assertGreater(out["followed"], 0, out)      # scrolled down to the running row by itself
+            self.assertEqual(out["stayed"], 0, out)          # your scroll wins
+            self.assertGreater(out["again"], 0, out)         # and following resumes once you're back
+
+
 class PTAIndex(unittest.TestCase):
     """The PTA index: parsimony from tokens and speed from time, each relative to the best on a log
     scale, and accuracy, all over the questions every compared model answered."""
