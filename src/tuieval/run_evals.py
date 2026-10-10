@@ -17,6 +17,7 @@
     tuieval run --tier smoke --only openrouter:qwen/qwen3-32b   # any OpenRouter model, no models.toml edit
     tuieval run --dry-run                         # print the plan and server commands only
     tuieval run --parallel 2                      # serve two models at a time (parallel_models in models.toml)
+    tuieval run --parallel-hosted 6               # hosted models at a time beside them (default 4)
     tuieval add ~/models/New-Model-Q4_K_M.gguf    # register a model (--vision/--mmproj, --no-think, --tags)
     tuieval scan                                  # GGUFs in model_dirs that aren't registered yet
     tuieval list                                  # the models tuieval knows; hidden ones listed separately
@@ -755,6 +756,9 @@ def main(argv=None):
     p.add_argument("--smoke", action="store_const", const="smoke", dest="tier", help="same as --tier smoke")
     p.add_argument("--parallel", type=int, metavar="N",
                    help="models served at a time (default: parallel_models for this machine in models.toml, else 1)")
+    p.add_argument("--parallel-hosted", type=int, metavar="N",
+                   help="hosted models (APIs) served at a time beside the local ones (default: parallel_hosted "
+                        "in models.toml, else 4)")
     p.add_argument("--dry-run", action="store_true", help="print the plan and commands without running")
     p.add_argument("--brief", action="store_true", help="end with one line per model instead of the scorecards")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
@@ -769,6 +773,9 @@ def main(argv=None):
     if args.parallel is not None and args.parallel < 1:
         sys.exit("--parallel must be 1 or more")
     parallel = args.parallel or e.parallel_models()
+    if args.parallel_hosted is not None and args.parallel_hosted < 1:
+        sys.exit("--parallel-hosted must be 1 or more")
+    parallel_hosted = args.parallel_hosted or e.parallel_hosted()
     models = e.cfg["models"]
     labels = [m["label"] for m in models if not m.get("remote")]   # hosted APIs cost money: only by name
     if args.only:
@@ -837,12 +844,12 @@ def main(argv=None):
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    side_by_side = min(parallel, len({j.label for j in jobs if j.status == "waiting"}))
+    side_by_side = e.models_at_once({j.label for j in jobs if j.status == "waiting"}, parallel, parallel_hosted)
     if side_by_side > 1:
         printer.side_by_side = True
         say(f"up to {side_by_side} models at a time: one line per answer; each answer notes the models "
             "it ran alongside, since they share this machine's speed")
-    worker = threading.Thread(target=e.run, args=(jobs, parallel))
+    worker = threading.Thread(target=e.run, args=(jobs, parallel, parallel_hosted))
     worker.start()
     while worker.is_alive():
         worker.join(0.5)

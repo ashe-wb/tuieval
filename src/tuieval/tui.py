@@ -975,7 +975,7 @@ class SetupScreen(Screen):
         resumed = [j for j in run if "done earlier" in j.note]
         if resumed:
             text += f"   [yellow]{len(resumed)} pack(s) continue from earlier results[/yellow]"
-        at_once = min(self.parallel() or e.parallel_models(), len({j.label for j in run}))
+        at_once = e.models_at_once({j.label for j in run}, self.parallel())
         if at_once > 1:
             text += (f"\n[cyan]Up to {at_once} models at a time[/cyan][dim] (the time above assumes one at a "
                      "time). Answers note the models they ran alongside, since those share the machine's "
@@ -2130,8 +2130,7 @@ class RunScreen(Screen):
     @property
     def side_by_side(self):
         """Several models run at a time in this run."""
-        return min(self.parallel or self.app.engine.parallel_models(),
-                   len({j.label for j in self.jobs if j.status != "skipped"})) > 1
+        return self.app.engine.models_at_once({j.label for j in self.jobs if j.status != "skipped"}, self.parallel) > 1
 
     def active(self):
         """Models being loaded or run now, in queue order."""
@@ -2446,7 +2445,7 @@ class RunScreen(Screen):
                 rough |= j.key in self.rough
             left += (j.total - j.done) * spr
             models.add(j.label)
-        lanes = max(1, min(self.parallel or self.app.engine.parallel_models(), len(models)))
+        lanes = max(1, self.app.engine.models_at_once(models, self.parallel))
         return left / lanes, rough
 
     def update_overall(self):
