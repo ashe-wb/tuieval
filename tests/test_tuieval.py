@@ -1074,6 +1074,75 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(out["second"], [["a/other", "done"]])                  # queued: its own run after
 
 
+    def test_tui_never_queues_the_same_thing_twice(self):
+        """Start while a run is going never adds or queues a model and pack already running or queued."""
+        code = textwrap.dedent("""
+            import asyncio, json, time
+            from tuieval.tui import EvalsApp, RunScreen, SetupScreen, ChoiceScreen
+            from textual.widgets import SelectionList
+            async def pick(app, pilot, models, packs=("apps",)):
+                deadline = time.time() + 30
+                while not isinstance(app.screen, SetupScreen) and time.time() < deadline:
+                    await pilot.pause(0.1)
+                s = app.screen
+                for p in ("apps", "other"):
+                    (s.query_one("#suites", SelectionList).select if p in packs
+                     else s.query_one("#suites", SelectionList).deselect)(p)
+                s.selected_models = set(models)
+                s.refresh_models()
+                await pilot.pause()
+                s.action_start()
+                await pilot.pause()
+                return app.screen
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    app.screen.query_one("#tier-certify").value = True
+                    await pick(app, pilot, ["a"])
+                    deadline = time.time() + 180
+                    while time.time() < deadline:
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and app.screen.counts()[0]:
+                            break
+                    run = app.screen
+                    await pilot.press("n")
+                    out = {}
+                    s = await pick(app, pilot, ["a"])                 # the same again: nothing happens
+                    out["same"] = [isinstance(s, ChoiceScreen), len(app.queue)]
+                    s = await pick(app, pilot, ["a", "b"])            # partly new: only b is offered
+                    out["partly"] = [isinstance(s, ChoiceScreen), "Left out" in str(getattr(s, "question", ""))]
+                    s.dismiss("queue")
+                    await pilot.pause()
+                    out["queued"] = [sorted(q.keys()) for q in app.queue]
+                    s = await pick(app, pilot, ["b"])                 # already queued: nothing happens
+                    out["again"] = [isinstance(s, ChoiceScreen), len(app.queue)]
+                    s = await pick(app, pilot, ["a"], ("other",))     # new: offered (or queued if the run ended)
+                    out["new"] = isinstance(s, ChoiceScreen) or len(app.queue) == 2
+                    if isinstance(s, ChoiceScreen):
+                        s.dismiss("queue")
+                    await pilot.pause()
+                    deadline = time.time() + 300
+                    while time.time() < deadline:
+                        await pilot.pause(0.2)
+                        if not run.running and not app.queue and not app.active_session:
+                            break
+                    out["sessions"] = [[(j.key, j.status) for j in x.jobs] for x in app.sessions]
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertEqual(out["same"], [False, 0])
+        self.assertEqual(out["partly"], [True, True])
+        self.assertEqual(out["queued"], [["b/apps"]])
+        self.assertEqual(out["again"], [False, 1])
+        self.assertTrue(out["new"])
+        self.assertEqual(out["sessions"], [[["a/apps", "done"]], [["b/apps", "done"]], [["a/other", "done"]]])
+
+
 class PTAIndex(unittest.TestCase):
     """The PTA index: parsimony from tokens and speed from time, each relative to the best on a log
     scale, and accuracy, all over the questions every compared model answered."""
