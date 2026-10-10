@@ -390,6 +390,10 @@ picked with e, if any). Without it, answered questions are skipped. Before anyth
 the packs with earlier answers and lets you choose for each: Zero (ask everything again), Continue
 (keep what's answered, ask the rest) or Leave out. Replaced answers go to history/, never deleted.
 
+[b]Stop a pack once it fails[/b]: stop each pack as soon as its FAIL is certain (a critical failure, or
+an accuracy or truncation bar out of reach) and move on, asking first the questions models fail most.
+Packs with stop_early = true in pack.toml always do this. A later Certify fills in the rest.
+
 [b]Keys[/b]
   s  start (with a run going: add to it, or queue it)   r  results
   a  add a model (a GGUF, a model id, openrouter:<id>)  m  scan model folders for new GGUFs
@@ -652,6 +656,8 @@ class SetupScreen(Screen):
             yield Label("Models at a time")
             yield Input("", id="parallel", type="integer", max_length=1, placeholder="1")
             yield Checkbox("Retest (ask again, even if already answered)", id="force")
+        with Horizontal(id="options2"):
+            yield Checkbox("Stop a pack once it fails (a critical failure, or a bar out of reach)", id="stop-early")
         yield Static(id="estimate")
         with Horizontal(id="buttons"):
             yield Button("Start  [s]", id="start", variant="success")
@@ -1009,6 +1015,8 @@ class SetupScreen(Screen):
             self.query_one(f"#tier-{tier}", RadioButton).value = True
         if "force" in sel:
             self.query_one("#force", Checkbox).value = bool(sel["force"])
+        if "stop_early" in sel:
+            self.query_one("#stop-early", Checkbox).value = bool(sel["stop_early"])
         self.query_one("#filter", Input).value = ""
         self.refresh_models()
         if not quiet:
@@ -1043,7 +1051,7 @@ class SetupScreen(Screen):
             return
         picks = self.current_picks(suites)
         sel = {"models": labels, "packs": suites, "repeat": repeat, "tier": tier, "force": force, "tests": picks,
-               "parallel": self.parallel()}
+               "parallel": self.parallel(), "stop_early": self.query_one("#stop-early", Checkbox).value}
         e = self.app.engine
         jobs = e.plan(labels, suites, repeat, tier, True, picks)
         if not any(j.status == "waiting" for j in jobs):
@@ -1573,7 +1581,7 @@ class QueuedRun:
         """(jobs, None), or (None, why it can't run) now."""
         sel = self.sel
         jobs = [j for j in eng.plan(sel["models"], sel["packs"], sel["repeat"], sel["tier"], self.retest,
-                                    self.tests(eng)) if j.key not in self.leave]
+                                    self.tests(eng), sel.get("stop_early") or None) if j.key not in self.leave]
         waiting = [j for j in jobs if j.status == "waiting"]
         if not waiting:
             return None, "every pack left is already done"
@@ -3076,7 +3084,7 @@ class EvalsApp(App):
     #tier-row Label { padding: 1 1 0 0; }
     #tier-row RadioSet { layout: horizontal; width: auto; height: auto; }
     #tier-row RadioButton { width: auto; margin-right: 2; }
-    #options { height: 3; padding: 0 1; align-vertical: middle; }
+    #options, #options2 { height: 3; padding: 0 1; align-vertical: middle; }
     #options Label { padding: 1 1 0 0; }
     #options Input { width: 12; }
     #options #parallel { width: 8; }

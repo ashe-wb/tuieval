@@ -745,6 +745,9 @@ def main(argv=None):
                                    "pack in --packs, else pack:id (and --packs defaults to those packs)")
     p.add_argument("--retest", "--force", action="store_true", dest="force",
                    help="ask again even if already answered: the packs, or just the --tests (earlier answers go to history/)")
+    p.add_argument("--stop-early", action="store_true",
+                   help="stop each pack once its FAIL is certain (a critical failure, or a bar out of reach), "
+                        "asking first what models fail most (default: each pack's stop_early)")
     p.add_argument("--repeat", type=int, help="times each question is asked, any tier (default: 1 for smoke and "
                                                   "screen, the pack's certification count for certify)")
     p.add_argument("--tier", choices=engine.TIERS, default="screen",
@@ -800,7 +803,7 @@ def main(argv=None):
     if args.tests:
         tests, pack_names = parse_tests(args.tests, pack_names if (args.packs or args.preset) else None, e.packs)
     try:
-        jobs = e.plan(labels, pack_names, args.repeat, args.tier, args.force, tests)
+        jobs = e.plan(labels, pack_names, args.repeat, args.tier, args.force, tests, args.stop_early or None)
     except packs_mod.PackError as err:
         sys.exit(str(err))
 

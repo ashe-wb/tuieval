@@ -34,6 +34,7 @@ needs = ["vision"]               # vision | tools | long_context | <python modul
 order = 30                       # position in the list
 tests = ["tests.yaml"]           # optional; default: tests.* first, then every other .yaml/.csv file
 screen = 20                      # tests in a Screen run (spread across categories, one variant per group)
+stop_early = true                # stop a run of this pack once its FAIL is certain (default false; see below)
 
 [certify]
 repeat = 3                       # repeats in a Certify run (default: models.toml [defaults] repeat)
@@ -47,6 +48,8 @@ min_consistency = 0.95           # share of variant groups where every variant p
 ```
 
 `group` doubles as the **use case** in the readiness verdicts: all packs in a group must PASS for the use case to PASS. For example, a "Coding" use case could be a `coding` pack plus a `coding-sql` pack.
+
+`stop_early` suits packs a weak model fails quickly, like a regression set of routine cases: a run stops the pack at the first critical failure, or once the accuracy or truncation bar is out of reach even if every remaining answer passes, saves what it has (the verdict is FAIL) and moves on. It asks first the questions models have failed most often. `tuieval run --stop-early` (or **Stop a pack once it fails** in Setup) does this for every pack in the run. A later Certify fills in the rest.
 
 `needs` entries other than `vision`, `tools` and `long_context` name Python modules the pack's grading needs (for example `pandas`, when your hidden tests use it). The pack is skipped, with a note, where that module isn't installed in tuieval's Python environment.
 

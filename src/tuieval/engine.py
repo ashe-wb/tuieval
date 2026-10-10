@@ -28,6 +28,7 @@ interrupted run resumes from its .partial.jsonl, request by request.
 Events are delivered as on_event(kind, **data), from the engine thread.
 """
 import base64
+import collections
 import contextlib
 import dataclasses
 import fcntl
@@ -438,6 +439,8 @@ class Job:
     finished: float = 0.0
     resumed: int = 0        # answers already done when this sitting started
     earlier: list = dataclasses.field(default_factory=list)  # earlier sittings (see Engine._sittings)
+    stop_early: bool = False  # stop once the pack's FAIL is certain (verdict.fail_certain)
+    first: list = dataclasses.field(default_factory=list)   # test ids round 1 asks first (most failed)
 
     @property
     def label(self):
@@ -1152,14 +1155,15 @@ class Engine:
         return not current and header_matches(head, pack.fingerprint, settings)
 
     # ---- planning
-    def plan(self, labels, pack_names, repeat=None, tier="screen", force=False, tests=None):
+    def plan(self, labels, pack_names, repeat=None, tier="screen", force=False, tests=None, stop_early=None):
         """Jobs for models x packs. tier: smoke (3 tests), screen (a spread sample), certify (all
         tests). repeat: times each question is asked; None = the tier default (1 for smoke and
         screen, the pack's certification repeats for certify). tests: {pack: [test ids]} runs just
         those tests of a pack instead of the tier's sample (unknown ids raise PackError). Earlier
         matching results are kept and only missing answers are run, unless force; force with
         picked tests reruns those and keeps the pack's other answers. force is True, False, or the
-        keys ("label/pack") of the jobs to retest, the others resuming."""
+        keys ("label/pack") of the jobs to retest, the others resuming. stop_early: stop each pack
+        once its FAIL is certain, asking first what models fail most; None = each pack's stop_early."""
         if tier not in TIERS:
             raise ValueError(f"tier must be one of {TIERS}")
         jobs = []
@@ -1173,7 +1177,10 @@ class Engine:
                 job = Job(m, pack, reps, pack.pick(picked) if picked else pack.select(tier),
                           self.result_path(label, name, tier), effective_sampling(self.cfg, m), tier=tier,
                           merge=not retest or bool(picked), redo=retest and bool(picked), fresh=retest,
-                          settings=self.settings(m))
+                          settings=self.settings(m),
+                          stop_early=pack.stop_early if stop_early is None else bool(stop_early))
+                if job.stop_early:
+                    job.first = self.most_failed_first(pack)
                 sv = self.serving(m)
                 status = self.result_status(label, name, tier)
                 job.discards = self._discards(job)
@@ -2005,12 +2012,29 @@ class Engine:
 
     @staticmethod
     def round_order(job, rep):
-        """The tests in the order round `rep` asks them: the pack's order first, then a fixed
-        shuffle per round (the same on every run, so resuming and reruns ask in the same order)."""
+        """The tests in the order round `rep` asks them: the pack's order first (with an early stop,
+        the most failed first), then a fixed shuffle per round (the same on every run, so resuming
+        and reruns ask in the same order)."""
         tests = list(job.tests)
         if rep:
             random.Random(f"{job.pack.name}:{rep}").shuffle(tests)
+        elif job.first:
+            rank = {tid: i for i, tid in enumerate(job.first)}
+            tests.sort(key=lambda t: rank.get(t["id"], len(rank)))
         return tests
+
+    def most_failed_first(self, pack):
+        """The pack's test ids, the ones models failed most often first (critical failures count
+        double), from every model's stored results; ties keep the pack's order."""
+        fails, seen = collections.Counter(), collections.Counter()
+        for m in self.cfg["models"]:
+            for r in self.records(m["label"], pack.name):
+                if client.server_error_row(r):
+                    continue
+                seen[r["test"]] += 1
+                fails[r["test"]] += (not r["pass"]) + (r.get("severity") == "critical")
+        order = {t["id"]: i for i, t in enumerate(pack.tests)}
+        return sorted(order, key=lambda tid: (-(fails[tid] / seen[tid] if seen[tid] else 0), order[tid]))
 
     # ---- sittings: a pack run over several sessions (stopped and resumed) keeps its total time
     SITTING_KEYS = ("load_s", "peak_rss_mb", "gpu_peak_gb", "vram_peak_gb", "kernel_share_max", "machine",
@@ -2143,7 +2167,10 @@ class Engine:
         # a hosted API has no /tokenize to split reasoning from answer tokens (it reports the split)
         tokenize_url = None if self.cfg["servers"][job.model["server"]].get("api_key_env") else base_url
         warned_reuse = False
+        stopped = self._stop_reason(job, mine)
         for rep in range(job.repeat):
+            if stopped:
+                break
             for test in self.round_order(job, rep):
                 if (test["id"], rep) in done_keys:
                     continue
@@ -2237,6 +2264,10 @@ class Engine:
                 job.passed += bool(g["pass"])
                 job.failed += not g["pass"]
                 self.emit("request_done", job=job, record=rec)
+                mine.append(rec)
+                stopped = self._stop_reason(job, mine)
+                if stopped:
+                    break
         job.status, job.finished = "done", time.time()
         merged = {(r["test"], r["repeat"]): r for r in kept}
         merged.update({(r["test"], r["repeat"]): r for r in new})
@@ -2246,8 +2277,16 @@ class Engine:
         os.remove(partial)
         with contextlib.suppress(OSError):
             os.remove(self._sittings_path(job))
-        job.note = f"{job.passed}/{job.done} passed"
+        job.note = f"{job.passed}/{job.done} passed" + (f"; stopped early, FAIL is certain: {stopped}" if stopped else "")
         self.emit("job_done", job=job)
+
+    def _stop_reason(self, job, rows):
+        """Why the job stops early now (verdict.fail_certain), or None."""
+        if not job.stop_early:
+            return None
+        from . import verdict
+        return verdict.fail_certain(job.pack, [r for r in rows if not client.server_error_row(r)],
+                                    self.cfg["defaults"]["repeat"])
 
     def _partial_to_history(self, job, keep=False):
         """Keep an unfinished run that is set aside in history/; keep: copy it (some of its answers stay)."""

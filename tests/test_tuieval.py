@@ -151,6 +151,52 @@ class Starters(unittest.TestCase):
         self.assertIn("separate the models", tuieval(self.ws, "compare", "--speed").stdout)
 
 
+class EarlyStop(unittest.TestCase):
+    """--stop-early ends a pack once its FAIL is certain, and asks what models fail most first."""
+
+    def test_wrong_model_stops_and_good_model_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            tuieval(ws, "new-pack", "demo", "--grader", "answer")
+            packs = os.path.join(ws, "packs")
+            good, bad = Mock(packs, "oracle"), Mock(packs, "wrong")
+            try:
+                with open(os.path.join(ws, "models.toml"), "a") as f:
+                    f.write(f'\n[servers.good]\nurl = "http://127.0.0.1:{good.port}"\n'
+                            f'\n[servers.bad]\nurl = "http://127.0.0.1:{bad.port}"\n')
+                tuieval(ws, "add", "mock", "--server", "good", "--label", "good-mock")
+                tuieval(ws, "add", "mock", "--server", "bad", "--label", "bad-mock")
+                out = tuieval(ws, "run", "--tier", "certify", "--stop-early").stdout
+            finally:
+                good.stop()
+                bad.stop()
+            self.assertIn("bad-mock/demo: done", out)
+            self.assertIn("stopped early, FAIL is certain", out)
+            bad_res = json.loads(read(os.path.join(ws, "results", "bad-mock", "demo.json")))["results"]
+            good_res = json.loads(read(os.path.join(ws, "results", "good-mock", "demo.json")))["results"]
+            self.assertEqual(len(good_res), 18)
+            self.assertLess(len(bad_res), 18)
+            self.assertIn("bad-mock: not ready for", tuieval(ws, "verdict").stdout.split("Details")[0])
+            # bad-mock's failures now come first for the next model with an early stop
+            code = ("from tuieval import engine; e = engine.Engine(); p = e.packs['demo']; "
+                    "first = e.most_failed_first(p); fails = {r['test'] for r in e.records('bad-mock', 'demo') "
+                    "if not r['pass']}; print(set(first[:len(fails)]) == fails)")
+            self.assertEqual(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                            env=dict(os.environ, TUIEVAL_HOME=ws)).stdout.strip(), "True")
+
+    def test_fail_certain(self):
+        from tuieval import verdict
+        pack = types.SimpleNamespace(tests=[{"id": str(i)} for i in range(10)], certify_repeat=3,
+                                     gate={"min_accuracy": 0.8, "max_truncation": 0.05})
+        row = lambda ok, **kw: {"test": "0", "pass": ok, **kw}
+        self.assertIsNone(verdict.fail_certain(pack, [row(False)] * 2))           # 28 of 30 could still pass
+        self.assertIsNone(verdict.fail_certain(pack, [row(False)] * 9))           # best case 21/30: CI reaches 83%
+        self.assertIn("under the 80% bar", verdict.fail_certain(pack, [row(False)] * 12))
+        self.assertIn("critical failure", verdict.fail_certain(pack, [row(False, severity="critical")]))
+        self.assertIn("cut off", verdict.fail_certain(pack, [row(True, finish="length")] * 2))  # 2 of 30 > 5%
+
+
 class WorkspaceGraders(unittest.TestCase):
     """A workspace's graders/ and a pack's grader.py are loaded, with their critical flag."""
 

@@ -49,6 +49,7 @@ class Pack:
     gate: dict             # release criteria (see verdict.py)
     screen: int            # tests in a screening run
     certify_repeat: int    # repeats in a certification run (0 = models.toml default)
+    stop_early: bool = False   # stop the pack once its FAIL is certain (pack.toml stop_early)
 
     @property
     def modules(self):
@@ -221,7 +222,8 @@ def load_pack(path):
                 system=system, needs=list(needs), tools=tools, tests=tests,
                 fingerprint=_fingerprint(system, tools, meta.get("grader", "answer"), tests, images),
                 gate=gate, screen=int(meta.get("screen", 10)),
-                certify_repeat=int(meta.get("certify", {}).get("repeat", 0)))
+                certify_repeat=int(meta.get("certify", {}).get("repeat", 0)),
+                stop_early=bool(meta.get("stop_early", False)))
 
 
 def load_packs(packs_dir=None, errors=None):

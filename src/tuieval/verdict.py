@@ -73,6 +73,26 @@ def consistency(records):
     return ok / len(full), len(full)
 
 
+def fail_certain(pack, records, repeat_default=3):
+    """Why this pack's verdict is FAIL whatever the remaining answers of its certification say,
+    or None: a critical failure, or a bar out of reach even if every answer still to come passes
+    (accuracy) or none of them is cut off (truncation). What an early stop checks after each answer."""
+    crit = next((r for r in records if r.get("severity") == "critical"), None)
+    if crit:
+        return f"critical failure ({crit['test']})"
+    n = len(records)
+    total = max(n, len(pack.tests) * (pack.certify_repeat or repeat_default))
+    passed = sum(bool(r["pass"]) for r in records)
+    bar = pack.gate.get("min_accuracy", 0.8)
+    if n and wilson(passed + total - n, total)[1] < bar:
+        return (f"{n - passed} wrong of {n}: under the {100 * bar:.0f}% bar even if all "
+                f"{total - n} answers left pass")
+    cut = sum(r.get("finish") == "length" for r in records)
+    if "max_truncation" in pack.gate and cut / total > pack.gate["max_truncation"]:
+        return f"{cut} answers cut off by max_tokens: over the {100 * pack.gate['max_truncation']:g}% limit for the pack"
+    return None
+
+
 def evaluate(pack, records, repeat_default=3, speed_gate=False):
     """Quality verdict for one model on one pack. `records` are result rows from
     results/<label>/<pack>.json. The p90 time limit is judged per machine by latency() unless
@@ -112,6 +132,9 @@ def evaluate(pack, records, repeat_default=3, speed_gate=False):
     if hi < min_acc:
         fails.append(f"accuracy {100 * passed / n:.1f}% (95% CI {100 * lo:.0f}-{100 * hi:.0f}%) is below "
                      f"the {100 * min_acc:.0f}% bar")
+    certain = fail_certain(pack, records, repeat_default)
+    if certain and not crit and not fails:   # a run stopped early (or a partial one) that can't pass any more
+        fails.append(certain)
     if "min_consistency" in gate and cons is not None and certified and cons < gate["min_consistency"]:
         fails.append(f"only {100 * cons:.0f}% of {groups} rephrased cases answered consistently "
                      f"(needs {100 * gate['min_consistency']:.0f}%)")
