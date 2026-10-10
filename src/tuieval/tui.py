@@ -3331,6 +3331,8 @@ class EvalsApp(App):
     def enqueue(self, item):
         ahead = self.busy_text()
         self.queue.append(item)
+        if not self.active_session:   # the last run already ended (its server may still be stopping):
+            self.set_timer(0.3, self.start_next)   # nothing else would start the queue
         self.notify(f"Queued #{len(self.queue)}: {item.title}. It starts by itself after: {ahead}. "
                     "w shows the queue.", timeout=10)
         self.refresh_live()
