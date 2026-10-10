@@ -47,6 +47,7 @@ import subprocess
 import threading
 import time
 import tomllib
+import urllib.parse
 import urllib.request
 
 from . import client
@@ -703,6 +704,7 @@ class Engine:
         self._procs = []
         self._stop_lock = threading.Lock()
         self._run_lock = threading.Lock()
+        self._machine_take = threading.Lock()   # one lane takes the machine lock for a hosted-only run
         self._run = None          # the run going: {"jobs", "pending", "open", "machine", "cond"} (add_jobs)
         self._header_cache = {}
         self._serving = {}
@@ -1258,6 +1260,36 @@ class Engine:
         except (TypeError, ValueError):
             return 1
 
+    def parallel_hosted(self):
+        """How many hosted models (APIs) a run serves at a time, besides the local ones: models.toml
+        [machines.<id>] parallel_hosted (default 4). They don't use this machine's GPU or memory."""
+        try:
+            return max(1, int(self.machine_settings().get("parallel_hosted", 4)))
+        except (TypeError, ValueError):
+            return 4
+
+    def models_at_once(self, labels, parallel=None, parallel_hosted=None):
+        """How many of these models run at the same time: local ones up to parallel (parallel_models),
+        hosted ones beside them up to parallel_hosted."""
+        labels = set(labels)
+        hosted = sum(self.hosted(self.model(l)) for l in labels)
+        return (min(parallel or self.parallel_models(), len(labels) - hosted)
+                + min(parallel_hosted or self.parallel_hosted(), hosted))
+
+    def hosted(self, m):
+        """A model served by an API elsewhere: tuieval doesn't start its server and its url isn't this
+        machine (or its server sets hosted = true). A server you started yourself on localhost still
+        counts as local (it uses the GPU)."""
+        if m.get("remote"):
+            return True
+        server = self.cfg["servers"][m["server"]]
+        if "hosted" in server:   # say so for a server the url doesn't give away (e.g. a local proxy to an API)
+            return bool(server["hosted"])
+        if server.get("cmd"):
+            return False
+        host = urllib.parse.urlparse(server.get("url") or "").hostname or ""
+        return bool(host) and host not in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
     def memory_need_gb(self, m):
         """GPU memory a model takes while served here: 0 for one we don't start (a hosted API or a
         server already running), the fit check's estimate for a local GGUF, else None (unknown)."""
@@ -1616,17 +1648,17 @@ class Engine:
         return any(self.cfg["servers"][j.model["server"]].get("cmd") for j in jobs if j.status == "waiting")
 
     # ---- running
-    def run(self, jobs, parallel=None):
+    def run(self, jobs, parallel=None, parallel_hosted=None):
         """Run the jobs (blocking). Jobs of the same model share one server start. parallel: how many
-        models are served at a time (default: parallel_models for this machine). add_jobs() can add
-        more while it runs; they run after the ones before them."""
+        local models are served at a time (default: parallel_models for this machine); hosted models
+        (APIs) run beside them, up to parallel_hosted at a time (default: parallel_hosted). add_jobs()
+        can add more while it runs; they run after the ones before them."""
         self._cancel.clear()
         self.emit("queue_started", jobs=jobs)
         models = sorted({j.label for j in jobs if j.status == "waiting"})
         machine = bool(jobs) and self.needs_machine(jobs)
-        lock = (self.machine_lock(f"{jobs[0].tier} run: {', '.join(models[:3])}"
-                                  + (f" +{len(models) - 3}" if len(models) > 3 else ""))
-                if machine else contextlib.nullcontext())
+        what = f"{jobs[0].tier} run: {', '.join(models[:3])}" + (f" +{len(models) - 3}" if len(models) > 3 else "")
+        stack = contextlib.ExitStack()   # holds the machine lock; a hosted-only run takes it if local models are added
         order = []
         for j in jobs:
             if j.label not in order:
@@ -1634,10 +1666,13 @@ class Engine:
         groups = [(label, [j for j in jobs if j.label == label and j.status == "waiting"]) for label in order]
         with self._run_lock:
             self._run = {"jobs": jobs, "pending": [g for g in groups if g[1]], "open": True, "machine": machine,
-                         "cond": threading.Condition(self._run_lock)}
+                         "cond": threading.Condition(self._run_lock), "stack": stack, "what": what}
         try:
-            with lock:
-                self._run_lanes(max(1, int(parallel or self.parallel_models())))
+            with stack:
+                if machine:
+                    stack.enter_context(self.machine_lock(what))
+                self._run_lanes(max(1, int(parallel or self.parallel_models())),
+                                max(1, int(parallel_hosted or self.parallel_hosted())))
             if self._cancel.is_set():
                 raise Cancelled()
         except Cancelled:
@@ -1664,14 +1699,13 @@ class Engine:
     def add_jobs(self, new):
         """Add planned jobs to the run going on, after its other jobs. Returns (added, why not): a
         pack already waiting or running in it isn't added twice, and nothing is added once the run is
-        finishing or cancelled, or when it holds no machine lock (hosted only) and these need one.
+        finishing or cancelled. Local models added to a hosted-only run take the machine lock when the
+        first of them starts.
         Runs on the caller's thread, so the caller shows what was added (no event)."""
         with self._run_lock:
             r = self._run
             if not r or not r["open"] or self._cancel.is_set():
                 return [], "the run is finishing"
-            if not r["machine"] and self.needs_machine(new):
-                return [], "the run going uses only hosted models, and these need this machine"
             busy = {j.key for j in r["jobs"] if j.status in ("waiting", "loading", "running")}
             added = [j for j in new if j.status == "waiting" and j.key not in busy]
             r["jobs"].extend(added)
@@ -1684,32 +1718,50 @@ class Engine:
             r["cond"].notify_all()
         return added, None if added else "everything picked is already in the run"
 
-    def _run_lanes(self, parallel):
-        """Run each model's jobs in its own lane, up to `parallel` at a time, in order: the next
-        model starts once a lane is free, nothing running stops it (runs_alone), and its memory fits
-        next to the ones running (memory_need_gb; an unknown need is left to the setting). Lanes
-        wait for jobs added meanwhile (add_jobs) until every model is done."""
+    def _run_lanes(self, parallel, parallel_hosted=4):
+        """Run each model's jobs in its own lane: up to `parallel` local models at a time, in order (the
+        next one starts once a lane is free, nothing running stops it (runs_alone), and its memory fits
+        next to the ones running (memory_need_gb; an unknown need is left to the setting)), and beside
+        them up to `parallel_hosted` hosted models, which need none of this machine. Lanes wait for jobs
+        added meanwhile (add_jobs) until every model is done."""
         pending, running, told = self._run["pending"], {}, set()
         cond = self._run["cond"]
+        hosted = {}
+
+        def is_hosted(label):
+            if label not in hosted:
+                hosted[label] = self.hosted(self.model(label))
+            return hosted[label]
 
         def blocked(label):
             """Why the next model can't start now (None: it can)."""
-            if not running:
+            if is_hosted(label):
+                return "" if sum(map(is_hosted, running)) >= parallel_hosted else None
+            local = [l for l in running if not is_hosted(l)]
+            if not local:
                 return None
-            if len(running) >= parallel:
+            if len(local) >= parallel:
                 return ""
             m = self.model(label)
-            if self.runs_alone(m) or any(self.runs_alone(self.model(l)) for l in running):
-                alone = label if self.runs_alone(m) else next(l for l in running if self.runs_alone(self.model(l)))
+            if self.runs_alone(m) or any(self.runs_alone(self.model(l)) for l in local):
+                alone = label if self.runs_alone(m) else next(l for l in local if self.runs_alone(self.model(l)))
                 return (f"{alone}'s server runs a before_start step that may stop other servers, so it runs "
                         "on its own")
             need = self.memory_need_gb(m)
-            used = sum(n for n in running.values() if n)
+            used = sum(running[l] or 0 for l in local)
             room = self.memory_available_gb()
             if need and used + need > room:
-                return (f"needs ~{need:.0f} GB; {', '.join(running)} take ~{used:.0f} of {room:.0f} GB, so it "
+                return (f"needs ~{need:.0f} GB; {', '.join(local)} take ~{used:.0f} of {room:.0f} GB, so it "
                         "starts when there's room")
             return None
+
+        def take_machine():
+            """A hosted-only run that was given local models takes the machine lock before the first
+            of them starts (it may wait for another tuieval window, like any run)."""
+            with self._machine_take:
+                if not self._run["machine"]:
+                    self._run["stack"].enter_context(self.machine_lock(self._run["what"]))
+                    self._run["machine"] = True
 
         def lane():
             while True:
@@ -1720,33 +1772,41 @@ class Engine:
                         cond.notify_all()
                         return
                     # in order, except that a model added again while it runs waits for itself to end
-                    # without holding up the ones behind it
-                    nxt = next((i for i, g in enumerate(pending) if g[0] not in running), None)
-                    label = pending[nxt][0] if nxt is not None else None
-                    why = blocked(label) if label else ""   # none can start: a model still runs, more may come
-                    if why is None:
-                        label, mine = pending.pop(nxt)
-                        running[label] = self.memory_need_gb(self.model(label))
-                    elif why and label not in told:
-                        told.add(label)
-                        note = f"{label} waits: {why}"
-                    else:
-                        cond.wait(1.0)
+                    # without holding up the ones behind it; the first waiting hosted model doesn't wait
+                    # for local ones (and the first local one doesn't wait for hosted ones)
+                    waiting = [i for i, g in enumerate(pending) if g[0] not in running]
+                    first = {}
+                    for i in waiting:
+                        first.setdefault(is_hosted(pending[i][0]), i)
+                    why, label = "", None
+                    for i in sorted(first.values()):
+                        why = blocked(pending[i][0])
+                        if why is None:
+                            label, mine = pending.pop(i)
+                            running[label] = self.memory_need_gb(self.model(label))
+                            break
+                    if mine is None:
+                        label = pending[min(first.values())][0] if first else None
+                        if why and label and label not in told:
+                            told.add(label)
+                            note = f"{label} waits: {why}"
+                        else:
+                            cond.wait(1.0)
                 if note:
                     self.emit("model_waiting", label=label, message=note)
                 if mine is None:
                     continue
                 try:
+                    if not is_hosted(label) and self.cfg["servers"][mine[0].model["server"]].get("cmd"):
+                        take_machine()
                     self._run_lane(label, mine)
                 finally:
                     with cond:
                         running.pop(label, None)
                         cond.notify_all()
 
-        if parallel == 1:
-            lane()
-            return
-        threads = [threading.Thread(target=lane, name=f"lane-{i + 1}") for i in range(parallel)]
+        # lanes for hosted models too, even if none is queued yet: add_jobs may bring some
+        threads = [threading.Thread(target=lane, name=f"lane-{i + 1}") for i in range(parallel + parallel_hosted)]
         for t in threads:
             t.start()
         for t in threads:

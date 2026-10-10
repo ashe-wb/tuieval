@@ -15,6 +15,7 @@ import threading
 import types
 import time
 import unittest
+import unittest.mock
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -283,6 +284,11 @@ class Units(unittest.TestCase):
         job = lambda key, label, total, done=0, status="waiting": types.SimpleNamespace(
             key=key, label=label, total=total, done=done, status=status)
         run = RunScreen.__new__(RunScreen)
+        eng = types.SimpleNamespace(models_at_once=lambda labels, parallel: min(parallel, len(labels)))
+        patch = unittest.mock.patch.object(RunScreen, "app", new_callable=unittest.mock.PropertyMock,
+                                           return_value=types.SimpleNamespace(engine=eng))
+        patch.start()
+        self.addCleanup(patch.stop)
         run.parallel, run.rough = 1, {"local/new"}
         run.jobs = [job("hosted/a", "hosted", 100, 100, "done"), job("local/a", "local", 200, 4, "running"),
                     job("local/new", "local", 50)]
@@ -852,6 +858,66 @@ class MarkupInText(unittest.TestCase):
                                env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""))
             self.assertNotIn("MarkupError", p.stderr + p.stdout)
             self.assertEqual(json.loads(p.stdout.strip().splitlines()[-1]), [["m/br", "done", 2]], p.stderr[-2000:])
+
+
+class HostedBeside(unittest.TestCase):
+    """Hosted models (APIs) don't use this machine: they run beside local ones whatever parallel_models
+    says, and local models can join a hosted-only run."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        d = os.path.join(self.ws, "packs", "apps")
+        os.makedirs(d)
+        write(os.path.join(d, "pack.toml"), 'label = "apps"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+        write(os.path.join(d, "tests.yaml"), "".join(
+            f"- {{id: {t}, input: question {t}, expected: 1, reference: 'ANSWER: 1', difficulty: easy}}\n" for t in "abcd"))
+        local = [sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                 os.path.join(self.ws, "packs"), "--model", "{served_name}", "--delay", "0.5"]
+        self.api = Mock(os.path.join(self.ws, "packs"), "oracle", delay=0.5)
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f'\n[servers.mk]\ncmd = {json.dumps(local)}\nport = {free_port()}\n'
+                    f'\n[servers.api]\nurl = "http://127.0.0.1:{self.api.port}"\nhosted = true\n'
+                    '\n[[models]]\nlabel = "loc"\nserver = "mk"\nmodel = "loc"\n')
+            for label in ("h1", "h2"):
+                f.write(f'\n[[models]]\nlabel = "{label}"\nserver = "api"\nmodel = "mock"\n')
+
+    def tearDown(self):
+        self.api.stop()
+        self.tmp.cleanup()
+
+    def results(self, label):
+        return json.loads(read(os.path.join(self.ws, "results", label, "apps.json")))["results"]
+
+    def test_hosted_run_beside_local_with_one_slot(self):
+        from tuieval import engine
+        e = engine.Engine(lambda kind, **d: None, root=self.ws)
+        self.assertEqual([e.hosted(e.model(l)) for l in ("loc", "h1", "h2")], [False, True, True])
+        self.assertEqual(e.models_at_once({"loc", "h1", "h2"}, 1, 4), 3)
+        jobs = e.plan(["loc", "h1", "h2"], ["apps"], None, "certify", False, {})
+        e.run(jobs, parallel=1)
+        self.assertEqual([j.status for j in jobs], ["done"] * 3, [(j.key, j.note) for j in jobs])
+        seen = {l: set().union(*(r.get("ran_alongside", []) for r in self.results(l))) for l in ("loc", "h1", "h2")}
+        self.assertEqual(seen["loc"], {"h1", "h2"})          # neither hosted model waited for the local one
+        self.assertIn("h2", seen["h1"])
+
+    def test_local_model_joins_a_hosted_only_run(self):
+        from tuieval import engine
+        events = []
+        e = engine.Engine(lambda kind, **d: events.append(kind), root=self.ws)
+        jobs = e.plan(["h1"], ["apps"], None, "certify", False, {})
+        t = threading.Thread(target=e.run, args=(jobs,))
+        t.start()
+        deadline = time.time() + 120
+        while "request_done" not in events and time.time() < deadline:
+            time.sleep(0.05)
+        added, why = e.add_jobs(e.plan(["loc"], ["apps"], None, "certify", False, {}))
+        self.assertEqual(([j.key for j in added], why), (["loc/apps"], None))
+        t.join(300)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(len(self.results("loc")), 4)
+        self.assertIsNone(e.machine_holder())                # the lock it took is released again
 
 
 class AddToRun(unittest.TestCase):

@@ -71,7 +71,7 @@ The best server flags differ per model and per machine, so tuieval splits them b
 
 - **Machine id** is detected automatically (e.g. `m3max-64gb`, `m2-16gb`, or `rtx4090-128gb` on a Linux machine with a discrete GPU; set `EVALS_MACHINE` to rename it). Every result records the machine, the server version and the exact speed flags used. `tuieval machines` lists this machine and every other machine that has run the evals (they record themselves in `tuning/`).
 - **Fit check (llama):** before starting a GGUF, tuieval reads its header (layers, KV heads, hybrid attention layers) and picks the largest context that fits this machine's GPU memory (a Mac's unified memory, or a discrete GPU's VRAM), capped at `max_ctx`. A model that can't fit at 8k context is skipped with *doesn't fit on <machine>* instead of swapping. Packs that need more context than fits are skipped. It never quantizes the KV cache on its own, since that changes answers. Servers that size their own memory (their `cmd` doesn't take `{ctx}`) are left alone: their context is the model's `max_context`; `fit_check` on the server changes that.
-- **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free: default 4 on a Mac, 1.5 in a discrete GPU's VRAM), `gpu_memory_gb` (the GPU memory to size models against, when detection gets it wrong or you want to hold some back), `gpu_residency_gb` (see the stall guard) and `parallel_models` (see below).
+- **Per-machine settings** go under `[machines.<id>]`: `memory_headroom_gb` (GPU memory kept free: default 4 on a Mac, 1.5 in a discrete GPU's VRAM), `gpu_memory_gb` (the GPU memory to size models against, when detection gets it wrong or you want to hold some back), `gpu_residency_gb` (see the stall guard), `parallel_models` and `parallel_hosted` (see below).
 
 ### Discrete GPUs (Linux: Nvidia, AMD)
 
@@ -89,6 +89,7 @@ Windows isn't supported (WSL2 works like Linux).
 
 By default a run serves one model at a time. On a machine with room for more, set `parallel_models = 2` (or more) under `[machines.<id>]`, type a number in **Models at a time** on the TUI's setup screen (blank uses the machine's setting), or pass `tuieval run --parallel N`.
 
+- **Hosted models** (OpenRouter and other APIs) don't use this machine, so they don't count against this: up to `parallel_hosted` of them (default 4, under `[machines.<id>]`, or `tuieval run --parallel-hosted N`) run beside the local ones, and one never waits for a local model to finish. A server is hosted when tuieval doesn't start it and its url isn't this machine; set `hosted = true` (or `false`) on a server to say otherwise. A hosted-only run doesn't hold the machine; if local models are added to it, it takes the machine when the first of them starts.
 - Models start in queue order, each in its own lane. The next one waits while its fit-check memory estimate wouldn't fit next to the ones running (without one, e.g. a server that sizes its own memory, the setting decides). Contexts are never shrunk to make room.
 - A second model on the same server gets a free port, so a server's `cmd` must take `{port}`.
 - A server with `before_start` (which may stop other servers) always runs on its own. Tuning is always one model at a time.
@@ -291,5 +292,6 @@ Optional sections:
 # memory_headroom_gb = 3       # GPU memory kept free for macOS and other apps (default 4)
 # gpu_residency_gb = 12        # GPU memory the driver keeps resident before churning (default: half of RAM)
 # parallel_models = 2          # models a run serves at a time (default 1)
+# parallel_hosted = 4          # hosted models (APIs) a run serves beside them (default 4)
 ```
 
