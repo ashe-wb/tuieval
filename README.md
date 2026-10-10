@@ -134,6 +134,7 @@ tuieval verdict                               # PASS / FAIL / INCONCLUSIVE per m
 tuieval report                                # the same with evidence, as a markdown file
 tuieval history                               # every verdict change over time
 tuieval compare --speed --pairwise --failures # scorecards
+tuieval compare --reference <model> --packs X # each model vs one: better, tie or worse
 tuieval selftest                              # check every test's reference and wrong answers
 tuieval items                                 # tests that don't separate models or look broken
 tuieval logs                                  # follow the server log of the model running now
@@ -153,6 +154,7 @@ tuieval help
 - **Start with Production readiness.** A single critical failure already means FAIL, whatever the accuracy: a model that breaks a hard rule once in 300 answers will do it in production. The Failures tab and `tuieval report` list exactly which answers failed.
 - **INCONCLUSIVE is not "nearly passed".** It says what's missing (usually a Certify run, or more trials).
 - **Trust `tuieval compare --pairwise` over raw percentages.** Differences of one or two tests are usually noise.
+- **Comparing variants of one model (fine-tunes, quantizations)?** `tuieval compare --reference <base>` pairs each against the base on the same questions and says better, tie or worse. Keep the server, quantization and settings the same, or they'll show up as differences too.
 - **Read `trunc` before accuracy.** A model that runs out of tokens isn't wrong; it's thinking too long for the budget.
 - **Watch TTFT for interactive use.** A model that is 5% more accurate but takes 3 s longer to start answering may be the worse choice.
 
