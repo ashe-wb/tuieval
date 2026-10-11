@@ -104,7 +104,7 @@ The **PTA index** puts parsimony (tokens), time and accuracy side by side, as a 
 
 - **P parsimony (tokens)**: the tokens used, reasoning and answer, on every question compared (each question at its median over repeats). Beside the bar: how many times the leanest model's, e.g. `2.4×` (`1.0×` is the leanest, ★ in the table's **tokens/answer**). Unlike time it doesn't depend on your machine: it's how much a model says to get to an answer, which is what you pay for on an API and what fills its context.
 - **T time**: the total time to answer those questions, as how many times the fastest model's, e.g. `28×` (★ in **time/answer**).
-- **A accuracy**: the share of answers to those questions that passed. Answers cut off at `max_tokens` count as wrong, but show in orange after the green, with `✂ n%` beside the number and a **cut off** column in the table: those failures are a model out of tokens (overthinking), not a wrong answer yet. A pack's own `max_tokens` gives it more room.
+- **A accuracy**: the share of answers to those questions that passed. Answers cut off at `max_tokens` count as wrong, but show in orange after the green, with `(n% truncated)` beside the number and a **truncated** column in the table: those failures are a model out of tokens (overthinking), not a wrong answer yet. A pack's own `max_tokens` gives it more room.
 
 The P and T bars are as long as the tokens and time used: the model that used the most fills its bar, the others in proportion (at least one block), so **shorter is better**. The A bar is the share of answers right, so **longer is better**; it's full only when every answer passed. Each heading says which way is better.
 
