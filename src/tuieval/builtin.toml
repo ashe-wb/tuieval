@@ -5,6 +5,7 @@
 [defaults]
 repeat = 3
 request_timeout_ms = 1800000   # per request; long thinking runs need it
+stall_timeout_ms = 300000      # no tokens this long once answering began: the server stalled (retried, not counted)
 ready_timeout_s = 1200         # how long a model may take to load before giving up
 model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
 

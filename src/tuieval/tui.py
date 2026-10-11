@@ -2104,6 +2104,7 @@ class RunScreen(Screen):
         self.follow = True
         self.buf = {"reasoning": [], "answer": []}
         self.buf_lock = threading.Lock()
+        self.req_live = {}                    # model label -> its request now: phase, ~tokens, started, last token
         self.started = time.time()
         self.req_started = None
         self.req_tokens = 0
@@ -2235,7 +2236,20 @@ class RunScreen(Screen):
             return  # the app is shutting down; the UI thread may be waiting on the engine
         if kind in ("request_started", "model_loading") and self.watch not in self.active():
             self.watch = d["job"].label if "job" in d else d["label"]   # follow the next model streaming
+        if kind in ("request_started", "server_retry"):   # here, not in handle(): deltas follow at once
+            with self.buf_lock:
+                self.req_live[d["job"].label if "job" in d else d["label"]] = {
+                    "phase": "waiting", "tokens": 0, "started": time.time(), "last": None}
+        elif kind == "request_done":
+            with self.buf_lock:
+                self.req_live.pop(d["job"].label, None)
         if kind == "delta":  # very frequent: buffer, flushed every 100 ms on the UI thread
+            with self.buf_lock:
+                lv = self.req_live.get(d.get("label"))
+                if lv:
+                    lv["phase"] = "thinking" if d["stream"] == "reasoning" else "answering"
+                    lv["tokens"] += max(1, len(d["text"]) // 4)
+                    lv["last"] = time.time()
             if d.get("label", self.watch) != self.watch:
                 return       # another model running alongside: v switches to it
             with self.buf_lock:
@@ -2439,7 +2453,8 @@ class RunScreen(Screen):
         elapsed = (j.finished or time.time()) - j.started if j.started else 0
         elapsed += sum(s.get("wall_s") or 0 for s in j.earlier)   # a resumed pack: its earlier sittings too
         # update_width: columns start at their header's width; "12" under ✓ would otherwise show as "1"
-        for col, value in (("status", f"[{style}]{j.status}[/{style}]"),
+        status = f"[{style}]{j.status}[/{style}]" + (self.live_note(j.label) if j.status == "running" else "")
+        for col, value in (("status", status),
                            ("progress", f"{j.done}/{j.total}" if j.status != "skipped" or j.done else ""),
                            ("pass", f"[green]{j.passed}[/green]" if j.passed else ""),
                            ("fail", f"[red]{j.failed}[/red]" if j.failed else ""),
@@ -2447,6 +2462,21 @@ class RunScreen(Screen):
                            ("note", short_note(j.note))):
             q.update_cell(j.key, col, value, update_width=True)
 
+    def live_note(self, label):
+        """What a running model's request is doing now, so a slow model doesn't look stuck: waiting for
+        its first token, or thinking/answering with ~tokens so far, and how long it's been quiet."""
+        with self.buf_lock:
+            lv = dict(self.req_live.get(label) or {})
+        if not lv:
+            return ""
+        now = time.time()
+        if lv["last"] is None:
+            return f" [dim]· waiting {fmt_secs(now - lv['started'])}[/dim]"
+        note = f" [dim]· {lv['phase']} ~{lv['tokens']:,} tok[/dim]"
+        quiet = now - lv["last"]
+        return note + (f" [yellow]· quiet {fmt_secs(quiet)}[/yellow]" if quiet >= self.QUIET_S else "")
+
+    QUIET_S = 30       # a running model's row says how long it's been without a token after this long
     LIVE_ANSWERS = 5   # a pack's own times this session take over from its history after this many
 
     def eta_seconds(self):

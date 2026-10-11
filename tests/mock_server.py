@@ -9,6 +9,8 @@ fixed   always "ANSWER: 42"
 unavailable  HTTP 404 "No endpoints found" for every chat request
 
 Streams like llama.cpp: reasoning_content then content deltas, usage and timings at the end.
+--stall S: after the first token, S seconds of nothing but keep-alive comments (": OPENROUTER
+PROCESSING"), or of silence with --silent; --stall-before S: the same before the first token.
 An answer longer than the request's max_tokens (one token per word) is cut off with finish
 "length". --max-output N also serves an OpenRouter-style endpoints list with that output limit.
 """
@@ -50,6 +52,7 @@ def reply_for(test, mode):
 
 class Handler(BaseHTTPRequestHandler):
     answers, mode, model, delay, max_output = {}, "oracle", "mock", 0.0, None
+    stall, stall_before, silent = 0.0, 0.0, False
 
     def log_message(self, *a):
         pass
@@ -98,7 +101,17 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
             self.wfile.flush()
 
+        def wait(secs):
+            end = time.time() + secs
+            while time.time() < end:
+                if not self.silent:
+                    self.wfile.write(b": OPENROUTER PROCESSING\n\n")
+                    self.wfile.flush()
+                time.sleep(0.2)
+
+        wait(self.stall_before)
         send({"choices": [{"delta": {"reasoning_content": "Thinking it over. "}}]})
+        wait(self.stall)
         time.sleep(self.delay or 0.005)
         for i in range(0, len(text), 12):
             send({"choices": [{"delta": {"content": text[i:i + 12]}}]})
@@ -128,9 +141,13 @@ def main(argv=None):
     p.add_argument("--model", default="mock")
     p.add_argument("--delay", type=float, default=0.0, help="seconds each answer takes")
     p.add_argument("--max-output", type=int)
+    p.add_argument("--stall", type=float, default=0.0)
+    p.add_argument("--stall-before", type=float, default=0.0)
+    p.add_argument("--silent", action="store_true")
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
     Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
     Handler.max_output = a.max_output
+    Handler.stall, Handler.stall_before, Handler.silent = a.stall, a.stall_before, a.silent
     srv = Server(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:
