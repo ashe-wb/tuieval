@@ -47,7 +47,7 @@ def memory_gb(infos):
 
 
 def index(rows, models=None, memory=None):
-    """{"questions": n shared, "models": [{model, P, T, A, tokens, total_s, passed, answers, alongside,
+    """{"questions": n shared, "models": [{model, P, T, A, cut, cut_pct, tokens, total_s, passed, answers, alongside,
     fewest, fastest, tps, ttft, memory_gb}],
     "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
     most-answered model}, best accuracy first. models: the ones to compare (default: every model in rows
@@ -75,6 +75,9 @@ def index(rows, models=None, memory=None):
                     "total_s": sum(c["secs"] or 0 for c in cells),
                     "passed": sum(c["passed"] for c in cells), "answers": answers,
                     "A": 100 * sum(c["passed"] for c in cells) / answers if answers else None,
+                    # failed only because max_tokens ran out (overthinking, not wrong yet)
+                    "cut": sum(c["truncated"] for c in cells),
+                    "cut_pct": 100 * sum(c["truncated"] for c in cells) / answers if answers else None,
                     # generation speed and time to first token over the same answers (medians)
                     "tps": compare.median(r.get("gen_tps") for c in cells for r in c["rows"]),
                     "ttft": compare.median(r.get("ttft") for c in cells for r in c["rows"]),
@@ -118,7 +121,8 @@ def bars(result, width=20, markup=True):
     """Lines with a row per model and a bar each for P, T and A: the at-a-glance view. The P and T bars
     are proportional to tokens and time (the longest is the model that used most; shorter is better),
     with how many times the leanest / fastest model's beside them; the A bar is the share of answers
-    right (longer is better, full only when every answer passed). markup=False gives plain text."""
+    right (longer is better, full only when every answer passed), then the share cut off at max_tokens in
+    orange (▓ in plain text) and "✂ n%" beside it. markup=False gives plain text."""
     if not result["models"]:
         return []
     name_w = max(len(x["model"]) for x in result["models"])
@@ -138,12 +142,18 @@ def bars(result, width=20, markup=True):
                 if v is not None and v < 100:   # full only when every answer passed
                     full = min(full, width - 1)
                 num = "-" if v is None else compare.pct(v / 100)
+                cut = x.get("cut_pct") or 0
+                part = min(width - full, max(1, round(width * cut / 100))) if cut else 0
+                if cut:   # after the accuracy, which stays aligned with the other rows'
+                    num = f"{num:>6}  ✂ {compare.pct(cut / 100)}"
             else:
                 full = _blocks(width, x.get(measure), most[measure])
                 num = times(x.get(shown))
-            bar, rest = "█" * full, "░" * (width - full)
-            bar = f"[{color}]{bar}[/][grey37]{rest}[/]" if markup else bar + rest
-            cells.append(f"{bar} {num:>6}" + " " * (cell_w - width - 7))
+                part = 0
+            bar, cut_bar, rest = "█" * full, "▓" * part, "░" * (width - full - part)
+            bar = (f"[{color}]{bar}[/]" + (f"[#ff8c00]{'█' * part}[/]" if part else "") + f"[grey37]{rest}[/]"
+                   if markup else bar + cut_bar + rest)
+            cells.append(f"{bar} {num:>6}" + " " * max(0, cell_w - width - 1 - max(6, len(num))))
         name = f"{x['model']:<{name_w}}"
         lines.append((f"{rich_escape(name) if markup else name}  " + "".join(cells)).rstrip())
     return lines
@@ -168,10 +178,11 @@ def left_out_lines(result):
 def table(result):
     """(header, rows) for a plain table of the index."""
     n = result["questions"] or 1
-    header = ["model", "tokens/answer", "time/answer", "answers right", "tok/s", "TTFT s", "memory GB"]
+    header = ["model", "tokens/answer", "time/answer", "answers right", "cut off", "tok/s", "TTFT s", "memory GB"]
     rows = [[x["model"], f"{round(x['tokens'] / n):,}" + (" ★" if x.get("fewest") else ""),
              fmt_secs(x["total_s"] / n) + (" ★" if x.get("fastest") else ""),
-             f"{x['passed']}/{x['answers']}", _num(x.get("tps"), ".0f"), _num(x.get("ttft"), ".1f"),
+             f"{x['passed']}/{x['answers']}", f"{x.get('cut') or 0}/{x['answers']}",
+             _num(x.get("tps"), ".0f"), _num(x.get("ttft"), ".1f"),
              _num(x.get("memory_gb"), ".1f")] for x in result["models"]]
     return header, rows
 
@@ -204,7 +215,9 @@ def scope_note(result, models):
     return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
             "P parsimony (tokens) and T time: bars as long as the tokens / time used (shorter is better), "
             "and how many times the leanest / fastest model's (1.0×, ★ in the table). A accuracy: answers right "
-            "(longer is better).")
+            "(longer is better)"
+            + ("; orange ✂: answers cut off at max_tokens, out of tokens rather than wrong (they count as wrong)."
+               if any(x.get("cut") for x in result["models"]) else "."))
 
 
 def for_engine(e, labels=None, packs=None, results_dir=None):

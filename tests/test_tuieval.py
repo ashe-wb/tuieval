@@ -1264,6 +1264,29 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual((two_wrong[-2], two_wrong[-1]), ("█████████░", "99.6%"))   # not a full bar
         self.assertEqual((perfect[-2], perfect[-1]), ("██████████", "100%"))
 
+    def test_cut_off_answers_show_in_the_accuracy_bar(self):
+        from tuieval import pta
+
+        def row(model, test, ok, truncated=False):
+            return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "latency": 1000,
+                    "tokens": 10, "truncated": truncated, "gen_tps": None, "repeat": 0}
+        rows = ([row("thinker", f"q{i}", i < 6) for i in range(8)]
+                + [row("thinker", f"q{i}", False, truncated=True) for i in (8, 9)]   # out of tokens
+                + [row("plain", f"q{i}", i < 6) for i in range(10)])
+        res = pta.index(rows)
+        by = {x["model"]: x for x in res["models"]}
+        self.assertEqual((by["thinker"]["A"], by["thinker"]["cut"], by["thinker"]["cut_pct"]), (60, 2, 20))
+        self.assertEqual((by["plain"]["cut"], by["plain"]["cut_pct"]), (0, 0))
+        bars = {line.split()[0]: line.split() for line in pta.bars(res, 10, markup=False)[2:]}
+        self.assertEqual(bars["thinker"][-4:], ["██████▓▓░░", "60.0%", "✂", "20.0%"])   # right, cut off, wrong
+        self.assertEqual(bars["plain"][-2:], ["██████░░░░", "60.0%"])                  # no cut-offs: no ✂
+        self.assertIn("[#ff8c00]██[/]", pta.bars(res, 10)[2] + pta.bars(res, 10)[3])
+        header, table = pta.table(res)
+        self.assertEqual(header[4], "cut off")
+        self.assertEqual({r[0]: r[4] for r in table}, {"thinker": "2/10", "plain": "0/10"})
+        self.assertIn("cut off at max_tokens", pta.scope_note(res, ["thinker", "plain"]))
+        self.assertNotIn("cut off", pta.scope_note(pta.index(rows[10:]), ["plain"]))
+
     def test_server_errors_and_models_with_few_answers(self):
         from tuieval import pta
 
