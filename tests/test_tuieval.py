@@ -893,15 +893,42 @@ class HostedBeside(unittest.TestCase):
 
     def test_hosted_run_beside_local_with_one_slot(self):
         from tuieval import engine
-        e = engine.Engine(lambda kind, **d: None, root=self.ws)
+        together = set()
+
+        def on_event(kind, **d):
+            if kind == "request_started":
+                together.add(frozenset(e._lanes))
+        e = engine.Engine(on_event, root=self.ws)
         self.assertEqual([e.hosted(e.model(l)) for l in ("loc", "h1", "h2")], [False, True, True])
         self.assertEqual(e.models_at_once({"loc", "h1", "h2"}, 1, 4), 3)
         jobs = e.plan(["loc", "h1", "h2"], ["apps"], None, "certify", False, {})
         e.run(jobs, parallel=1)
         self.assertEqual([j.status for j in jobs], ["done"] * 3, [(j.key, j.note) for j in jobs])
-        seen = {l: set().union(*(r.get("ran_alongside", []) for r in self.results(l))) for l in ("loc", "h1", "h2")}
-        self.assertEqual(seen["loc"], {"h1", "h2"})          # neither hosted model waited for the local one
-        self.assertIn("h2", seen["h1"])
+        self.assertIn(frozenset({"loc", "h1", "h2"}), together)   # neither hosted model waited for the local one
+        # hosted models share nothing of this machine: no one notes them alongside, and they note no one
+        for label in ("loc", "h1", "h2"):
+            self.assertFalse(any("ran_alongside" in r for r in self.results(label)), label)
+        data = json.loads(read(os.path.join(self.ws, "results", "h1", "apps.json")))
+        self.assertTrue(data["run"]["hosted"])
+        self.assertNotIn("loaded_alongside", json.loads(read(os.path.join(self.ws, "results", "loc", "apps.json")))["run"])
+
+    def test_older_results_drop_hosted_models_alongside(self):
+        from tuieval import compare
+        paths = []
+        # h1's results say it's hosted; or-gone (named at run time, results deleted) by its server's prefix
+        for label, run, along in (("loc", {}, ["h1", "loc2", "or-gone"]), ("h1", {"endpoint": "x/fp8"}, ["loc"])):
+            data = {"format": "evals/1", "model": {"label": label}, "pack": {"name": "p", "fingerprint": "f"},
+                    "run": {**run, "loaded_alongside": along}, "settings": {},
+                    "results": [{"test": "t", "description": "d", "pass": True, "score": 1.0, "reason": "",
+                                 "ran_alongside": along}]}
+            path = os.path.join(self.ws, "results", label, "p.json")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(data, f)
+            paths.append(path)
+        rows, infos = compare.load(paths)
+        self.assertEqual({r["model"]: r["alongside"] for r in rows}, {"loc": ["loc2"], "h1": []})
+        self.assertEqual({i["label"]: i["loaded_alongside"] for i in infos}, {"loc": ["loc2"], "h1": []})
 
     def test_local_model_joins_a_hosted_only_run(self):
         from tuieval import engine

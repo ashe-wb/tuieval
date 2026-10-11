@@ -94,7 +94,7 @@ By default a run serves one model at a time. On a machine with room for more, se
 - Models start in queue order, each in its own lane. The next one waits while its fit-check memory estimate wouldn't fit next to the ones running (without one, e.g. a server that sizes its own memory, the setting decides). Contexts are never shrunk to make room.
 - A second model on the same server gets a free port, so a server's `cmd` must take `{port}`.
 - A server with `before_start` (which may stop other servers) always runs on its own. Tuning is always one model at a time.
-- Answers are judged exactly as in a run of one model. Each answer records the models served while it ran (`ran_alongside`), and a load time measured next to others is marked (`loaded_alongside`), since models side by side share the machine's GPU and memory bandwidth. The speed table and the answer view show it.
+- Answers are judged exactly as in a run of one model. Each answer records the models served while it ran (`ran_alongside`), and a load time measured next to others is marked (`loaded_alongside`), since models side by side share the machine's GPU and memory bandwidth. Only local models count: hosted ones share nothing of the machine. The speed table and the answer view show it.
 - In the TUI, one model's answers stream at a time: `v` switches to the next, `k` skips the one streaming. `tuieval run` prints one line per answer instead of streaming.
 - Only one run uses the machine at a time across tuieval windows; models at a time applies within a run.
 

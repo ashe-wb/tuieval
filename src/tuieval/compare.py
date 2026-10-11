@@ -41,6 +41,7 @@ def _load_native(data):
             "pack": pack["name"], "pack_fp": pack["fingerprint"],
             # hosted (OpenRouter) models: the provider endpoint and its declared quantization
             "endpoint": run.get("endpoint"), "quantization": run.get("quantization"),
+            "hosted": bool(run.get("hosted") or run.get("endpoint")),
             "loaded_alongside": run.get("loaded_alongside") or []}
     rows = []
     for r in data["results"]:
@@ -78,7 +79,35 @@ def load(paths):
             row.update(raw=rec, path=path, pack_fp=data["pack"]["fingerprint"])
         rows += r
         infos.append(i)
+    # older results also noted hosted models alongside, which share nothing of this machine: a hosted
+    # model's rows note no one, and no one notes it
+    labels, prefixes = configured_hosted(paths)
+    labels |= {i["label"] for i in infos if i["hosted"]}
+
+    def local(along):
+        return [l for l in along if l not in labels and not l.startswith(tuple(prefixes))]
+    for row in rows:
+        row["alongside"] = [] if row["model"] in labels else local(row["alongside"])
+    for i in infos:
+        i["loaded_alongside"] = [] if i["label"] in labels else local(i["loaded_alongside"])
     return rows, infos
+
+
+def configured_hosted(paths):
+    """(labels, label prefixes) models.toml says are hosted, in the workspaces these results/<label>/
+    <pack>.json are from: its hosted models, and the prefix of models named at run time on a hosted
+    server (e.g. "or-"). Covers hosted models whose results aren't loaded."""
+    from . import engine
+    labels, prefixes = set(), set()
+    for root in {os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(p)))) for p in paths}:
+        try:
+            cfg = engine.load_config(os.path.join(root, "models.toml"))
+        except Exception:
+            continue    # no readable models.toml there: the results' own marks still apply
+        labels |= {m["label"] for m in cfg["models"] if engine.hosted(cfg, m)}
+        prefixes |= {engine.remote_label(n, s, "") for n, s in cfg["servers"].items()
+                     if s.get("any_model") and engine.hosted(cfg, {"server": n})}
+    return labels, prefixes
 
 
 def default_paths(results_dir=None):

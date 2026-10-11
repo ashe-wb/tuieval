@@ -83,6 +83,21 @@ def builtin_config():
         return tomllib.load(f)
 
 
+def hosted(cfg, m):
+    """A model served by an API elsewhere: tuieval doesn't start its server and its url isn't this
+    machine (or its server sets hosted = true). A server you started yourself on localhost still
+    counts as local (it uses the GPU)."""
+    if m.get("remote"):
+        return True
+    server = cfg["servers"][m["server"]]
+    if "hosted" in server:   # say so for a server the url doesn't give away (e.g. a local proxy to an API)
+        return bool(server["hosted"])
+    if server.get("cmd"):
+        return False
+    host = urllib.parse.urlparse(server.get("url") or "").hostname or ""
+    return bool(host) and host not in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
 def load_config(path):
     """Read models.toml, fill in the built-ins it leaves out (builtin.toml) and each model's defaults.
     [defaults] are filled key by key; [sampling] only when models.toml has none (sampling is part of
@@ -675,8 +690,9 @@ class Lane:
     """One model being run: its own request stream, stall reason and skip switch, so models run
     side by side (parallel_models) stop independently. Runs and tunes in one lane use the engine's
     main lane."""
-    def __init__(self, label=None):
+    def __init__(self, label=None, hosted=False):
         self.label = label
+        self.hosted = hosted      # a hosted model shares nothing of this machine, so it's never noted alongside
         self.stream = None
         self.stall = None         # set by the stall watcher: why this model's server stalled
         self.skip = threading.Event()
@@ -1282,18 +1298,7 @@ class Engine:
                 + min(parallel_hosted or self.parallel_hosted(), hosted))
 
     def hosted(self, m):
-        """A model served by an API elsewhere: tuieval doesn't start its server and its url isn't this
-        machine (or its server sets hosted = true). A server you started yourself on localhost still
-        counts as local (it uses the GPU)."""
-        if m.get("remote"):
-            return True
-        server = self.cfg["servers"][m["server"]]
-        if "hosted" in server:   # say so for a server the url doesn't give away (e.g. a local proxy to an API)
-            return bool(server["hosted"])
-        if server.get("cmd"):
-            return False
-        host = urllib.parse.urlparse(server.get("url") or "").hostname or ""
-        return bool(host) and host not in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+        return hosted(self.cfg, m)
 
     def memory_need_gb(self, m):
         """GPU memory a model takes while served here: 0 for one we don't start (a hosted API or a
@@ -1817,15 +1822,23 @@ class Engine:
         for t in threads:
             t.join()
 
+    def _local_lanes(self, lane, exclude=None):
+        """Labels of the local models served now (call with _lanes_lock held); none for a hosted lane."""
+        if lane.hosted:
+            return set()
+        return {l for l, o in self._lanes.items() if not o.hosted} - {exclude}
+
     def _run_lane(self, label, mine):
         """One model's jobs, in this thread's own lane. Other models served meanwhile are noted on
-        each answer (ran_alongside), since they share the machine's GPU and memory bandwidth."""
-        lane = Lane(label)
+        each answer (ran_alongside), since they share the machine's GPU and memory bandwidth. Hosted
+        models share neither, so they note nothing and nobody notes them."""
         m = mine[0].model
+        lane = Lane(label, self.hosted(m))
         with self._lanes_lock:
-            for other in self._lanes.values():
-                other.seen.add(label)
-            lane.seen = set(self._lanes)
+            if not lane.hosted:
+                for other in self._lanes.values():
+                    other.seen.add(label)
+            lane.seen = self._local_lanes(lane)
             if self.cfg["servers"][m["server"]].get("cmd"):
                 lane.port = self._lane_port(m)
             self._lanes[label] = lane
@@ -1987,6 +2000,8 @@ class Engine:
                         "kv_type": sv.kv_type, "perf_args": sv.perf_args if local else None,
                         "perf_source": sv.perf_source, "server_version": self.server_version(m) if local else None}
         ep = self.endpoint(m)
+        if self.hosted(m):
+            serving_info["hosted"] = True
         if ep:
             serving_info.update(endpoint=ep["tag"], provider=ep.get("provider"), quantization=ep.get("quantization"))
         for j in jobs:
@@ -2244,7 +2259,7 @@ class Engine:
                 self._check()
                 lane = self._lane()
                 with self._lanes_lock:
-                    lane.seen = set(self._lanes) - {job.label}
+                    lane.seen = self._local_lanes(lane, job.label)
                 self.emit("request_started", job=job, test=test["description"], test_id=test["id"],
                           has_image=bool(test.get("image")), repeat=rep, difficulty=test.get("difficulty", "unrated"))
                 waits = list(self.SERVER_RETRY_WAITS_S)

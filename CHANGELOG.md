@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: hosted models no longer count as running alongside local ones (they don't share the machine), so a one-model-at-a-time setup no longer gets the "ran alongside other models" note. Older results are read the same way.
 - Results, Per question: the model summary shows every picked model without scrolling, and fits the window: shorter column names, and long model names cut in the middle (both ends kept). The PTA index table fits the same way.
 - PTA index: the accuracy bar shows answers cut off at max_tokens in orange, with `(n% truncated)` beside it and a **truncated** column in the table, so overthinking stands apart from wrong answers.
 - Results → Insights (also `tuieval insights`): charts with what to do next: every model against a reference (95% CI), the best model per use case, fine-tunes against their base (`base` in models.toml), why models fail, accuracy against tokens or time, question health, and the Certify runs that would settle the strongest models' verdicts. `[defaults] reference` sets the default reference.
