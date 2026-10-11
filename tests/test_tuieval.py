@@ -1030,6 +1030,141 @@ class AddToRun(unittest.TestCase):
         loads = [d["label"] for k, d in events if k == "model_loading"]
         self.assertEqual(loads.count("a"), 2)                                 # a's new pack: after it ended
 
+    def test_engine_removes_jobs_not_started(self):
+        from tuieval import engine
+        events = []
+        e = engine.Engine(lambda kind, **d: events.append((kind, d)), root=self.ws)
+        jobs = e.plan(["a"], ["apps", "other"], None, "certify", False, {})
+        t = threading.Thread(target=e.run, args=(jobs, 1))
+        t.start()
+        deadline = time.time() + 180   # CI machines can take long to start servers
+        while not any(k == "request_done" for k, _ in events) and time.time() < deadline:
+            time.sleep(0.05)
+        added, _ = e.add_jobs(e.plan(["b"], ["apps"], None, "certify", False, {}))
+        self.assertEqual([j.key for j in added], ["b/apps"])
+        self.assertEqual(e.remove_jobs({"a/apps"}), [])                      # answering: k skips it instead
+        # a's next pack (its server is up) and b (never started) both go
+        self.assertEqual(sorted(j.key for j in e.remove_jobs({"a/other", "b/apps"})), ["a/other", "b/apps"])
+        self.finish(e, t)
+        self.assertEqual([(j.key, j.status) for j in jobs], [("a/apps", "done")])
+        self.assertNotIn(("model_loading", "b"), [(k, d.get("label")) for k, d in events])
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "results", "a", "other.json")))
+        self.assertEqual(e.remove_jobs({"a/apps"}), [])                      # the run is over
+
+    def test_tui_removes_a_pack_from_the_run(self):
+        path = os.path.join(self.ws, "models.toml")
+        write(path, read(path).replace('"--delay", "0.2"', '"--delay", "3"'))   # still running while it's asked
+        code = textwrap.dedent("""
+            import asyncio, json, time
+            from tuieval.tui import EvalsApp, RunScreen, ConfirmScreen
+            from textual.widgets import SelectionList, DataTable
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    s.query_one("#suites", SelectionList).select("apps")
+                    s.query_one("#suites", SelectionList).select("other")
+                    s.selected_models = {"a", "b"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+                    await pilot.pause()
+                    s.action_start()
+                    deadline = time.time() + 180     # CI machines can take long to start servers
+                    while time.time() < deadline:
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and app.screen.counts()[0]:
+                            break
+                    run, out = app.screen, {}
+                    q = run.query_one("#queue", DataTable)
+                    total = run.total
+                    q.move_cursor(row=q.get_row_index("b/apps"))
+                    await pilot.press("x")
+                    await pilot.pause()
+                    out["asked"] = isinstance(app.screen, ConfirmScreen) and app.screen.focused.id == "no"
+                    await pilot.press("n")
+                    await pilot.pause()
+                    out["kept"] = [j.key for j in run.jobs]
+                    q.move_cursor(row=q.get_row_index("b/apps"))
+                    await pilot.press("x")
+                    await pilot.pause()
+                    await pilot.press("y")
+                    await pilot.pause()
+                    out["after"] = [[j.key for j in run.jobs], list(map(str, (k.value for k in q.rows))),
+                                    total - run.total]
+                    q.move_cursor(row=q.get_row_index("a/apps"))      # running: stays, nothing asked
+                    await pilot.press("x")
+                    await pilot.pause()
+                    out["running"] = [isinstance(app.screen, ConfirmScreen), "a/apps" in [j.key for j in run.jobs]]
+                    app.engine.cancel()
+                    deadline = time.time() + 60
+                    while time.time() < deadline and run.running:
+                        await pilot.pause(0.2)
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertTrue(out["asked"])
+        self.assertIn("b/apps", out["kept"])
+        jobs, rows, fewer = out["after"]
+        self.assertNotIn("b/apps", jobs)
+        self.assertNotIn("b/apps", rows)
+        self.assertEqual(fewer, 4)                     # its 4 questions are no longer counted
+        self.assertEqual(out["running"], [False, True])
+
+    def test_tui_asks_before_skipping_a_model(self):
+        path = os.path.join(self.ws, "models.toml")
+        write(path, read(path).replace('"--delay", "0.2"', '"--delay", "3"'))   # still running while it's asked
+        code = textwrap.dedent("""
+            import asyncio, json, time
+            from tuieval.tui import EvalsApp, RunScreen, ConfirmScreen
+            from textual.widgets import SelectionList
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    s.query_one("#suites", SelectionList).select("apps")
+                    s.selected_models = {"a"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+                    await pilot.pause()
+                    s.action_start()
+                    deadline = time.time() + 180     # CI machines can take long to start servers
+                    while time.time() < deadline:
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and app.screen.counts()[0]:
+                            break
+                    run, out = app.screen, {}
+                    for keys in (["k", "enter"], ["k", "k"], ["k", "n"], ["k", "escape"]):   # each one: no
+                        await pilot.press(keys[0])
+                        await pilot.pause()
+                        out.setdefault("asked", []).append(isinstance(app.screen, ConfirmScreen)
+                                                           and app.screen.focused.id == "no")
+                        await pilot.press(keys[1])
+                        await pilot.pause()
+                    out["kept"] = [run.running, app.screen is run, [j.status for j in run.jobs]]
+                    await pilot.press("k")
+                    await pilot.pause()
+                    await pilot.press("y")
+                    deadline = time.time() + 120
+                    while time.time() < deadline and run.running:
+                        await pilot.pause(0.2)
+                    out["skipped"] = [j.status for j in run.jobs]
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertEqual(out["asked"], [True] * 4)
+        self.assertEqual(out["kept"], [True, True, ["running"]])
+        self.assertEqual(out["skipped"], ["skipped"])
+
     def test_tui_adds_or_queues_while_running(self):
         code = textwrap.dedent("""
             import asyncio, json, time

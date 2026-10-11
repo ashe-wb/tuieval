@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Run screen: `x` removes the highlighted pack from the run going if it hasn't started (the reverse of adding it); a model left with nothing isn't started.
+- `k` (skip model) asks first, naming the model. Yes/no dialogs start on No; `y` answers yes, `n` or Esc no.
 - Fix: hosted models no longer count as running alongside local ones (they don't share the machine), so a one-model-at-a-time setup no longer gets the "ran alongside other models" note. Older results are read the same way.
 - Results, Per question: the model summary shows every picked model without scrolling, and fits the window: shorter column names, and long model names cut in the middle (both ends kept). The PTA index table fits the same way.
 - PTA index: the accuracy bar shows answers cut off at max_tokens in orange, with `(n% truncated)` beside it and a **truncated** column in the table, so overthinking stands apart from wrong answers.
