@@ -15,6 +15,7 @@ Start here
 Day to day
   tuieval compare [...]       scorecards (--speed, --pairwise, --reference M, --failures)
   tuieval pta                 the PTA index: parsimony (tokens), time and accuracy per model, as bars
+  tuieval insights            charts with what to do next: vs a reference, per use case, why models fail, …
   tuieval report              the verdicts with their evidence, as a markdown file
   tuieval history             every verdict change, newest first
   tuieval items               tests that don't separate models or look broken

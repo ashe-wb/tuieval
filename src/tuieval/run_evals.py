@@ -427,6 +427,42 @@ def cmd_pta(argv):
         out.print(line, markup=False)
 
 
+def cmd_insights(argv):
+    p = argparse.ArgumentParser(prog="tuieval insights",
+                                description="Charts with what to do next: every model against a reference, the best "
+                                            "model per use case, fine-tunes against their base, why models fail, "
+                                            "accuracy against cost, question health and the runs that would settle "
+                                            "open verdicts.")
+    p.add_argument("--only", help="comma-separated model labels (default: every model with enough answers)")
+    p.add_argument("--reference", help="the model to compare against (default: [defaults] reference, else the "
+                                       "most accurate)")
+    p.add_argument("--packs", help="comma-separated packs (default: all)")
+    p.add_argument("--cost", choices=("tokens", "time"), default="tokens", help="the cost axis of the accuracy chart")
+    p.add_argument("--models")
+    p.add_argument("--results-dir")
+    a = p.parse_args(argv)
+    from rich.console import Console
+    from . import compare, insights
+    e = engine.Engine(models_path=a.models, results_dir=a.results_dir)
+    paths = [x for x in compare.default_paths(e.results_dir) if not e.superseded(x)]
+    rows, _ = compare.load(paths) if paths else ([], [])
+    if a.packs:
+        rows = [r for r in rows if r["suite"] in {x.strip() for x in a.packs.split(",")}]
+    wanted = a.reference or e.cfg["defaults"].get("reference")
+    picked = {x.strip() for x in a.only.split(",")} if a.only else None
+    rows, models = insights.prepare(rows, picked, wanted)
+    if not models:
+        sys.exit("no finished results" + (" for those models or packs" if a.only or a.packs else ""))
+    if a.reference and a.reference not in models:
+        sys.exit(f"{a.reference} has no finished results")
+    ref = insights.default_reference(rows, models, wanted)
+    bases = {m["label"]: m["base"] for m in e.cfg["models"] if m.get("base")}
+    out = Console(highlight=False)
+    for i, panel in enumerate(insights.panels(rows, models, e.packs, ref, bases, a.cost, engine=e), 1):
+        out.print(insights.render(panel, i), soft_wrap=True)
+        out.print()
+
+
 def cmd_report(argv):
     p = argparse.ArgumentParser(prog="tuieval report", description="Write the readiness report as markdown.")
     p.add_argument("-o", "--output", help="default: reports/readiness-<date>.md")
@@ -708,7 +744,7 @@ def cmd_export(argv):
 COMMANDS = {"add": cmd_add, "list": cmd_list, "scan": cmd_scan, "regrade": cmd_regrade,
             "verdict": cmd_verdict, "report": cmd_report, "items": cmd_items, "selftest": cmd_selftest,
             "capture": cmd_capture, "history": cmd_history, "machines": cmd_machines, "tune": cmd_tune,
-            "export": cmd_export, "remove": cmd_remove, "pta": cmd_pta}
+            "export": cmd_export, "remove": cmd_remove, "pta": cmd_pta, "insights": cmd_insights}
 
 
 def parse_tests(text, pack_names, known):
