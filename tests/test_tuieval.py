@@ -1030,6 +1030,56 @@ class AddToRun(unittest.TestCase):
         loads = [d["label"] for k, d in events if k == "model_loading"]
         self.assertEqual(loads.count("a"), 2)                                 # a's new pack: after it ended
 
+    def test_tui_asks_before_skipping_a_model(self):
+        path = os.path.join(self.ws, "models.toml")
+        write(path, read(path).replace('"--delay", "0.2"', '"--delay", "3"'))   # still running while it's asked
+        code = textwrap.dedent("""
+            import asyncio, json, time
+            from tuieval.tui import EvalsApp, RunScreen, ConfirmScreen
+            from textual.widgets import SelectionList
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    s.query_one("#suites", SelectionList).select("apps")
+                    s.selected_models = {"a"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+                    await pilot.pause()
+                    s.action_start()
+                    deadline = time.time() + 180     # CI machines can take long to start servers
+                    while time.time() < deadline:
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and app.screen.counts()[0]:
+                            break
+                    run, out = app.screen, {}
+                    for keys in (["k", "enter"], ["k", "k"], ["k", "n"], ["k", "escape"]):   # each one: no
+                        await pilot.press(keys[0])
+                        await pilot.pause()
+                        out.setdefault("asked", []).append(isinstance(app.screen, ConfirmScreen)
+                                                           and app.screen.focused.id == "no")
+                        await pilot.press(keys[1])
+                        await pilot.pause()
+                    out["kept"] = [run.running, app.screen is run, [j.status for j in run.jobs]]
+                    await pilot.press("k")
+                    await pilot.pause()
+                    await pilot.press("y")
+                    deadline = time.time() + 120
+                    while time.time() < deadline and run.running:
+                        await pilot.pause(0.2)
+                    out["skipped"] = [j.status for j in run.jobs]
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertEqual(out["asked"], [True] * 4)
+        self.assertEqual(out["kept"], [True, True, ["running"]])
+        self.assertEqual(out["skipped"], ["skipped"])
+
     def test_tui_adds_or_queues_while_running(self):
         code = textwrap.dedent("""
             import asyncio, json, time

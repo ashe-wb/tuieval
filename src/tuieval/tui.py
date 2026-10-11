@@ -1828,16 +1828,33 @@ class RetestScreen(ModalScreen):
 
 
 class ConfirmScreen(ModalScreen):
-    def __init__(self, question):
+    """Yes or no; No has the focus, so Enter by reflex changes nothing. y: yes; n or Esc: no
+    (and no_keys, e.g. the key that opened it, pressed again)."""
+    BINDINGS = [Binding("y", "answer(True)", "Yes", show=False), Binding("n", "answer(False)", "No", show=False),
+                Binding("escape", "answer(False)", "No", show=False)]
+
+    def __init__(self, question, no_keys=()):
         super().__init__()
         self.question = question
+        self.no_keys = no_keys
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
             yield Label(self.question)
             with Horizontal(classes="dialog-buttons"):
-                yield Button("Yes", id="yes", variant="error")
-                yield Button("No", id="no")
+                yield Button("Yes (y)", id="yes", variant="error")
+                yield Button("No (n)", id="no")
+
+    def on_mount(self):
+        self.query_one("#no", Button).focus()
+
+    def on_key(self, event):
+        if event.key in self.no_keys:
+            event.stop()
+            self.dismiss(False)
+
+    def action_answer(self, yes):
+        self.dismiss(yes)
 
     @on(Button.Pressed)
     def answer(self, event):
@@ -2611,13 +2628,25 @@ class RunScreen(Screen):
 
     # -- actions
     def action_skip_model(self):
-        if self.running:
-            if self.side_by_side and self.watch:
-                self.app.engine.skip_model(self.watch)
-                self.notify(f"Skipping {self.watch}; the others keep going…")
+        if not self.running:
+            return
+        one = self.watch if self.side_by_side and self.watch else None
+        names = [one] if one else self.active()
+        if not names:
+            return
+
+        def skip(yes):
+            if not yes or not self.running:
+                return
+            if one:
+                self.app.engine.skip_model(one)
+                self.notify(f"Skipping {one}; the others keep going…")
             else:
                 self.app.engine.skip_model()
                 self.notify("Skipping the current model…")
+        self.app.push_screen(ConfirmScreen(
+            f"Skip {', '.join(names)}? Answers so far are kept (a later run picks up from them); the rest "
+            f"of {'its' if len(names) == 1 else 'their'} questions in this run are skipped.", no_keys=("k",)), skip)
 
     def action_watch_next(self):
         """Stream the next model running alongside (from its next answer)."""
