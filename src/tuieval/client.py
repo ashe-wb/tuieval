@@ -99,10 +99,17 @@ def count_tokens(base_url, text):
         return None
 
 
-def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, headers=None):
+def _stalled(stall_s):
+    return f"server error: stalled, no tokens for {stall_s:.0f} s after it started answering"
+
+
+def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, headers=None, stall_s=None):
     """POST {base_url}/v1/chat/completions with streaming. Returns a dict (see module docstring).
 
     on_delta(kind, text) is called for "reasoning" and "answer" text as it arrives.
+    timeout bounds the whole request, keep-alive comments (OpenRouter's ": OPENROUTER PROCESSING")
+    included; running out counts against the model, like any slow answer. stall_s: once tokens have
+    started, this long without one is the server stalling (a server error, never the model's answer).
     """
     stream = stream or Stream()
     body = dict(body, stream=True, stream_options={"include_usage": True})
@@ -111,7 +118,7 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
     out = {"answer": "", "reasoning": "", "tool_calls": [], "finish": None, "usage": {}, "timings": {},
            "ttft_s": None, "total_s": None, "error": None}
     reasoning, answer, tools = [], [], {}
-    start = time.time()
+    start = last = time.time()
     try:
         conn.request("POST", prefix + "/v1/chat/completions", body=json.dumps(body),
                      headers={"Content-Type": "application/json", "Authorization": "Bearer none", **(headers or {})})
@@ -123,6 +130,13 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
             out["error"] = f"server returned HTTP {r.status}: {r.read()[:300].decode('utf-8', 'replace')}"
             return out
         for raw in r:
+            now = time.time()
+            if now - start > timeout:
+                out["error"] = f"connection error: timed out after {timeout:.0f} s in all"
+                break
+            if stall_s and out["ttft_s"] is not None and now - last > stall_s:
+                out["error"] = _stalled(stall_s)
+                break
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
@@ -147,8 +161,12 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
                     fn = tc.get("function") or {}
                     slot["name"] += fn.get("name") or ""
                     slot["arguments"] += fn.get("arguments") or ""
-                if (think or text or delta.get("tool_calls")) and out["ttft_s"] is None:
-                    out["ttft_s"] = time.time() - start
+                if think or text or delta.get("tool_calls"):
+                    last = time.time()
+                    if out["ttft_s"] is None:
+                        out["ttft_s"] = last - start
+                        if stall_s:      # a server that goes silent mid-answer: don't wait out the whole timeout
+                            stream.sock.settimeout(min(stall_s, timeout))
                 if think:
                     reasoning.append(think)
                     on_delta and on_delta("reasoning", think)
@@ -158,7 +176,8 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
     except (OSError, http.client.HTTPException, ValueError) as e:
         if stream.cancelled:
             raise Cancelled() from None
-        out["error"] = f"connection error: {e!r}"
+        stalled = stall_s and out["ttft_s"] is not None and isinstance(e, TimeoutError)
+        out["error"] = _stalled(stall_s) if stalled else f"connection error: {e!r}"
     finally:
         conn.close()
         out["total_s"] = time.time() - start

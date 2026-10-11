@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A server that stops sending tokens mid-answer for 5 minutes (`stall_timeout_ms`) is a server error: retried, never counted against the model. Keep-alive pings no longer stretch a request past `request_timeout_ms`.
+- The run screen's queue shows what each running model is doing: waiting, thinking or answering with ~tokens so far, and how long it's been quiet, so a model you aren't streaming doesn't look stuck.
 - Results, Per question: the side-by-side summary shows any number of models (it stopped at 8).
 - `max_tokens` in pack.toml sets one pack's output budget; changing it reruns only that pack. Models whose context or endpoint can't fit it are skipped for that pack.
 - The run screen's queue keeps the running model in view, unless you scroll it yourself (scrolling back to it follows again).

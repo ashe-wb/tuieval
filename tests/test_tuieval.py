@@ -2373,5 +2373,77 @@ class Logs(unittest.TestCase):
             self.assertEqual(out, "── chat ──\nchat line\n── coder-q4 ──\nq4 server started\n")
 
 
+class StallGuard(unittest.TestCase):
+    """A server that stops sending tokens mid-answer (keep-alive comments or silence) is a server error,
+    not the model's answer; keep-alives can't stretch a request past its overall timeout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        os.makedirs(os.path.join(cls.tmp.name, "packs"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def ask(self, *flags, **kw):
+        from tuieval import client
+        mock = Mock(os.path.join(self.tmp.name, "packs"), "fixed", None, 0.0, *flags)
+        try:
+            t = time.time()
+            res = client.stream_chat(f"http://127.0.0.1:{mock.port}/v1", {"model": "mock", "messages": [
+                {"role": "user", "content": "q"}]}, **kw)
+            return res, time.time() - t
+        finally:
+            mock.stop()
+
+    def test_keepalives_after_first_token_stall(self):
+        from tuieval import client
+        res, took = self.ask("--stall", "5", timeout=30, stall_s=1)
+        self.assertTrue(res["error"].startswith("server error: stalled"), res["error"])
+        self.assertTrue(client.is_server_error(res["error"]))
+        self.assertLess(took, 4)
+
+    def test_silence_after_first_token_stalls(self):
+        from tuieval import client
+        res, took = self.ask("--stall", "5", "--silent", timeout=30, stall_s=1)
+        self.assertTrue(client.is_server_error(res["error"]), res["error"])
+        self.assertIn("stalled", res["error"])
+        self.assertLess(took, 4)
+
+    def test_long_wait_before_first_token_is_not_a_stall(self):
+        res, _ = self.ask("--stall-before", "1.5", timeout=30, stall_s=1)
+        self.assertIsNone(res["error"])
+        self.assertIn("42", res["answer"])
+
+    def test_keepalives_dont_outlast_the_timeout(self):
+        from tuieval import client
+        res, took = self.ask("--stall-before", "5", timeout=1, stall_s=1)
+        self.assertIn("timed out", res["error"])
+        self.assertFalse(client.is_server_error(res["error"]))   # slow, like any timeout: counts
+        self.assertLess(took, 4)
+
+    def test_run_screen_shows_each_running_models_progress(self):
+        from types import SimpleNamespace
+        from tuieval import tui
+        calls = []
+        fake = SimpleNamespace(app=SimpleNamespace(closing=False, call_from_thread=lambda *a: calls.append(a)),
+                               watch="a", active=lambda: ["a", "b"], buf={"reasoning": [], "answer": []},
+                               buf_lock=threading.Lock(), req_live={}, QUIET_S=30, handle=None)
+        fake.live_note = lambda label: tui.RunScreen.live_note(fake, label)
+        ev = lambda kind, **d: tui.RunScreen.on_engine_event(fake, kind, **d)
+        ev("request_started", job=SimpleNamespace(label="b"), test="t")
+        self.assertIn("waiting", fake.live_note("b"))
+        ev("delta", stream="reasoning", text="x" * 400, label="b")      # b isn't streamed: still counted
+        self.assertEqual(fake.buf["reasoning"], [])
+        self.assertIn("thinking ~100 tok", fake.live_note("b"))
+        ev("delta", stream="answer", text="y" * 40, label="b")
+        self.assertIn("answering ~110 tok", fake.live_note("b"))
+        fake.req_live["b"]["last"] -= 90
+        self.assertIn("quiet 1m30s", fake.live_note("b"))
+        ev("request_done", job=SimpleNamespace(label="b"), record={})
+        self.assertEqual(fake.live_note("b"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

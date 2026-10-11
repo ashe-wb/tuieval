@@ -2229,6 +2229,7 @@ class Engine:
         self.emit("job_started", job=job, resumed=len(done_keys),
                   earlier_s=sum(s.get("wall_s") or 0 for s in job.earlier), sittings=len(job.earlier))
         timeout = self.cfg["defaults"]["request_timeout_ms"] / 1000
+        stall_s = (self.cfg["defaults"].get("stall_timeout_ms") or 0) / 1000 or None
         headers = self.request_headers(job.model)
         # a hosted API has no /tokenize to split reasoning from answer tokens (it reports the split)
         tokenize_url = None if self.cfg["servers"][job.model["server"]].get("api_key_env") else base_url
@@ -2253,7 +2254,8 @@ class Engine:
                         body = self._body(job, test, rep)
                         res = client.stream_chat(base_url, body,
                                                  lambda kind, text: self.emit("delta", stream=kind, text=text, label=job.label),
-                                                 timeout=timeout, stream=self._stream, headers=headers)
+                                                 timeout=timeout, stream=self._stream, headers=headers,
+                                                 stall_s=stall_s)
                     except client.Cancelled:
                         self._check()
                         raise Cancelled()
