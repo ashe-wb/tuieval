@@ -1660,6 +1660,51 @@ class FirstRun(unittest.TestCase):
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
         self.assertEqual(out, "['first'] ['my-model'] smoke False")   # tuning shows once something has run
 
+    def test_trimmed_names_keep_both_ends(self):
+        from tuieval.tui import fit_first_column, mid_trim, trim_names
+        name = "some-author--some-long-model-name-q4_k_m-vllm"
+        self.assertEqual(mid_trim(name, 20), "some-auth…4_k_m-vllm")
+        self.assertEqual(mid_trim("short", 20), "short")
+        rows = [[name, "[green]1/2[/green]", "10"], ["b", "2/2", "1,000"]]
+        fitted = fit_first_column(["Model", "Passed", "Tokens"], rows, 45)   # 2 + 8 + 8 cells for the rest
+        self.assertEqual([len(r[0]) for r in fitted], [27, 1])
+        self.assertEqual(fitted[0][1:], rows[0][1:])
+        self.assertEqual(len(fit_first_column(["Model", "Passed"], rows, 10)[0][0]), 24)   # never below the floor
+        twins = [f"author--model-number-{i}-and-a-long-tail" for i in range(3)]       # alike but in the middle
+        self.assertEqual(trim_names(twins, 20), ["au…0-and-a-long-tail", "au…1-and-a-long-tail",
+                                                 "au…2-and-a-long-tail"])
+        self.assertEqual(trim_names(twins, 10), twins)          # can't keep them apart that short: whole
+
+    def test_per_question_summary_fits_every_model(self):
+        tuieval(self.ws, "add", "my-model", "--server", "local")
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval import compare
+            from tuieval.tui import EvalsApp, ResultsScreen
+            from textual.widgets import DataTable, TabbedContent
+            models = [f"some-author--a-rather-long-model-name-number-{i:02d}-q4_k_m-vllm" for i in range(12)]
+            rows = [{"model": m, "suite": "p", "test": f"p: q{q}", "ok": q % 2 == 0, "latency": 1000, "tokens": 10,
+                     "truncated": False, "gen_tps": 20.0, "prompt_tps": None, "repeat": 0} for m in models for q in range(3)]
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    app.push_screen(ResultsScreen())
+                    await pilot.pause(0.5)
+                    app.screen.query_one(TabbedContent).active = "tab-per-question"
+                    await pilot.pause(0.3)
+                    app.screen.fill_pq_summary(compare.per_question(rows), models)
+                    await pilot.pause(0.3)
+                    t = app.screen.query_one("#pq-summary", DataTable)
+                    names = [str(t.get_row_at(i)[0]) for i in range(t.row_count)]
+                    print(t.row_count, t.region.height, t.virtual_size.width <= t.region.width,
+                          all(n.endswith("-q4_k_m-vllm") and "…" in n for n in names), len(set(names)))
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60)
+        self.assertEqual(out.stdout.strip(), "12 13 True True 12", out.stderr[-2000:])   # every row, no scroll
+
     def test_results_open_on_pta_index(self):
         tuieval(self.ws, "add", "my-model", "--server", "local")
         code = textwrap.dedent("""
