@@ -457,6 +457,7 @@ class Job:
     earlier: list = dataclasses.field(default_factory=list)  # earlier sittings (see Engine._sittings)
     stop_early: bool = False  # stop once the pack's FAIL is certain (verdict.fail_certain)
     first: list = dataclasses.field(default_factory=list)   # test ids round 1 asks first (most failed)
+    claimed: bool = False   # its model's server took it on: it can no longer be removed from the run
 
     @property
     def label(self):
@@ -1728,6 +1729,33 @@ class Engine:
             r["cond"].notify_all()
         return added, None if added else "everything picked is already in the run"
 
+    def removable(self, job):
+        """Why a job of the run going can't be removed (None: it can): only a pack not yet started."""
+        if job.status in ("done", "failed", "skipped"):
+            return "it has finished"
+        if job.claimed or job.status == "running":
+            return "it's running (k skips the model)"
+        return None
+
+    def remove_jobs(self, keys):
+        """Take jobs not yet started (removable) out of the run going, the reverse of add_jobs: they never
+        run, and a model left with none isn't started. Returns the jobs removed."""
+        removed = []
+        with self._run_lock:
+            r = self._run
+            if not r or not r["open"]:
+                return removed
+            for j in [j for j in r["jobs"] if j.key in keys and self.removable(j) is None]:
+                j.status, j.note = "removed", "removed from the run"
+                r["jobs"].remove(j)
+                for _, group in r["pending"]:
+                    if j in group:
+                        group.remove(j)
+                removed.append(j)
+            r["pending"][:] = [g for g in r["pending"] if g[1]]   # the lanes hold this very list
+            r["cond"].notify_all()
+        return removed
+
     def _run_lanes(self, parallel, parallel_hosted=4):
         """Run each model's jobs in its own lane: up to `parallel` local models at a time, in order (the
         next one starts once a lane is free, nothing running stops it (runs_alone), and its memory fits
@@ -2021,6 +2049,10 @@ class Engine:
             failed_in_row = 0
             for j in jobs:
                 self._check()
+                with self._run_lock:
+                    if j.status == "removed":   # taken out of the run while its model ran another pack
+                        continue
+                    j.claimed = True
                 try:
                     self._run_job(j, base_url, run_info, alive=info["alive"])
                 except BaseException as ex:

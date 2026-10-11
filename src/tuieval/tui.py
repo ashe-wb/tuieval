@@ -2131,6 +2131,7 @@ class RunScreen(Screen):
     # priority: these work whichever pane has focus (the text panes would otherwise swallow keys)
     BINDINGS = [
         Binding("k", "skip_model", "Skip model", priority=True),
+        Binding("x", "remove_job", "Remove from run", priority=True),
         Binding("c", "cancel_all", "Cancel all", priority=True),
         Binding("f", "toggle_follow", "Pause scroll", priority=True),
         Binding("v", "watch_next", "Next model", priority=True),
@@ -2141,7 +2142,7 @@ class RunScreen(Screen):
         Binding("q", "back", "Back", show=False, priority=True),
     ]
     kind = "Run"
-    LIVE_ONLY = {"skip_model", "cancel_all", "toggle_follow"}
+    LIVE_ONLY = {"skip_model", "remove_job", "cancel_all", "toggle_follow"}
     DONE_ONLY = set()
 
     def __init__(self, jobs, parallel=None):
@@ -2197,6 +2198,8 @@ class RunScreen(Screen):
     def check_action(self, action, parameters):
         if action == "watch_next":
             return self.running and self.side_by_side
+        if action == "remove_job":   # only while something is left to remove
+            return self.running and any(self.app.engine.removable(j) is None for j in self.jobs)
         if action in self.LIVE_ONLY:
             return self.running
         if action in self.DONE_ONLY:
@@ -2236,7 +2239,7 @@ class RunScreen(Screen):
         with Vertical(id="top"):
             yield Static(id="overall")
             yield ProgressBar(id="bar", show_eta=False)
-            yield DataTable(id="queue", cursor_type="none", zebra_stripes=True)
+            yield DataTable(id="queue", cursor_type="row", zebra_stripes=True)
         yield Static(id="current")
         with Horizontal(id="done-bar"):
             yield Button("New run  [n]", id="done-new", variant="success")
@@ -2382,10 +2385,12 @@ class RunScreen(Screen):
                 self.total += j.total
             self.query_one("#bar", ProgressBar).update(total=max(self.total, 1))
             self.event(f"added to this run: {', '.join(j.key for j in d['jobs'])}")
+            self.refresh_bindings()
             self.update_overall()
         elif kind in ("job_started", "job_update", "job_done"):
             job = d["job"]
             self.update_job(job)
+            self.refresh_bindings()   # x shows while a pack can still be removed
             if kind == "job_started" and d.get("resumed"):
                 earlier = (f" ({fmt_secs(d['earlier_s'])} over {d['sittings']} earlier sitting(s))"
                            if d.get("sittings") else "")
@@ -2647,6 +2652,44 @@ class RunScreen(Screen):
         self.app.push_screen(ConfirmScreen(
             f"Skip {', '.join(names)}? Answers so far are kept (a later run picks up from them); the rest "
             f"of {'its' if len(names) == 1 else 'their'} questions in this run are skipped.", no_keys=("k",)), skip)
+
+    def action_remove_job(self):
+        """Take the highlighted pack out of the run if it hasn't started (the reverse of adding it)."""
+        if not self.running:
+            return
+        q = self.query_one("#queue", DataTable)
+        try:
+            key = q.coordinate_to_cell_key(q.cursor_coordinate).row_key.value
+        except Exception:
+            key = None
+        job = next((j for j in self.jobs if j.key == key), None)
+        if job is None:
+            self.notify("Highlight a pack in the queue (click it or use ↑/↓ there), then press x.")
+            return
+        why = self.app.engine.removable(job)
+        if why:
+            self.notify(f"{job.label} · {job.pack.label} can't be removed: {why}.")
+            return
+
+        def remove(yes):
+            if not yes:
+                return
+            removed = self.app.engine.remove_jobs({job.key})
+            if not removed:
+                self.notify(f"{job.label} · {job.pack.label} started meanwhile, so it stays (k skips the model).")
+                return
+            for j in removed:
+                q.remove_row(j.key)
+                self.total -= j.total
+            self.query_one("#bar", ProgressBar).update(total=max(self.total, 1))
+            self.event(f"removed from this run: {', '.join(j.key for j in removed)}")
+            self.update_overall()
+            self.refresh_bindings()
+            self.app.refresh_live()
+            self.notify(f"Removed from the run: {job.label} · {job.pack.label}.")
+        self.app.push_screen(ConfirmScreen(
+            f"Remove {job.label} · {job.pack.label} from this run? It hasn't started, so nothing is lost; "
+            "Start can add it again later.", no_keys=("x",)), remove)
 
     def action_watch_next(self):
         """Stream the next model running alongside (from its next answer)."""
@@ -3518,7 +3561,7 @@ class EvalsApp(App):
             return
         run.handle("jobs_added", {"jobs": added})
         models = sorted({j.label for j in added})
-        self.notify(f"Added {len(added)} pack run(s) to the run going: {', '.join(models)}. w shows it.", timeout=10)
+        self.notify(f"Added {len(added)} pack run(s) to the run going: {', '.join(models)}. x removes a pack not started yet.", timeout=10)
         self.refresh_live()
 
     def enqueue(self, item):
