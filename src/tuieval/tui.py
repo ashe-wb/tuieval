@@ -2983,10 +2983,9 @@ class ResultsScreen(Screen):
         table.clear(columns=True)
         title = self.query_one("#pq-compare-title", Static)
         shared = [t for t in tests if all(m in t["cells"] for m in models)]
-        if len(models) < 2 or len(models) > 8:
+        if len(models) < 2:
             table.display = False
-            title.update("[dim]Pick 2 to 8 models (Models button) for a side-by-side summary.[/dim]"
-                         if len(models) > 8 else "")
+            title.update("")
             return
         table.display = True
         if not shared:
