@@ -355,6 +355,38 @@ def rich_escape(text):
     return text.replace("[", r"\[")
 
 
+def mid_trim(text, width, head=None):
+    """text cut to width cells with … in the middle, so both ends of a model name show (its family and
+    its server suffix, e.g. -llama / -vllm). head: how many leading characters to keep (default: half)."""
+    if cell_len(text) <= width or width < 5:
+        return text
+    head = width - 1 - width // 2 if head is None else min(head, width - 2)
+    return text[:head] + "…" + text[head - width + 1:]
+
+
+def trim_names(names, width):
+    """names cut to width (mid_trim), still telling them apart: when cutting the middle would make two
+    alike, the cut moves into the start they all share; if that's not enough either, names stay whole."""
+    trimmed = [mid_trim(n, width) for n in names]
+    if len(set(trimmed)) == len(set(names)):
+        return trimmed
+    shared = len(os.path.commonprefix(list(names)))
+    head = width - 1 - max(len(n) - shared for n in names)   # keep every name's end from where they differ
+    if head < 1:
+        return list(names)
+    trimmed = [mid_trim(n, width, head=head) for n in names]
+    return trimmed if len(set(trimmed)) == len(set(names)) else list(names)
+
+
+def fit_first_column(header, rows, room, floor=24):
+    """rows with the first cell trimmed in the middle (mid_trim) so a table of these columns fits room
+    cells across, but never below floor cells. Cells are Rich markup; each column adds 2 cells of padding."""
+    rest = sum(2 + max(cell_len(h), *(Text.from_markup(r[i]).cell_len for r in rows))
+               for i, h in enumerate(header) if i)
+    names = trim_names([r[0] for r in rows], max(floor, room - rest - 2))
+    return [[n] + r[1:] for n, r in zip(names, rows)]
+
+
 class BlockDumper(yaml.SafeDumper):
     """Multi-line strings (reference code, expected text) as readable | blocks, not escaped \\n."""
 
@@ -2981,6 +3013,9 @@ class ResultsScreen(Screen):
         self.query_one("#pta-left-out", Static).update(
             "\n".join(f"[dim]{rich_escape(line)}[/dim]" for line in pta.left_out_lines(result)))
         header, table = pta.table(result)
+        self.pta_shown = bool(table)    # to refit on resize
+        if table:
+            table = fit_first_column(header, table, (self.size.width or self.app.size.width) - 3)
         for i, h in enumerate(header):   # sized to the contents: added before the rows, a column keeps its header's width
             t.add_column(h, width=max(len(h), *(len(r[i]) for r in table)) if table else None)
         t.add_rows(table)
@@ -3065,6 +3100,14 @@ class ResultsScreen(Screen):
                 f"{os.path.basename(os.path.dirname(p))} · {os.path.basename(p)[:-5]}" for p in sorted(self.superseded))
                 + ". Only the new run's answers (◐) are shown for these.[/yellow]" if self.superseded else ""))
 
+    def on_resize(self, event):
+        """Refit the tables whose model names are trimmed to the window's width."""
+        if getattr(self, "pq_summary_args", None):
+            self.fill_pq_summary(*self.pq_summary_args)
+            self.sort_table(self.query_one("#pq-summary", DataTable))
+        if getattr(self, "pta_shown", False):
+            self.fill_pta()
+
     def fill_pq_summary(self, tests, models):
         """One row per shown model over the questions they ALL answered, so totals compare fairly;
         with two models, a head-to-head line."""
@@ -3081,9 +3124,11 @@ class ResultsScreen(Screen):
             title.update("[yellow]These models have no question in common (with the filters above).[/yellow]")
             table.display = False
             return
+        self.pq_summary_args = (tests, models)    # to refit on resize
         rows = compare.compare_models(shared, models)
-        table.add_columns("Model", "Total time", "Passed", "Median tokens", "Total tokens", "Tokens per ✓", "Median s",
-                          "Avg prompt tok/s", "Avg gen tok/s", "Fewest tokens", "Fastest", "Cut off")
+        # short headings so every column fits; the line above the table says what each one is
+        header = ("Model", "Time", "Passed", "Med tok", "Tokens", "Tok/✓", "Med s", "Prompt t/s", "Gen t/s",
+                  "Fewest", "Fastest", "Cut off")
         best = {k: max((r[k] for r in rows if r[k] is not None), default=None)
                 for k in ("passed", "fewest", "fastest", "avg_pp_tps", "avg_gen_tps")}
         low = {k: min(r[k] for r in rows if r[k] is not None) if any(r[k] is not None for r in rows) else None
@@ -3092,9 +3137,10 @@ class ResultsScreen(Screen):
         def hi(v, text, key, good):
             ref = best.get(key) if good == "max" else low.get(key)
             return f"[bold green]{text}[/bold green]" if v is not None and v == ref and len(rows) > 1 else text
+        cells = []
         for r in rows:
             tt = r["total_secs"]
-            table.add_row(r["model"],
+            cells.append([r["model"],
                           hi(tt, ("-" if not tt else f"{tt:.1f}s" if tt < 60 else fmt_secs(tt)), "total_secs", "min"),
                           hi(r["passed"], f"{r['passed']}/{r['n']}", "passed", "max"),
                           hi(r["med_tokens"], f"{r['med_tokens']:,.0f}" if r["med_tokens"] else "-", "med_tokens", "min"),
@@ -3107,7 +3153,9 @@ class ResultsScreen(Screen):
                              "max"),
                           hi(r["fewest"], str(r["fewest"]), "fewest", "max"),
                           hi(r["fastest"], str(r["fastest"]), "fastest", "max"),
-                          f"[red]{r['cut']}[/red]" if r["cut"] else "0")
+                          f"[red]{r['cut']}[/red]" if r["cut"] else "0"])
+        table.add_columns(*header)
+        table.add_rows(fit_first_column(header, cells, (self.size.width or self.app.size.width) - 3))
         line = f"[b]Comparison[/b] over the {len(shared)} questions all {len(models)} answered"
         if len(models) == 2:
             h = compare.head_to_head(shared, *models)
@@ -3121,9 +3169,10 @@ class ResultsScreen(Screen):
         if shared_speed:
             line += (f"\n[yellow]Some answers of {', '.join(shared_speed)} ran alongside other models, which "
                      "shared the machine's speed: compare their times with care.[/yellow]")
-        title.update(line + "  [dim]Fewest tokens / Fastest = questions won; ties count for both. Total tokens / "
-                     "Total time add up each question's median. Avg tok/s = all tokens over all the time they took "
-                     "(cached prompts left out).[/dim]")
+        title.update(line + "  [dim]Time / Tokens: each question's median, added up. Med tok / Med s: median "
+                     "per answer. Tok/✓: tokens per answer right. Prompt t/s / Gen t/s: all tokens over all the time "
+                     "they took (cached prompts left out). Fewest / Fastest: questions won; ties count for both. "
+                     "Cut off: answers that hit max_tokens.[/dim]")
 
     @staticmethod
     def pq_cell(c, best, here):
@@ -3277,7 +3326,7 @@ class EvalsApp(App):
     #pq-controls Select { width: 22; margin-right: 1; }
     #pq-models { margin-right: 1; min-width: 20; }
     #pq-compare-title { padding: 0 1; height: auto; }
-    #pq-summary { height: auto; max-height: 10; }
+    #pq-summary { height: auto; }   /* every picked model, no scrolling: the tab scrolls instead */
     #pq-legend { padding: 0 1; height: auto; }
     /* Tabs must read as tabs, not as a line of text: each tab is a button-like chip on its own band,
        the active one filled with the accent colour. (Textual's default: dimmed words on the background.) */
