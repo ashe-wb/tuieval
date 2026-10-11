@@ -1656,7 +1656,7 @@ class FirstRun(unittest.TestCase):
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
-        self.assertEqual(out, "ResultsScreen tab-pta | PTA index | Production readiness | Per question | Failures")
+        self.assertEqual(out, "ResultsScreen tab-pta | PTA index | Insights | Production readiness | Per question | Failures")
 
     def test_stream_follows_only_at_the_bottom(self):
         code = textwrap.dedent("""
@@ -2443,6 +2443,128 @@ class StallGuard(unittest.TestCase):
         self.assertIn("quiet 1m30s", fake.live_note("b"))
         ev("request_done", job=SimpleNamespace(label="b"), record={})
         self.assertEqual(fake.live_note("b"), "")
+
+
+class Insights(unittest.TestCase):
+    """Results → Insights: each chart's numbers and the action lines under it."""
+
+    @staticmethod
+    def rows():
+        from types import SimpleNamespace
+        out = []
+
+        def add(model, suite, i, ok, tokens=100, secs=10, **kw):
+            reason = kw.pop("reason", "ok" if ok else "expected 1, got 2")
+            out.append({"model": model, "suite": suite, "test": f"{suite}: q{i}", "name": f"{suite}: q{i}", "ok": ok,
+                        "reason": reason, "error": False, "truncated": kw.pop("truncated", False), "tokens": tokens,
+                        "latency": secs * 1000, "gen_tps": None, "repeat": 0, "severity": kw.pop("severity", None),
+                        "raw": {"category": kw.pop("category", "cat-" + str(i % 2)), "description": f"question {i}"}})
+        for i in range(20):
+            suite = "code" if i < 10 else "data"
+            add("ref", suite, i, True, tokens=400)
+            add("tuned", suite, i, i % 2 == 1 or suite == "code", tokens=100, category="odd" if i % 2 else "even")
+            add("base", suite, i, i not in (0, 1), tokens=120, category="odd" if i % 2 else "even")
+            add("long", suite, i, i < 5, tokens=900, truncated=i >= 5,
+                reason="ok" if i < 5 else "TRUNCATED: hit max_tokens before finishing")
+        packs = {"code": SimpleNamespace(group="Coding", label="Code", tests=[{}] * 10),
+                 "data": SimpleNamespace(group="Data", label="Data pack", tests=[{}] * 10)}
+        return out, packs
+
+    def test_panels(self):
+        from rich.text import Text
+        from tuieval import insights
+        rows, packs = self.rows()
+        rows, models = insights.prepare(rows)
+        self.assertEqual(insights.default_reference(rows, models), "ref")
+        self.assertEqual(insights.default_reference(rows, models, "base"), "base")
+        plain = lambda p: Text.from_markup(insights.render(p)).plain
+
+        p = insights.vs_reference(rows, models, "ref")
+        self.assertIn("Behind ref for certain: tuned (-25.0), long (-75.0)", " ".join(p["actions"]))
+        self.assertIn("WORSE", plain(p))
+
+        p = insights.use_cases(rows, models, packs)
+        self.assertIn("Coding: use ref or tuned (100%); next base (80.0%, 20 pts behind).", p["actions"])
+        self.assertIn("★", plain(p))
+
+        p = insights.vs_base(rows, models, {}, packs)
+        self.assertIn('base = "<label of its base model>"', plain(p))
+        p = insights.vs_base(rows, models, {"tuned": "base"}, packs)
+        text = plain(p)
+        self.assertIn("tuned vs base", text)
+        self.assertIn("lost on: even", text)          # failed every even data question the base passed
+        self.assertTrue(any(a.startswith("tuned is worse than its base on Data pack") for a in p["actions"]),
+                        p["actions"])
+
+        p = insights.failure_mix(rows, models)
+        self.assertIn("long: 15 of its 15 failures are cut off", " ".join(p["actions"]))
+        self.assertIn("25.0% right (20 answers; 15 cut off)", plain(p))
+        self.assertEqual(insights.kind({"ok": False, "severity": "critical", "truncated": True, "reason": "x"}),
+                         "critical")
+        self.assertEqual(insights.kind({"ok": False, "truncated": False, "reason": "No 'ANSWER:' line found"}),
+                         "no answer / format")
+
+        p = insights.accuracy_cost(rows, models, hosted={"ref"})
+        self.assertEqual(insights.front(insights.cost_points(rows, models)[0]), {"ref", "base", "tuned"})
+        self.assertIn("Best trade-offs: ref, base, tuned.", p["actions"])
+        self.assertIn("Among local models: base, tuned.", p["actions"])
+        self.assertIn("tuned is at least as accurate with fewer tokens than long (11% of its tokens).", p["actions"])
+
+        p = insights.question_health(rows, models)
+        self.assertIn("0 every model fails", plain(p))
+        self.assertTrue(any(a.startswith("3 questions every model passes") and "saving ~30s per model" in a for a in p["actions"]), p["actions"])
+
+    def test_cli_and_tui(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            d = os.path.join(ws, "packs", "apps")
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), 'label = "apps"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"), "".join(
+                f"- {{id: {t}, input: question {t}, expected: 1, reference: 'ANSWER: 1', wrong: ['ANSWER: 2'], "
+                "difficulty: easy}\n" for t in "abcd"))
+            right = Mock(os.path.join(ws, "packs"), "oracle")
+            wrong = Mock(os.path.join(ws, "packs"), "wrong")
+            try:
+                with open(os.path.join(ws, "models.toml"), "a") as f:
+                    f.write(f'\n[servers.here]\nurl = "http://127.0.0.1:{right.port}"\n'
+                            f'\n[servers.there]\nurl = "http://127.0.0.1:{wrong.port}"\n')
+                tuieval(ws, "add", "mock", "--server", "here", "--label", "good")
+                tuieval(ws, "add", "mock", "--server", "there", "--label", "bad")
+                tuieval(ws, "run", "--tier", "certify")
+            finally:
+                right.stop()
+                wrong.stop()
+            out = tuieval(ws, "insights").stdout
+            for title in ("1 Who's worth keeping", "2 Best model per use case", "4 Why models fail", "7 Next runs"):
+                self.assertIn(title, out)
+            self.assertIn("Behind good for certain: bad (-100.0)", out)
+            self.assertIn("Reference: bad", tuieval(ws, "insights", "--reference", "bad").stdout)
+            code = textwrap.dedent("""
+                import asyncio
+                from tuieval.tui import EvalsApp, ResultsScreen
+                from textual.widgets import Select, Static, TabbedContent
+                async def go():
+                    app = EvalsApp({})
+                    async with app.run_test(size=(180, 60)) as pilot:
+                        await pilot.pause()
+                        app.push_screen(ResultsScreen())
+                        await pilot.pause(0.5)
+                        app.screen.query_one(TabbedContent).active = "tab-insights"
+                        await pilot.pause(0.5)
+                        text = str(app.screen.query_one("#ins-panels", Static).render())
+                        print("good" == app.screen.query_one("#ins-ref", Select).value, "7 Next runs" in text,
+                              "Behind good for certain" in text)
+                        app.screen.query_one("#ins-ref", Select).value = "bad"
+                        await pilot.pause(0.5)
+                        text = str(app.screen.query_one("#ins-panels", Static).render())
+                        print("Reference: bad" in text, app.insights_ref)
+                asyncio.run(go())
+            """)
+            p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                               env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""), timeout=90)
+            self.assertEqual(p.stdout.split(), ["True", "True", "True", "True", "bad"], p.stderr[-2000:])
 
 
 if __name__ == "__main__":

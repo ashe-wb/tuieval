@@ -40,6 +40,7 @@ In the TUI, `a` adds a model and `m` scans your model folders. Each model is one
 | `max_context` (other servers) | the context the server provides; packs whose prompts need more are skipped |
 | `kv_type` (llama) | e.g. `"q8_0"`: a quantized KV cache, which makes it a different model (give it its own label) |
 | `tools = false` | packs that need tool calling are skipped |
+| `base` | for a fine-tune: the label of its base model, compared in Results → Insights |
 
 Results record the settings each model actually ran with, and the results screen notes any differences between models.
 
@@ -108,6 +109,20 @@ The **PTA index** puts parsimony (tokens), time and accuracy side by side, as a 
 The P and T bars are as long as the tokens and time used: the model that used the most fills its bar, the others in proportion (at least one block), so **shorter is better**. The A bar is the share of answers right, so **longer is better**; it's full only when every answer passed. Each heading says which way is better.
 
 Models are compared on the questions all of them answered, so one that skipped some never looks faster. Server and connection errors aren't answers: a model with only those is listed as having none. A model with fewer than half as many answers as the most-answered one is left out (and listed), or it would shrink the shared questions for everyone. Pick the models and pack to compare in the TUI, or use `--only` and `--packs`: models you pick are always compared.
+
+## Insights
+
+Results → **Insights** (also `tuieval insights`) turns the results into charts, each with plain lines on what to do:
+
+1. **Who's worth keeping**: every model against a reference model, paired on the questions both answered: the difference in accuracy points with its 95% CI, and better, tie or worse. Pick the reference in the tab or with `--reference`; set a default with `reference = "<label>"` under `[defaults]` in `models.toml`. Without one, the most accurate model is the reference.
+2. **Best model per use case**: a heatmap of accuracy per model and use case (pack group); ★ marks the best among models that answered most of it.
+3. **Fine-tunes against their base model**: for each model with `base = "<label>"` in its `[[models]]` block, the difference per pack and the question categories (a test's `category`) it gained or lost most.
+4. **Why models fail**: each model's answers split into right, wrong, cut off at max_tokens, no answer or bad format, code that crashed or hung, and critical failures.
+5. **Accuracy against cost**: accuracy against median tokens (or seconds) per question, over the questions every model answered; green models are the ones no other model beats on both. With hosted and local models together, the best local trade-offs get their own line.
+6. **Question health**: questions every model fails (check them), every model passes (they don't separate models), and the ones that split models most.
+7. **Next runs**: the Certify runs that would settle the open verdicts of the strongest models, with their time and command.
+
+Models are the ones picked with **Models** (shared with the other tabs), else every model with at least half as many answers as the most-answered one. Server and connection errors aren't answers.
 
 ## Tuning
 
@@ -192,6 +207,7 @@ A workspace's `models.toml` only needs what differs from these. `[defaults]` fil
 repeat = 3
 request_timeout_ms = 1800000   # per request; long thinking runs need it
 stall_timeout_ms = 300000      # no tokens this long once answering began: the server stalled (retried, not counted)
+# reference = "<label>"        # the model Results → Insights compares against by default
 ready_timeout_s = 1200         # how long a model may take to load before giving up
 model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
 

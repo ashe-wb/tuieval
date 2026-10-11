@@ -2690,6 +2690,14 @@ class ResultsScreen(Screen):
                 yield Static(id="pta-bars")
                 yield DataTable(id="pta", zebra_stripes=True, cursor_type="none")
                 yield Static(id="pta-left-out")
+            with TabPane("Insights", id="tab-insights"):
+                with Horizontal(id="ins-controls"):
+                    yield Select([], id="ins-ref", prompt="Reference model", allow_blank=True)
+                    yield Select([("Cost: tokens", "tokens"), ("Cost: time", "time")], id="ins-cost",
+                                 allow_blank=False, value="tokens")
+                    yield Button("Models: all", id="ins-models")
+                with VerticalScroll(id="ins-body"):
+                    yield Static(id="ins-panels")
             with TabPane("Production readiness"):
                 yield Static(id="readiness-short")
                 yield Static(self.READINESS_HELP, id="readiness-help")
@@ -2799,6 +2807,9 @@ class ResultsScreen(Screen):
         self.fill_per_question()
         self.fill_pta()
         self.fill_readiness(results_dir)
+        self.insights_stale = True
+        if self.query_one(TabbedContent).active == "tab-insights":
+            self.fill_insights()
         self.sort_tables()
 
     @on(DataTable.RowSelected, "#failures")
@@ -2863,6 +2874,7 @@ class ResultsScreen(Screen):
 
     @on(Button.Pressed, "#pq-models")
     @on(Button.Pressed, "#pta-models")
+    @on(Button.Pressed, "#ins-models")
     def pick_models(self):
         counts = {}
         for t in getattr(self, "pq_all_tests", []):
@@ -2881,7 +2893,54 @@ class ResultsScreen(Screen):
             # after the picker has closed: a table rebuilt under a modal keeps its header-only widths
             self.call_after_refresh(self.fill_per_question)
             self.call_after_refresh(self.fill_pta)
+            self.insights_stale = True
+            if self.query_one(TabbedContent).active == "tab-insights":
+                self.call_after_refresh(self.fill_insights)
         self.app.push_screen(ModelPickScreen(models, counts, self.app.pq_models), picked)
+
+    # -- insights: charts with what to do next (insights.py); built when the tab is first shown
+    @on(TabbedContent.TabActivated)
+    def tab_activated(self, event):
+        if event.pane.id == "tab-insights" and getattr(self, "insights_stale", True):
+            self.fill_insights()
+
+    @on(Select.Changed, "#ins-ref")
+    @on(Select.Changed, "#ins-cost")
+    def insights_changed(self, event):
+        if event.select.id == "ins-ref" and event.value != Select.BLANK:
+            self.app.insights_ref = event.value   # kept for this session
+        if getattr(self, "rows", None) is not None and not getattr(self, "filling_insights", False):
+            self.fill_insights()
+
+    def fill_insights(self):
+        from . import insights
+        e = self.app.engine
+        self.insights_stale = False
+        rows = [r for r in self.rows if r.get("path") not in self.superseded]
+        body = self.query_one("#ins-panels", Static)
+        if not rows:
+            body.update("No finished results yet.")
+            return
+        sel = self.query_one("#ins-ref", Select)
+        every = sorted({r["model"] for r in rows if not r.get("error")})
+        wanted = getattr(self.app, "insights_ref", None) or e.cfg["defaults"].get("reference")
+        rows, models = insights.prepare(rows, self.app.pq_models, wanted if wanted in every else None)
+        ref = insights.default_reference(rows, models, wanted)
+        self.filling_insights = True
+        try:
+            with sel.prevent(Select.Changed):
+                sel.set_options([(m, m) for m in every])
+                if ref:
+                    sel.value = ref
+        finally:
+            self.filling_insights = False
+        chosen = {m for m in self.app.pq_models if m in every}
+        self.query_one("#ins-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
+        main = os.path.abspath(self.results_dir or e.results_dir) == os.path.abspath(e.results_dir)
+        bases = {m["label"]: m["base"] for m in e.cfg["models"] if m.get("base")}
+        by = self.query_one("#ins-cost", Select).value or "tokens"
+        out = insights.panels(rows, models, e.packs, ref, bases, by, engine=e if main else None)
+        body.update("\n\n".join(insights.render(p, i) for i, p in enumerate(out, 1)))
 
     @on(Select.Changed, "#pta-pack")
     def pta_changed(self):
@@ -3206,6 +3265,10 @@ class EvalsApp(App):
     #toggle-smoke { width: auto; min-width: 32; }
     #pq-controls { height: 3; }
     #pta-controls { height: 3; }
+    #ins-controls { height: 3; }
+    #ins-controls Select { width: 40; margin-right: 1; }
+    #ins-controls #ins-cost { width: 20; }
+    #ins-body { height: 1fr; }
     #pta-controls Select { width: 28; margin-right: 1; }
     #pta-bars { height: auto; padding: 1 0 0 0; }
     #pta { width: 1fr; height: auto; margin-top: 1; }
