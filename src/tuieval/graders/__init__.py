@@ -124,7 +124,7 @@ def strip_thinking(text):
     text = THINK_RE.sub("", text or "")
     if "</think>" in text:
         before, after = text.rsplit("</think>", 1)
-        text = after if after.strip() else before   # a stray closing tag after the answer
+        text = after if after.strip(" \t\r\n`") else before   # a stray closing tag (or fence) after the answer
     return text.replace("<think>", "").replace("</think>", "").strip()
 
 

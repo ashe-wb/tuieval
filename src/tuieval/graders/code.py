@@ -15,8 +15,24 @@ from . import grader, result
 
 
 def _extract_code(text):
-    blocks = re.findall(r"```(?:python|py)?[ \t]*\n(.*?)```", text, re.DOTALL)
-    return blocks[-1] if blocks else text  # last block = the final answer, not a draft
+    """The last python (or untagged) fenced block: the final answer, not a draft. A doubled
+    opening fence is one fence, and a stray fence after the last block is ignored."""
+    blocks, lang, cur = [], None, None
+    for line in text.splitlines(keepends=True):
+        fence = line.strip()
+        if not fence.startswith("```"):
+            if cur is not None:
+                cur.append(line)
+        elif cur is None:
+            lang, cur = fence[3:].strip().lower(), []
+        elif fence[3:].strip() and not "".join(cur).strip():
+            lang = fence[3:].strip().lower()   # ```python twice
+        else:
+            if lang in ("", "python", "py", "python3"):
+                blocks.append("".join(cur))
+            cur = None
+    blocks = [b for b in blocks if b.strip()]
+    return blocks[-1] if blocks else text
 
 
 CHECK_RE = re.compile(r"^# (SETUP|CHECK: *(.+?)) *$")

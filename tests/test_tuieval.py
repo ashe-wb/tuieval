@@ -254,6 +254,14 @@ class Units(unittest.TestCase):
         self.assertEqual(strip_thinking("leaked thoughts</think>\n42"), "42")
         self.assertEqual(strip_thinking("```python\nx = 1\n```\n</think>\n"), "```python\nx = 1\n```")
         self.assertEqual(strip_thinking("</think>"), "")
+        self.assertEqual(strip_thinking("```python\nx = 1\n```\n</think>\n```"), "```python\nx = 1\n```")
+
+    def test_extract_code_tolerates_doubled_and_stray_fences(self):
+        from tuieval.graders.code import _extract_code
+        self.assertEqual(_extract_code("```python\n```python\nx = 1\n```\n```"), "x = 1\n")
+        self.assertEqual(_extract_code("```py\nold\n```\ntext\n```python\nnew\n```"), "new\n")   # last block wins
+        self.assertEqual(_extract_code("```python\nx = 1\n```\n```bash\nrun it\n```"), "x = 1\n")
+        self.assertEqual(_extract_code("x = 1"), "x = 1")
 
     def test_settings_note_names_only_what_differs(self):
         from tuieval import compare
