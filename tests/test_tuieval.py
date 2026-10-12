@@ -1571,6 +1571,17 @@ class PTAIndex(unittest.TestCase):
                         app.screen.query_one(TabbedContent).active = "tab-failures"
                         await pilot.pause(0.3)
                         f = app.screen.query_one("#failures", DataTable)
+                        count = lambda: str(app.screen.query_one("#fail-count", Static).render())
+                        fails = {"all": [f.row_count, count()]}
+                        for m in ("good", "hosted"):                            # Models: only that model's failures
+                            app.pq_models = {m}
+                            app.screen.fill_failures()
+                            await pilot.pause(0.2)
+                            fails[m] = [f.row_count, count(), str(app.screen.query_one("#fail-models").label),
+                                        sorted({str(f.get_row_at(r)[0]) for r in range(f.row_count)})]
+                        app.pq_models = set()
+                        app.screen.fill_failures()
+                        await pilot.pause(0.2)
                         await click_header(f, "Test")
                         sorts["tests"], _ = await click_header(f, "Test")
                         sorts["tests"] = [str(f.get_row_at(r)[2]) for r in range(f.row_count)]
@@ -1581,7 +1592,7 @@ class PTAIndex(unittest.TestCase):
                         s = app.screen
                         sorts["opened"] = s.entries[s.index]["record"]["test"]
                         print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone],
-                                          "tab": tab, "sorts": sorts}))
+                                          "tab": tab, "sorts": sorts, "fails": fails}))
                 asyncio.run(go())
             """)
             p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
@@ -1596,6 +1607,10 @@ class PTAIndex(unittest.TestCase):
             self.assertEqual((s["up"], s["down"], s["kept"]), (["hosted", "good"], ["good", "hosted"], ["good", "hosted"]))
             self.assertIn("answers right ▼", s["labels"])
             self.assertEqual((s["tests"][0], s["opened"]), ("apps: d", "d"))
+            fails = got["fails"]
+            self.assertEqual(fails["all"], [4, "4 failures"])
+            self.assertEqual(fails["good"], [0, "0 failures of 1 model", "Models: 1 picked", []])
+            self.assertEqual(fails["hosted"], [4, "4 failures of 1 model", "Models: 1 picked", ["hosted"]])
 
 
 class Unavailable(unittest.TestCase):
