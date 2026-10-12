@@ -454,7 +454,8 @@ with the model's reasoning and answer as they stream, then recent results with t
                          Results open here.
   Production readiness   one verdict per model and use case; the table says why and what to run next
   Per question           every question, model by model (filters: pack, level, Models disagree)
-  Failures               every wrong answer with the grader's reason; enter opens it in full
+  Failures               every wrong answer with the grader's reason (filter: Models); enter opens it
+                         in full
 
 Click a column name to sort a table by it; click it again to reverse. Empty cells stay last.
 
@@ -2825,6 +2826,9 @@ class ResultsScreen(Screen):
                 yield Static(id="pq-legend")
                 yield DataTable(id="per-question", zebra_stripes=True, cursor_type="cell")
             with TabPane("Failures", id="tab-failures"):
+                with Horizontal(id="fail-controls"):
+                    yield Button("Models: all", id="fail-models")
+                    yield Static(id="fail-count")
                 yield Static("[dim]Enter on a row shows the whole answer, its reasoning and what was checked.[/dim]")
                 yield DataTable(id="failures", zebra_stripes=True, cursor_type="row")
         yield Footer()
@@ -2902,12 +2906,7 @@ class ResultsScreen(Screen):
         info.update(f"{len(paths)} {'Smoke ' if smoke else ''}result files in {os.path.relpath(results_dir)}/" + banner
                     + "".join(f"\n[yellow]⚠ {n}[/yellow]" for n in notes))
         self.rows, self.infos = rows, infos
-        f = self.query_one("#failures", DataTable)
-        f.add_columns("Model", "Level", "Test", "Reason")
-        # compare.failures lists the failed rows in order, so they line up with fail_rows
-        self.fail_rows = [r for r in rows if not r["ok"]]
-        for i, (model, test, reason, level) in enumerate(compare.failures(rows)):
-            f.add_row(model, diff_badge(level), rich_escape(test), rich_escape(reason[:130]), key=str(i))
+        self.fill_failures()
         self.fill_per_question()
         self.fill_pta()
         self.fill_readiness(results_dir)
@@ -2915,6 +2914,24 @@ class ResultsScreen(Screen):
         if self.query_one(TabbedContent).active == "tab-insights":
             self.fill_insights()
         self.sort_tables()
+
+    def fill_failures(self):
+        """Every wrong answer, of the models picked (Models: shared with the other tabs)."""
+        f = self.query_one("#failures", DataTable)
+        f.clear(columns=True)
+        f.add_columns("Model", "Level", "Test", "Reason")
+        every = {r["model"] for r in self.rows}
+        chosen = {m for m in self.app.pq_models if m in every}
+        rows = [r for r in self.rows if not chosen or r["model"] in chosen]
+        # compare.failures lists the failed rows in order, so they line up with fail_rows
+        self.fail_rows = [r for r in rows if not r["ok"]]
+        for i, (model, test, reason, level) in enumerate(compare.failures(rows)):
+            f.add_row(model, diff_badge(level), rich_escape(test), rich_escape(reason[:130]), key=str(i))
+        self.query_one("#fail-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
+        n = len(self.fail_rows)
+        self.query_one("#fail-count", Static).update(
+            f"{n} failure{'s' * (n != 1)}" + (f" of {len(chosen)} model{'s' * (len(chosen) != 1)}" if chosen else ""))
+        self.sort_table(f)
 
     @on(DataTable.RowSelected, "#failures")
     def failure_selected(self, event):
@@ -2979,6 +2996,7 @@ class ResultsScreen(Screen):
     @on(Button.Pressed, "#pq-models")
     @on(Button.Pressed, "#pta-models")
     @on(Button.Pressed, "#ins-models")
+    @on(Button.Pressed, "#fail-models")
     def pick_models(self):
         counts = {}
         for t in getattr(self, "pq_all_tests", []):
@@ -2997,6 +3015,7 @@ class ResultsScreen(Screen):
             # after the picker has closed: a table rebuilt under a modal keeps its header-only widths
             self.call_after_refresh(self.fill_per_question)
             self.call_after_refresh(self.fill_pta)
+            self.call_after_refresh(self.fill_failures)
             self.insights_stale = True
             if self.query_one(TabbedContent).active == "tab-insights":
                 self.call_after_refresh(self.fill_insights)
@@ -3397,6 +3416,9 @@ class EvalsApp(App):
     #pq-controls Checkbox { width: auto; }
     #pq-controls Select { width: 22; margin-right: 1; }
     #pq-models { margin-right: 1; min-width: 20; }
+    #fail-controls { height: 3; }
+    #fail-models { margin-right: 1; min-width: 20; }
+    #fail-count { width: auto; padding: 1 1; }
     #pq-compare-title { padding: 0 1; height: auto; }
     #pq-summary { height: auto; }   /* every picked model, no scrolling: the tab scrolls instead */
     #pq-legend { padding: 0 1; height: auto; }
