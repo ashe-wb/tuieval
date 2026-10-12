@@ -123,8 +123,9 @@ def strip_thinking(text):
     """Safety net for servers that leave <think> blocks in the answer."""
     text = THINK_RE.sub("", text or "")
     if "</think>" in text:
-        text = text.split("</think>")[-1]
-    return text.strip()
+        before, after = text.rsplit("</think>", 1)
+        text = after if after.strip() else before   # a stray closing tag after the answer
+    return text.replace("<think>", "").replace("</think>", "").strip()
 
 
 def grade(test, answer, meta=None):

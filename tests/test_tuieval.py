@@ -248,6 +248,13 @@ class WorkspaceGraders(unittest.TestCase):
 
 
 class Units(unittest.TestCase):
+    def test_strip_thinking_keeps_answer_before_stray_close_tag(self):
+        from tuieval.graders import strip_thinking
+        self.assertEqual(strip_thinking("<think>hm</think>\n42"), "42")
+        self.assertEqual(strip_thinking("leaked thoughts</think>\n42"), "42")
+        self.assertEqual(strip_thinking("```python\nx = 1\n```\n</think>\n"), "```python\nx = 1\n```")
+        self.assertEqual(strip_thinking("</think>"), "")
+
     def test_settings_note_names_only_what_differs(self):
         from tuieval import compare
         infos = [{"label": m, "settings": {"temperature": 1.0, **extra}} for m, extra in

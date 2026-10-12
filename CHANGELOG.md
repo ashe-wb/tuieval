@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: an answer followed by a stray `</think>` was graded as empty; the answer before the tag is graded now.
 - Run screen: `x` removes the highlighted pack from the run going if it hasn't started (the reverse of adding it); a model left with nothing isn't started.
 - `k` (skip model) asks first, naming the model. Yes/no dialogs start on No; `y` answers yes, `n` or Esc no.
 - Fix: hosted models no longer count as running alongside local ones (they don't share the machine), so a one-model-at-a-time setup no longer gets the "ran alongside other models" note. Older results are read the same way.
