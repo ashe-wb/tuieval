@@ -1609,6 +1609,23 @@ class PTAIndex(unittest.TestCase):
                         app.screen.fill_pta()                                   # rebuilt: still sorted
                         await pilot.pause(0.2)
                         sorts["kept"] = [str(pta_t.get_row_at(r)[0]) for r in range(pta_t.row_count)]
+                        bars_w = app.screen.query_one("#pta-bars", Static)
+                        shown = [x["model"] for x in app.screen.pta_result["models"]]
+                        await pilot.click(bars_w, offset=(1, 1 + 2 + shown.index("hosted")))   # a click on its name
+                        await pilot.pause(0.3)
+                        clicks = {"removed": [sorted(app.pq_models), [x["model"] for x in app.screen.pta_result["models"]],
+                                              "Removed: hosted" in str(bars_w.render())]}
+                        await pilot.click(bars_w, offset=(1, 1 + 2))                         # the last one stays
+                        await pilot.pause(0.3)
+                        clicks["last"] = sorted(app.pq_models)
+                        app.screen.action_pta_restore(0)
+                        await pilot.pause(0.3)
+                        clicks["restored"] = [sorted(app.pq_models), len(app.screen.pta_result["models"])]
+                        app.screen.action_pta_remove(shown.index("hosted"))
+                        app.screen.action_pta_restore_all()
+                        await pilot.pause(0.3)
+                        clicks["all"] = [sorted(app.pq_models), "Removed" in str(bars_w.render())]
+                        sorts["clicks"] = clicks
                         app.screen.query_one(TabbedContent).active = "tab-failures"
                         await pilot.pause(0.3)
                         f = app.screen.query_one("#failures", DataTable)
@@ -1647,6 +1664,11 @@ class PTAIndex(unittest.TestCase):
             s = got["sorts"]   # a click on a column name sorts by it, a second click reverses
             self.assertEqual((s["up"], s["down"], s["kept"]), (["hosted", "good"], ["good", "hosted"], ["good", "hosted"]))
             self.assertIn("answers right ▼", s["labels"])
+            c = s["clicks"]   # a click on a name in the bars leaves it out of every tab; the last one stays
+            self.assertEqual(c["removed"], [["good"], ["good"], True])
+            self.assertEqual(c["last"], ["good"])
+            self.assertEqual(c["restored"], [["good", "hosted"], 2])
+            self.assertEqual(c["all"], [[], False])
             self.assertEqual((s["tests"][0], s["opened"]), ("apps: d", "d"))
             fails = got["fails"]
             self.assertEqual(fails["all"], [4, "4 failures"])

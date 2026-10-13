@@ -451,7 +451,7 @@ with the model's reasoning and answer as they stream, then recent results with t
   PTA index              parsimony (tokens), time and accuracy per model, a bar each: tokens and time
                          as long as they took (shorter is better; 2.4× = 2.4 times the best), accuracy
                          longer is better. Per-answer numbers, tok/s, TTFT and memory in the table.
-                         Results open here.
+                         Results open here. Click a model's name to remove it from view (every tab).
   Production readiness   one verdict per model and use case; the table says why and what to run next
   Per question           every question, model by model (filters: pack, level, Models disagree)
   Failures               every wrong answer with the grader's reason (filter: Models); enter opens it
@@ -3032,21 +3032,50 @@ class ResultsScreen(Screen):
         models = sorted(counts, key=lambda m: (-counts[m], m))
 
         def picked(chosen):
-            if chosen is None:
-                return
-            first = chosen and not self.app.pq_models
-            self.app.pq_models = chosen  # kept for this session, so reopening Results keeps it
-            if first:  # a fair comparison needs the same questions: turn it on (you can untick it)
-                with self.query_one("#pq-shared", Checkbox).prevent(Checkbox.Changed):
-                    self.query_one("#pq-shared", Checkbox).value = True
-            # after the picker has closed: a table rebuilt under a modal keeps its header-only widths
-            self.call_after_refresh(self.fill_per_question)
-            self.call_after_refresh(self.fill_pta)
-            self.call_after_refresh(self.fill_failures)
-            self.insights_stale = True
-            if self.query_one(TabbedContent).active == "tab-insights":
-                self.call_after_refresh(self.fill_insights)
+            if chosen is not None:
+                self.set_models(chosen)
         self.app.push_screen(ModelPickScreen(models, counts, self.app.pq_models), picked)
+
+    def set_models(self, chosen):
+        """The models every Results tab compares (none: all of them)."""
+        first = chosen and not self.app.pq_models
+        self.app.pq_models = chosen  # kept for this session, so reopening Results keeps it
+        if first:  # a fair comparison needs the same questions: turn it on (you can untick it)
+            with self.query_one("#pq-shared", Checkbox).prevent(Checkbox.Changed):
+                self.query_one("#pq-shared", Checkbox).value = True
+        # after a picker has closed: a table rebuilt under a modal keeps its header-only widths
+        self.call_after_refresh(self.fill_per_question)
+        self.call_after_refresh(self.fill_pta)
+        self.call_after_refresh(self.fill_failures)
+        self.insights_stale = True
+        if self.query_one(TabbedContent).active == "tab-insights":
+            self.call_after_refresh(self.fill_insights)
+
+    def action_pta_remove(self, row):
+        """A click on a model's name in the PTA bars: leave it out of every tab (click it again below to bring it back)."""
+        shown = [x["model"] for x in getattr(self, "pta_result", {}).get("models", [])]
+        if not 0 <= row < len(shown):
+            return
+        if len(shown) == 1:
+            self.notify("That's the last model shown.", severity="warning")
+            return
+        model = shown[row]
+        self.app.pta_removed = [m for m in getattr(self.app, "pta_removed", []) if m != model] + [model]
+        self.set_models((self.app.pq_models or set(shown)) - {model})
+
+    def action_pta_restore(self, row):
+        removed = self.pta_removed_now()
+        if 0 <= row < len(removed):
+            self.app.pta_removed.remove(removed[row])
+            self.set_models(self.app.pq_models | {removed[row]})
+
+    def action_pta_restore_all(self):
+        self.app.pta_removed = []
+        self.set_models(set())
+
+    def pta_removed_now(self):
+        """Models removed by a click that are still left out (the Models button may have put them back)."""
+        return [m for m in getattr(self.app, "pta_removed", []) if self.app.pq_models and m not in self.app.pq_models]
 
     # -- insights: charts with what to do next (insights.py); built when the tab is first shown
     @on(TabbedContent.TabActivated)
@@ -3127,7 +3156,16 @@ class ResultsScreen(Screen):
         # none picked: every model with enough answers (pta.index leaves out the rest, and says so)
         result = pta.index(rows, sorted(chosen) or None, pta.memory_gb(self.infos))
         self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
-        self.query_one("#pta-bars", Static).update("\n".join(pta.bars(result)) if result["questions"] else "")
+        self.pta_result = result
+        removed = [m for m in self.pta_removed_now() if m in present]
+        self.query_one("#pta-bars", Static).update(
+            "\n".join(pta.bars(result, click="screen.pta_remove")
+                      + ([f"\n[dim]Click a name to remove it. Removed:[/dim] "
+                          + "  ".join(f"[@click=screen.pta_restore({self.pta_removed_now().index(m)})]{rich_escape(m)}[/]"
+                                      for m in removed)
+                          + "  [dim]·[/dim]  [@click=screen.pta_restore_all]show all[/]"] if removed
+                         else ["\n[dim]Click a name to remove it from view.[/dim]"]))
+            if result["questions"] else "")
         self.query_one("#pta-left-out", Static).update(
             "\n".join(f"[dim]{rich_escape(line)}[/dim]" for line in pta.left_out_lines(result)))
         header, table = pta.table(result)
