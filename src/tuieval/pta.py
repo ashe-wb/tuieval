@@ -117,12 +117,13 @@ def _blocks(width, v, most):
     return max(1, min(width, round(width * v / most)))
 
 
-def bars(result, width=20, markup=True):
+def bars(result, width=20, markup=True, click=None):
     """Lines with a row per model and a bar each for P, T and A: the at-a-glance view. The P and T bars
     are proportional to tokens and time (the longest is the model that used most; shorter is better),
     with how many times the leanest / fastest model's beside them; the A bar is the share of answers
     right (longer is better, full only when every answer passed), then the share cut off at max_tokens in
-    orange (▓ in plain text) and "(n% truncated)" beside it. markup=False gives plain text."""
+    orange (▓ in plain text) and "(n% truncated)" beside it. markup=False gives plain text; click (an
+    action, e.g. "screen.remove") makes each model's name a link calling it with the row's index."""
     if not result["models"]:
         return []
     name_w = max(len(x["model"]) for x in result["models"])
@@ -133,7 +134,7 @@ def bars(result, width=20, markup=True):
     sub = pad + "".join(f"{better:<{cell_w}}" for _, _, better, *_ in LETTERS)
     lines = [f"[b]{head.rstrip()}[/b]" if markup else head.rstrip(), f"[dim]{sub.rstrip()}[/dim]" if markup else sub.rstrip()]
     most = {m: max((x.get(m) or 0 for x in result["models"]), default=0) for _, _, _, m, _, _ in LETTERS}
-    for x in result["models"]:
+    for row, x in enumerate(result["models"]):
         cells = []
         for k, _, _, measure, shown, color in LETTERS:
             if k == "A":
@@ -155,7 +156,11 @@ def bars(result, width=20, markup=True):
                    if markup else bar + cut_bar + rest)
             cells.append(f"{bar} {num:>6}" + " " * max(0, cell_w - width - 1 - max(6, len(num))))
         name = f"{x['model']:<{name_w}}"
-        lines.append((f"{rich_escape(name) if markup else name}  " + "".join(cells)).rstrip())
+        if markup:
+            pad_w = name_w - len(x["model"])
+            name = (f"[@click={click}({row})]{rich_escape(x['model'])}[/]" + " " * pad_w if click
+                    else rich_escape(name))
+        lines.append((f"{name}  " + "".join(cells)).rstrip())
     return lines
 
 
