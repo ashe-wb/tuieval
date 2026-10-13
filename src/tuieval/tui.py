@@ -776,10 +776,7 @@ class SetupScreen(Screen):
             self.verdicts = {}
             self.app.log(f"verdicts failed: {err!r}")
         codes = group_codes(e)
-        self.query_one("#models-legend", Label).update(
-            "[b]Models[/b]  [dim][green]✓[/green] pass  [red]✗[/red] fail  [yellow]?[/yellow] inconclusive  "
-            "grey = earlier  ·  x hides[/dim]\n[dim]"
-            + "  ".join(f"{c} {g}" for g, c in codes.items()) + "[/dim]")
+        self.legend_codes = codes
         n_hidden = sum(m["label"] in hidden for m in e.cfg["models"])
         self.query_one("#show-hidden", Checkbox).label = f"Show hidden ({n_hidden})"
         sections = {}
@@ -819,7 +816,26 @@ class SetupScreen(Screen):
             at = values.index(keep) if keep in values else min(keep_at or 0, models.option_count - 1)
             models.highlighted = min((i for i in enabled if i >= at), default=enabled[-1])
         self.show_detail()
+        self.update_legend()
         self.update_estimate()
+
+    def unseen_models(self):
+        """Ticked models the list doesn't show right now (the filter leaves them out)."""
+        models = self.query_one("#models", SelectionList)
+        visible = {models.get_option_at_index(i).value for i in range(models.option_count)}
+        return [m["label"] for m in self.app.engine.cfg["models"]
+                if m["label"] in self.selected_models and m["label"] not in visible]
+
+    def update_legend(self):
+        """The Models heading: how many are ticked (and which ones the filter hides), then the key."""
+        n, unseen = len(self.selected_models), self.unseen_models()
+        count = f"[b]{n}[/b] selected" if n else "[dim]none selected[/dim]"
+        if unseen:
+            count += f" [yellow]({len(unseen)} not shown: {rich_escape(', '.join(unseen))})[/yellow]"
+        self.query_one("#models-legend", Label).update(
+            f"[b]Models[/b]  {count}  [dim][green]✓[/green] pass  [red]✗[/red] fail  [yellow]?[/yellow] "
+            "inconclusive  grey = earlier  ·  x hides[/dim]\n[dim]"
+            + "  ".join(f"{c} {g}" for g, c in getattr(self, "legend_codes", {}).items()) + "[/dim]")
 
     @on(SelectionList.SelectionHighlighted, "#models")
     def show_detail(self, *_):
@@ -894,6 +910,7 @@ class SetupScreen(Screen):
             return
         visible = {models.get_option_at_index(i).value for i in range(models.option_count)}
         self.selected_models = (self.selected_models - visible) | set(models.selected)
+        self.update_legend()
         self.update_estimate()
 
     def tier(self):
@@ -1110,10 +1127,20 @@ class SetupScreen(Screen):
                 self.notify(f"Nothing to run: {item.problem}.", severity="warning")
                 return
             self.app.start_or_queue(item)
-        if rows:
-            self.app.push_screen(RetestScreen(rows, force, rerun), go)
+        def asked(yes=True):
+            if not yes:
+                return
+            if rows:
+                self.app.push_screen(RetestScreen(rows, force, rerun), go)
+            else:
+                go({})
+        unseen = self.unseen_models()
+        if unseen:   # ticks the filter hides are easy to forget: name them before anything starts
+            self.app.push_screen(ConfirmScreen(
+                f"Start {len(labels)} model(s)? {len(unseen)} of them the filter hides:\n  "
+                + rich_escape("\n  ".join(unseen) + f"\n\nAll selected: {', '.join(labels)}")), asked)
         else:
-            go({})
+            asked()
 
     def action_tune(self):
         e = self.app.engine

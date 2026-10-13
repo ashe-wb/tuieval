@@ -1130,6 +1130,47 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(fewer, 4)                     # its 4 questions are no longer counted
         self.assertEqual(out["running"], [False, True])
 
+    def test_tui_counts_ticked_models_and_names_filtered_ones_before_start(self):
+        code = textwrap.dedent("""
+            import asyncio, json
+            from tuieval.tui import EvalsApp, ConfirmScreen
+            from textual.widgets import SelectionList, Input, Label
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s, out = app.screen, {}
+                    legend = lambda: str(s.query_one("#models-legend", Label).render())
+                    out["none"] = legend()
+                    s.query_one("#suites", SelectionList).select("apps")
+                    models = s.query_one("#models", SelectionList)
+                    models.select("a")
+                    models.select("b")
+                    await pilot.pause()
+                    out["two"] = legend()
+                    s.query_one("#filter", Input).value = "zzz-nothing"
+                    await pilot.pause()
+                    out["filtered"] = legend()
+                    s.action_start()
+                    await pilot.pause()
+                    out["asked"] = isinstance(app.screen, ConfirmScreen) and str(app.screen.question)
+                    await pilot.press("n")
+                    await pilot.pause()
+                    out["cancelled"] = app.screen is s and not app.is_busy()
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertIsInstance(out, dict, out)
+        self.assertIn("none selected", out["none"])
+        self.assertIn("2 selected", out["two"])
+        self.assertNotIn("not shown", out["two"])
+        self.assertIn("2 not shown: a, b", out["filtered"])
+        self.assertIn("All selected: a, b", out["asked"])
+        self.assertTrue(out["cancelled"])
+
     def test_tui_asks_before_skipping_a_model(self):
         path = os.path.join(self.ws, "models.toml")
         write(path, read(path).replace('"--delay", "0.2"', '"--delay", "3"'))   # still running while it's asked

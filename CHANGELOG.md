@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The Models heading shows how many are selected, naming any the filter hides; Start asks first when some are hidden.
 - Results → Failures: a Models button filters the list (the same pick as the other tabs), with the number of failures shown.
 - Fix: an answer followed by a stray `</think>` (or a stray code fence after it) was graded as empty; the answer before the tag is graded now. The code grader also reads a doubled ```` ```python ```` fence as one.
 - Run screen: `x` removes the highlighted pack from the run going if it hasn't started (the reverse of adding it); a model left with nothing isn't started.
