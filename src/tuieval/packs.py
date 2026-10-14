@@ -132,7 +132,7 @@ def _read_tests(path):
 # Fields that never reach the model or the grader's decision: editing them doesn't make
 # results outdated.
 NOT_FINGERPRINTED = {"reference", "wrong", "description", "category", "critical", "critical_trial", "group",
-                     "captured_from", "captured_answer", "difficulty"}
+                     "captured_from", "captured_answer", "difficulty", "added"}
 DIFFICULTIES = ("easy", "medium", "hard")
 
 

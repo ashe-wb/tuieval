@@ -51,6 +51,7 @@ import urllib.parse
 import urllib.request
 
 from . import client
+from . import dates
 from . import graders
 from . import machines
 from . import packs as packs_mod
@@ -714,6 +715,7 @@ class Engine:
         self.cfg = load_config(self.models_path)
         self.pack_errors = []
         self.packs = packs_mod.load_packs(self.packs_dir, self.pack_errors)
+        self.test_dates = dates.AddedDates(root, self.packs, self.results_dir)
         self._cancel = threading.Event()
         self._main_lane = Lane()
         self._here = threading.local()   # .lane: the lane this thread runs
@@ -766,6 +768,7 @@ class Engine:
         self._add_remote_models()
         self.pack_errors = []
         self.packs = packs_mod.load_packs(self.packs_dir, self.pack_errors)
+        self.test_dates = dates.AddedDates(self.root, self.packs, self.results_dir)
 
     def emit(self, kind, **data):
         try:
@@ -2348,6 +2351,7 @@ class Engine:
                        "severity": g.get("severity"), "answer": res["answer"], "tool_calls": res["tool_calls"],
                        "finish": res["finish"], "reasoning_chars": len(res["reasoning"]),
                        "log": log_name,   # logs/live/<log>: the reasoning, which the result doesn't keep
+                       "answered_at": dates.now(),
                        **({"checks": g["checks"]} if "checks" in g else {}),
                        "machine": self.machine().id,
                        **({"quantization": ep.get("quantization")} if ep else {}),
