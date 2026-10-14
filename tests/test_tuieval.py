@@ -1130,6 +1130,70 @@ class AddToRun(unittest.TestCase):
         self.assertEqual(fewer, 4)                     # its 4 questions are no longer counted
         self.assertEqual(out["running"], [False, True])
 
+    def test_tui_copies_reasoning_and_answer(self):
+        path = os.path.join(self.ws, "models.toml")
+        write(path, read(path).replace('"--delay", "0.2"', '"--delay", "1.5"'))   # reasoning first, then a wait
+        fake = os.path.join(self.tmp.name, "bin")
+        os.makedirs(fake)
+        write(os.path.join(fake, "pbcopy"), '#!/bin/sh\ncat > "$CLIP_OUT"\n')
+        os.chmod(os.path.join(fake, "pbcopy"), 0o755)
+        clip = os.path.join(self.tmp.name, "clip.txt")
+        code = textwrap.dedent("""
+            import asyncio, json, os, time
+            from tuieval.tui import AnswerScreen, EvalsApp, RunScreen
+            from textual.widgets import SelectionList
+            def pasted():
+                with open(os.environ["CLIP_OUT"]) as f:
+                    text = f.read()
+                os.remove(os.environ["CLIP_OUT"])
+                return text
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    s.query_one("#suites", SelectionList).select("apps")
+                    s.selected_models = {"a"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+                    await pilot.pause()
+                    s.action_start()
+                    deadline = time.time() + 180     # CI machines can take long to start servers
+                    while time.time() < deadline:
+                        await pilot.pause(0.1)
+                        if isinstance(app.screen, RunScreen) and app.screen.req_started:
+                            break
+                    run, out = app.screen, {}
+                    await pilot.pause(0.5)            # the reasoning has streamed; the answer waits 1.5 s
+                    await pilot.press("y")
+                    await pilot.pause()
+                    out["live"] = pasted()
+                    deadline = time.time() + 120
+                    while run.running and time.time() < deadline:
+                        await pilot.pause(0.2)
+                    app.push_screen(AnswerScreen(list(run.recent_entries.values())))
+                    await pilot.pause()
+                    for key in "ya":
+                        await pilot.press(key)
+                        await pilot.pause()
+                        out[key] = pasted()
+                    print(json.dumps(out))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS="", CLIP_OUT=clip,
+                                    PATH=fake + os.pathsep + os.environ["PATH"]))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
+        self.assertEqual(out, {"live": "Thinking it over. ", "y": "Thinking it over. ", "a": "ANSWER: 1"}, out)
+
+    def test_copy_falls_back_to_the_terminal(self):
+        from unittest import mock
+        from tuieval.tui import copy_text
+        app = mock.Mock()
+        with mock.patch.dict(os.environ, {"PATH": self.tmp.name}):      # no clipboard tool here
+            self.assertFalse(copy_text(app, "some reasoning"))
+        app.copy_to_clipboard.assert_called_once_with("some reasoning")
+
     def test_tui_counts_ticked_models_and_names_filtered_ones_before_start(self):
         code = textwrap.dedent("""
             import asyncio, json
