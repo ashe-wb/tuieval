@@ -40,7 +40,7 @@ While a run goes, you watch each question's reasoning and answer stream in:
 
 ![tuieval's run screen with a model's reasoning streaming in for a coding question](https://raw.githubusercontent.com/ashe-wb/tuieval/main/docs/images/tui-run-reasoning.png)
 
-Afterwards, every answer keeps its reasoning. Enter on a result opens it with the grade and each check, the full reasoning and the answer; `[` and `]` step through the others:
+Afterwards, every answer keeps its reasoning. Enter on a result opens it with the grade and each check, the full reasoning and the answer; `[` and `]` step through the others, `y` copies the reasoning and `a` the answer (on the run screen, `y` copies the reasoning streamed so far):
 
 ![one answer in full: the grade and its checks, the model's reasoning and its code](https://raw.githubusercontent.com/ashe-wb/tuieval/main/docs/images/tui-answer-reasoning.png)
 

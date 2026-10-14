@@ -24,6 +24,8 @@ import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 
@@ -289,6 +291,37 @@ class StreamView(TextArea):
         self.call_after_refresh(lambda: self.scroll_to(y=max(0, self.max_scroll_y - from_end), animate=False))
 
 
+CLIPBOARD_TOOLS = (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"],
+                   ["clip"])
+
+
+def copy_text(app, text):
+    """Put text on the system clipboard with the first tool here that takes it (pbcopy, wl-copy, xclip, xsel,
+    clip). Without one, the terminal is asked to (OSC 52), which not every terminal allows. True if a tool did."""
+    for cmd in CLIPBOARD_TOOLS:
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            subprocess.run(cmd, input=text.encode("utf-16" if cmd[0] == "clip" else "utf-8"),
+                           capture_output=True, check=True, timeout=10)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            continue      # e.g. xclip without a display: try the next
+    app.copy_to_clipboard(text)
+    return False
+
+
+def notify_copied(app, what, text, note=""):
+    if not text:
+        app.notify(f"No {what} to copy.", severity="warning")
+    elif copy_text(app, text):
+        app.notify(f"Copied {what}{note}: {len(text):,} chars.")
+    else:
+        app.notify(f"Sent {what}{note} ({len(text):,} chars) to the terminal's clipboard. If nothing pastes, "
+                   "the terminal doesn't allow it: install a clipboard tool (wl-copy, xclip or xsel).",
+                   severity="warning", timeout=10)
+
+
 # ------------------------------------------------------------------ answer detail
 def answer_entry(row):
     """An answer for AnswerScreen from a compare row (None when the row has no stored answer)."""
@@ -511,11 +544,14 @@ class AnswerScreen(ModalScreen):
         Binding("q", "close", "Close", show=False, priority=True),
         Binding("left_square_bracket", "step(-1)", "Previous", priority=True),
         Binding("right_square_bracket", "step(1)", "Next", priority=True),
+        Binding("y", "copy('reasoning')", "Copy reasoning", priority=True),
+        Binding("a", "copy('answer')", "Copy answer", priority=True),
     ]
 
     def __init__(self, entries, index=0, what="answer"):
         super().__init__()
         self.entries, self.index, self.what = entries, index, what
+        self.texts = {}       # what's shown: "reasoning", "answer" -> text, for the copy keys
 
     def check_action(self, action, parameters):
         return len(self.entries) > 1 if action == "step" else True
@@ -549,6 +585,9 @@ class AnswerScreen(ModalScreen):
     def action_step(self, delta):
         self.index = (self.index + delta) % len(self.entries)
         self.show()
+
+    def action_copy(self, what):
+        notify_copied(self.app, what, self.texts.get(what, ""))
 
     def show(self):
         e = self.app.engine
@@ -608,6 +647,7 @@ class AnswerScreen(ModalScreen):
             answer += "\n\n=== TOOL CALLS ===\n" + json.dumps(rec["tool_calls"], indent=2)
         for wid, text in (("#answer-reasoning", reasoning), ("#answer-answer", answer or "(empty)")):
             self.query_one(wid, TextArea).load_text(text)
+        self.texts = {"reasoning": reasoning, "answer": answer}
 
         question, checked = "(test not found)", "(test not found)"
         if test:
@@ -2163,6 +2203,7 @@ class RunScreen(Screen):
         Binding("c", "cancel_all", "Cancel all", priority=True),
         Binding("f", "toggle_follow", "Pause scroll", priority=True),
         Binding("v", "watch_next", "Next model", priority=True),
+        Binding("y", "copy_reasoning", "Copy reasoning", priority=True),
         Binding("n", "new_run", "More evals", priority=True),
         Binding("r", "results", "Results", priority=True),
         Binding("w", "runs", "Runs", priority=True),
@@ -2182,6 +2223,8 @@ class RunScreen(Screen):
         self.follow = True
         self.buf = {"reasoning": [], "answer": []}
         self.buf_lock = threading.Lock()
+        self.streamed = {"reasoning": [], "answer": []}   # the watched answer so far, untrimmed (for y)
+        self.streamed_whole = False                        # from its start (not joined midway with v)
         self.req_live = {}                    # model label -> its request now: phase, ~tokens, started, last token
         self.started = time.time()
         self.req_started = None
@@ -2344,6 +2387,7 @@ class RunScreen(Screen):
                 v.clear()
         for stream, text in parts.items():
             if text:
+                self.streamed[stream].append(text)
                 self.query_one(f"#{stream}", StreamView).append(text, self.follow)
                 self.req_tokens += max(1, len(text) // 4)
                 if self.req_first is None and self.req_started:
@@ -2364,6 +2408,7 @@ class RunScreen(Screen):
             self.flush_streams()
             self.query_one("#reasoning", StreamView).clear()
             self.query_one("#answer", StreamView).clear()
+            self.streamed, self.streamed_whole = {"reasoning": [], "answer": []}, True
             self.req_started, self.req_tokens, self.req_first = time.time(), 0, None
             job = d["job"]
             rep_note = f" · repeat {d['repeat'] + 1}/{job.repeat}" if job.repeat > 1 else ""
@@ -2731,6 +2776,7 @@ class RunScreen(Screen):
                 v.clear()
         self.query_one("#reasoning", StreamView).clear()
         self.query_one("#answer", StreamView).clear()
+        self.streamed, self.streamed_whole = {"reasoning": [], "answer": []}, False
         self.req_started = None
         self.current = f"Streaming [b]{self.watch}[/b] from its next answer…"
         self.refresh_current()
@@ -2747,6 +2793,12 @@ class RunScreen(Screen):
     def action_toggle_follow(self):
         self.follow = not self.follow
         self.update_overall()
+
+    def action_copy_reasoning(self):
+        """The streaming answer's reasoning so far, all of it (the pane drops the oldest text when it's long)."""
+        self.flush_streams()
+        notify_copied(self.app, "reasoning", "".join(self.streamed["reasoning"]),
+                      "" if self.streamed_whole else " (from midway: streaming joined after it began)")
 
     @on(DataTable.RowSelected, "#recent")
     def recent_selected(self, event):
