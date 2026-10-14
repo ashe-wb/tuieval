@@ -45,6 +45,7 @@ from rich.cells import cell_len
 from rich.text import Text
 
 from . import compare
+from . import dates
 from . import engine
 from . import verdict
 
@@ -618,11 +619,14 @@ class AnswerScreen(ModalScreen):
                  f"on {rec['machine']}" if rec.get("machine") else "",
                  f"[yellow]ran alongside {', '.join(rec['ran_alongside'])}[/yellow]" if rec.get("ran_alongside") else "",
                  f"seed {rec['seed']}" if "seed" in rec else ""]
+        when = dates.minute(dates.answered_at(rec))
+        added = e.test_dates.text(entry["pack"], rec["test"])
         self.query_one("#answer-head", Static).update(
             f"{mark}  {diff_badge(rec.get('difficulty', 'unrated'))}  [b]{rich_escape(rec.get('description', rec['test']))}[/b]"
             f"{partial}{pos}\n"
             f"[b]{entry['model']}[/b]{quant} · {pack.label if pack else entry['pack']} · {rec['test']} · "
-            f"repeat {rec.get('repeat', 0) + 1}\n"
+            f"repeat {rec.get('repeat', 0) + 1}" + (f" · answered {when}" if when else "")
+            + (f" · test added {added}" if added else "") + "\n"
             + " · ".join(f for f in facts if f))
         grading = [f"[b]Grading:[/b] {rich_escape(rec.get('reason', ''))}"]
         grading += ["  " + line for line in check_lines(rec, test)]
@@ -1986,7 +1990,9 @@ class PickTestsScreen(ModalScreen):
         mark = "[b green]\\[✓][/]" if on else "[dim]\\[ ][/dim]"
         tid = f"[b]{rich_escape(t['id'])}[/b]" if on else rich_escape(t["id"])
         note = test_note(t)
-        return f"{mark} {diff_badge(t.get('difficulty', 'unrated'))} {tid}" + (f"  [dim]{rich_escape(note)}[/dim]" if note else "")
+        added = self.app.engine.test_dates.text(self.pack.name, t["id"])
+        return f"{mark} {diff_badge(t.get('difficulty', 'unrated'))} {tid}" + (f"  [dim]{rich_escape(note)}[/dim]" if note else "") \
+            + (f"  [dim]added {added}[/dim]" if added else "")
 
     def fill(self, text):
         ol = self.query_one("#pick-tests", OptionList)
@@ -2998,14 +3004,15 @@ class ResultsScreen(Screen):
         """Every wrong answer, of the models picked (Models: shared with the other tabs)."""
         f = self.query_one("#failures", DataTable)
         f.clear(columns=True)
-        f.add_columns("Model", "Level", "Test", "Reason")
+        f.add_columns("Model", "Level", "Test", "Answered", "Reason")
         every = {r["model"] for r in self.rows}
         chosen = {m for m in self.app.pq_models if m in every}
         rows = [r for r in self.rows if not chosen or r["model"] in chosen]
         # compare.failures lists the failed rows in order, so they line up with fail_rows
         self.fail_rows = [r for r in rows if not r["ok"]]
         for i, (model, test, reason, level) in enumerate(compare.failures(rows)):
-            f.add_row(model, diff_badge(level), rich_escape(test), rich_escape(reason[:130]), key=str(i))
+            when = dates.day(dates.answered_at(self.fail_rows[i].get("raw") or {}))
+            f.add_row(model, diff_badge(level), rich_escape(test), when, rich_escape(reason[:130]), key=str(i))
         self.query_one("#fail-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
         n = len(self.fail_rows)
         self.query_one("#fail-count", Static).update(
@@ -3283,7 +3290,7 @@ class ResultsScreen(Screen):
         here = self.app.engine.machine().id
         table = self.query_one("#per-question", DataTable)
         table.clear(columns=True)
-        table.add_columns("Test", "Pack", "Level", "×tokens", *models)
+        table.add_columns("Test", "Pack", "Level", "Added", "×tokens", *models)
         self.pq_tests, self.pq_models = {}, models
         for t in tests:
             cells = []
@@ -3295,7 +3302,9 @@ class ResultsScreen(Screen):
             spread = t["spread"]["tokens"]
             sp = f"[yellow]{spread:.1f}×[/yellow]" if spread >= 3 else (f"{spread:.1f}×" if len(t["cells"]) > 1 else "")
             desc = t["cells"][next(iter(t["cells"]))]["rows"][0].get("raw", {}).get("description") or t["name"]
-            table.add_row(rich_escape(desc[:48]), t["suite"], diff_badge(t["difficulty"]), sp, *cells, key=t["test"])
+            added = self.app.engine.test_dates.get(t["suite"], t["test"].split(": ", 1)[-1])
+            added = sort_cell(added[0] if added[1] else f"≤ {added[0]}", added[0]) if added else ""
+            table.add_row(rich_escape(desc[:48]), t["suite"], diff_badge(t["difficulty"]), added, sp, *cells, key=t["test"])
             self.pq_tests[t["test"]] = t
         self.sort_table(table)
         self.sort_table(self.query_one("#pq-summary", DataTable))
@@ -3434,9 +3443,12 @@ class ResultsScreen(Screen):
                                                           "[dim]No verdicts yet: run something from Setup.[/dim]")
         groups = sorted({g for t in table.values() for g in t})
         matrix.add_columns("Model", *groups)
-        detail.add_columns("Model", "Use case", "Pack", "Verdict", "Answers right", "Why")
+        detail.add_columns("Model", "Use case", "Pack", "Verdict", "Answers right", "Answered", "Why")
         right = collections.Counter((r["model"], r["suite"]) for r in self.rows if r["ok"])
         answered = collections.Counter((r["model"], r["suite"]) for r in self.rows)
+        when = collections.defaultdict(list)
+        for r in self.rows:
+            when[(r["model"], r["suite"])].append(dates.answered_at(r.get("raw") or {}))
         lat = verdict.latency_table(self.app.engine, None, table)
         machine_ids = [mc.id for mc in self.app.engine.machines()]
         lt = self.query_one("#latency", DataTable)
@@ -3455,7 +3467,8 @@ class ResultsScreen(Screen):
                     if pv.status != "NO DATA":
                         n = answered[(label, name)]
                         detail.add_row(label, g, name, f"[{style[pv.status]}]{pv.status}[/]",
-                                       f"{right[(label, name)]}/{n}" if n else "-", "; ".join(pv.reasons)[:160])
+                                       f"{right[(label, name)]}/{n}" if n else "-", dates.span(when[(label, name)]),
+                                       "; ".join(pv.reasons)[:160])
 
 
 # ------------------------------------------------------------------ app

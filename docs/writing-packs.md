@@ -63,6 +63,7 @@ min_consistency = 0.95           # share of variant groups where every variant p
   description: refund window       # shown while running and in results
   category: policy                 # optional grouping (Screen runs spread across categories)
   difficulty: medium               # easy | medium | hard: your label, shown in the TUI, never sent to the model
+  added: 2026-10-14                # optional: when the test was written (see Dates below)
   input: |                         # the user message
     A customer bought shoes 20 days ago …
   image: images/receipt.png        # optional: sent as an image (needs vision)
@@ -184,6 +185,10 @@ Graders mark failures that should disqualify a model whatever its accuracy:
 Every test has a `difficulty` of easy, medium or hard. It's for you, not the model: requests are built only from `input`, `image`, the system prompt and tools, so the label never reaches the model. The TUI shows it in the pack list (e.g. `12E 20M 8H`), next to the current question, in Recent results and Failures, and as a filter in Results → Per question.
 
 A useful convention: **easy** = one rule or a direct read; **medium** = arithmetic, one trap, or two conditions; **hard** = rules in conflict, multi-step reasoning, or misleading data. Once several models have run, `tuieval items` flags labels the results contradict ("easier than labelled": a hard test every model passes; "harder than labelled": an easy test most models fail). `tuieval selftest` warns about tests without a label.
+
+## Dates
+
+Every answer records when it was given (`answered_at`); answers from before that field existed get the time from their log file's name. Every test has an added date: its own `added` field if it has one, otherwise the day tuieval first saw it, kept in `test-dates.json` at the workspace root. Tests that were already there when that file was started get the day of their first answer, or the day the file was started, shown as `≤ 2026-10-01` (on or before). Neither date changes the pack's fingerprint. The TUI shows them in the answer view, Pick tests, Results → Per question (Added), Failures and Production readiness (Answered).
 
 ## Writing tests that separate production-ready models
 

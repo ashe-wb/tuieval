@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Dates: answers record `answered_at` (older ones read it from their log name); tests get an added date (an `added` field, or the day tuieval first saw them, in `test-dates.json`). Shown in the answer view, Pick tests, Per question, Failures and Production readiness.
 - Copy reasoning: `y` in the answer view copies its full reasoning, `a` the answer; `y` on the run screen copies the reasoning streamed so far. Uses pbcopy, wl-copy, xclip, xsel or clip, else the terminal (OSC 52).
 - PTA index: click a model's name to remove it from view (every Results tab follows); click it under the bars to bring it back, or show all.
 - The Models heading shows how many are selected, naming any the filter hides; Start asks first when some are hidden.

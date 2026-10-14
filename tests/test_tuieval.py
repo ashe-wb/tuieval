@@ -452,6 +452,42 @@ class PickTests(unittest.TestCase):
         self.assertIn("'zz'", str(cm.exception))
         self.assertIn("a, b, c, d", str(cm.exception))
 
+    def test_answers_and_tests_are_dated(self):
+        from tuieval import dates, engine, packs
+        before = packs.load_pack(os.path.join(self.ws, "packs", "apps")).fingerprint
+        tests = os.path.join(self.ws, "packs", "apps", "tests.yaml")
+        write(tests, read(tests).replace("{id: a,", "{id: a, added: 2025-03-04,"))
+        self.assertEqual(packs.load_pack(os.path.join(self.ws, "packs", "apps")).fingerprint, before)  # not outdated
+        self.server("oracle")
+        tuieval(self.ws, "run", "--packs", "apps", "--tests", "b")
+        rec = json.loads(read(os.path.join(self.ws, "results", "m", "apps.json")))["results"][0]
+        answered = dates.answered_at(rec)
+        self.assertLess(abs(time.time() - answered.timestamp()), 300)
+        self.assertEqual(rec["answered_at"][:10], time.strftime("%Y-%m-%d"))
+        old = {k: v for k, v in rec.items() if k != "answered_at"}               # older results: from the log name
+        self.assertEqual(dates.answered_at(old).replace(microsecond=0), answered.replace(microsecond=0))
+        self.assertIsNone(dates.answered_at({"log": "unnamed.txt"}))
+
+        def fake_answer(test, day):   # an answer from before the dates file existed
+            write(os.path.join(self.ws, "results", "m", "other.json.partial.jsonl"), json.dumps(
+                {"pack_fingerprint": "x"}) + "\n" + json.dumps({"test": test, "log": f"{day}_101010_m_other_{test}.txt"}) + "\n")
+        fake_answer("c", "20250102")
+        os.remove(os.path.join(self.ws, dates.FILE))
+        e = engine.Engine(root=self.ws)
+        today = time.strftime("%Y-%m-%d")
+        self.assertEqual(e.test_dates.get("apps", "a"), ("2025-03-04", True))     # its own `added` wins
+        self.assertEqual(e.test_dates.get("other", "c"), ("2025-01-02", False))   # on or before its first answer
+        self.assertEqual(e.test_dates.text("apps", "d"), f"≤ {today}")           # already there, never answered
+        write(os.path.join(self.ws, "packs", "apps", "tests.yaml"), read(tests) + "- {id: e, input: apps question e, "
+              "expected: 1, reference: 'ANSWER: 1', difficulty: easy}\n")
+        e.reload()
+        self.assertEqual(e.test_dates.get("apps", "e"), (today, True))            # new since: the day it was seen
+        self.assertEqual(engine.Engine(root=self.ws).test_dates.get("other", "c"), ("2025-01-02", False))  # kept
+        self.assertEqual(dates.span([answered]), answered.strftime("%Y-%m-%d"))
+        self.assertEqual(dates.span([dates.answered_at(old), dates.answered_at({"log": "20250102_101010_x"})]),
+                         f"2025-01-02 – {answered.strftime('%m-%d')}" if answered.year == 2025 else
+                         f"2025-01-02 – {answered.strftime('%Y-%m-%d')}")
+
     def test_partial_runs_add_up_and_force_redoes_only_the_picked(self):
         self.server("oracle")
         tuieval(self.ws, "run", "--packs", "apps", "--tests", "b")
