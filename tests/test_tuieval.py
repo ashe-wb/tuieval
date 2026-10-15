@@ -2,6 +2,7 @@
 
 Uses a temporary workspace and tests/mock_server.py on a free local port; no model or GPU needed.
 """
+import glob
 import json
 import math
 import os
@@ -2846,6 +2847,25 @@ class StallGuard(unittest.TestCase):
         self.assertFalse(client.is_server_error(res["error"]))   # slow, like any timeout: counts
         self.assertLess(took, 4)
 
+    def test_crash_before_any_token_is_a_server_error(self):
+        from tuieval import client
+        res, _ = self.ask("--die-after", "0", timeout=30)
+        self.assertTrue(client.is_server_error(res["error"]), res["error"])
+        self.assertIn("stream ended", res["error"])
+        self.assertEqual(res["answer"], "")
+
+    def test_crash_mid_answer_is_a_server_error(self):
+        from tuieval import client
+        res, _ = self.ask("--die-after", "2", timeout=30)
+        self.assertTrue(client.is_server_error(res["error"]), res["error"])
+        self.assertIsNone(res["finish"])
+
+    def test_finish_without_done_is_an_answer(self):
+        res, _ = self.ask("--die-after", "99", timeout=30)    # every chunk, then gone before [DONE]
+        self.assertIsNone(res["error"])
+        self.assertEqual(res["finish"], "stop")
+        self.assertIn("42", res["answer"])
+
     def test_run_screen_shows_each_running_models_progress(self):
         from types import SimpleNamespace
         from tuieval import tui
@@ -2988,6 +3008,34 @@ class Insights(unittest.TestCase):
             p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""), timeout=90)
             self.assertEqual(p.stdout.split(), ["True", "True", "True", "True", "bad"], p.stderr[-2000:])
+
+
+class ServerCrash(unittest.TestCase):
+    """A server that crashes mid-request (the stream just ends) never judges the model: the run says the
+    server stopped and records no answer."""
+
+    def test_crash_records_no_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            d = os.path.join(ws, "packs", "apps")
+            os.makedirs(d)
+            write(os.path.join(d, "pack.toml"), 'label = "apps"\n[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+            write(os.path.join(d, "tests.yaml"), "- {id: a, input: question a, expected: 1, reference: 'ANSWER: 1'}\n")
+            mock = [sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                    os.path.join(ws, "packs"), "--model", "{served_name}", "--die-after", "0"]
+            with open(os.path.join(ws, "models.toml"), "a") as f:
+                f.write(f"\n[servers.mk]\ncmd = {json.dumps(mock)}\nport = {free_port()}\n"
+                        '\n[[models]]\nlabel = "crashy"\nserver = "mk"\nmodel = "crashy"\n')
+            p = tuieval(ws, "run", "--only", "crashy", "--tier", "certify", check=False)
+            self.assertIn("server stopped", p.stdout + p.stderr)
+            self.assertNotIn("Empty answer", p.stdout + p.stderr)
+            rows = []
+            for path in glob.glob(os.path.join(ws, "results", "crashy", "*.json*")):
+                text = read(path)
+                rows += [r for r in (json.loads(text).get("results", []) if path.endswith(".json") else
+                                     [json.loads(l) for l in text.splitlines() if l.strip()]) if "test" in r]
+            self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":

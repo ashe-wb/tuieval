@@ -11,6 +11,8 @@ unavailable  HTTP 404 "No endpoints found" for every chat request
 Streams like llama.cpp: reasoning_content then content deltas, usage and timings at the end.
 --stall S: after the first token, S seconds of nothing but keep-alive comments (": OPENROUTER
 PROCESSING"), or of silence with --silent; --stall-before S: the same before the first token.
+--die-after N: the process exits after N stream chunks (0: right after the headers), with no finish
+reason or [DONE], like a server that crashes mid-request.
 An answer longer than the request's max_tokens (one token per word) is cut off with finish
 "length". --max-output N also serves an OpenRouter-style endpoints list with that output limit.
 """
@@ -53,6 +55,7 @@ def reply_for(test, mode):
 class Handler(BaseHTTPRequestHandler):
     answers, mode, model, delay, max_output = {}, "oracle", "mock", 0.0, None
     stall, stall_before, silent = 0.0, 0.0, False
+    die_after = None
 
     def log_message(self, *a):
         pass
@@ -96,10 +99,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
+        sent = [0]
+
+        def die_if_due():
+            if self.die_after is not None and sent[0] >= self.die_after:
+                self.wfile.flush()
+                os._exit(3)
 
         def send(obj):
+            die_if_due()
             self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
             self.wfile.flush()
+            sent[0] += 1
 
         def wait(secs):
             end = time.time() + secs
@@ -123,6 +134,7 @@ class Handler(BaseHTTPRequestHandler):
               "usage": {"prompt_tokens": len(str(content).split()), "completion_tokens": words},
               "timings": {"predicted_n": words, "predicted_per_second": 50.0, "prompt_n": 10,
                           "prompt_per_second": 500.0, "cache_n": 0}})
+        die_if_due()
         self.wfile.write(b"data: [DONE]\n\n")
 
 
@@ -144,10 +156,12 @@ def main(argv=None):
     p.add_argument("--stall", type=float, default=0.0)
     p.add_argument("--stall-before", type=float, default=0.0)
     p.add_argument("--silent", action="store_true")
+    p.add_argument("--die-after", type=int)
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
     Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
     Handler.max_output = a.max_output
     Handler.stall, Handler.stall_before, Handler.silent = a.stall, a.stall_before, a.silent
+    Handler.die_after = a.die_after
     srv = Server(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:
