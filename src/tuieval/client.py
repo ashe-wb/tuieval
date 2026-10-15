@@ -118,6 +118,7 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
     out = {"answer": "", "reasoning": "", "tool_calls": [], "finish": None, "usage": {}, "timings": {},
            "ttft_s": None, "total_s": None, "error": None}
     reasoning, answer, tools = [], [], {}
+    done = False                      # [DONE] seen
     start = last = time.time()
     try:
         conn.request("POST", prefix + "/v1/chat/completions", body=json.dumps(body),
@@ -142,6 +143,7 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
                 continue
             payload = line[5:].strip()
             if payload == "[DONE]":
+                done = True
                 break
             chunk = json.loads(payload)
             if chunk.get("error"):        # OpenRouter reports mid-stream failures this way
@@ -173,6 +175,9 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
                 if text:
                     answer.append(text)
                     on_delta and on_delta("answer", text)
+        if not out["error"] and not done and out["finish"] is None:
+            # the stream just ended: a server that crashed or dropped the connection, not the model's answer
+            out["error"] = "connection error: the stream ended before the server finished (no finish reason)"
     except (OSError, http.client.HTTPException, ValueError) as e:
         if stream.cancelled:
             raise Cancelled() from None
