@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tuning: a server that refuses the `ignore_eos` request field is asked again without it, so strict servers can be tuned; the profile notes that workload answers may end early.
 - Fix: a server that crashes mid-request (the stream ends with no finish reason) was graded as an empty or cut-short answer; it's a server error now, never counted against the model.
 - Dates: answers record `answered_at` (older ones read it from their log name); tests get an added date (an `added` field, or the day tuieval first saw them, in `test-dates.json`). Shown in the answer view, Pick tests, Per question, Failures and Production readiness.
 - Copy reasoning: `y` in the answer view copies its full reasoning, `a` the answer; `y` on the run screen copies the reasoning streamed so far. Uses pbcopy, wl-copy, xclip, xsel or clip, else the terminal (OSC 52).

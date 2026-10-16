@@ -169,7 +169,37 @@ def _body(m, sampling, msgs, max_tokens=GEN_TOKENS, request=None):
             **(request or {})}
 
 
+def _rejects_ignore_eos(res):
+    """True if the server refused the request because it doesn't accept the ignore_eos field."""
+    err = res.get("error") or ""
+    return err.startswith("server returned HTTP 4") and "ignore_eos" in err
+
+
 def _request(eng, base_url, body, name, emit, limit):
+    """One streamed request with live progress and a wall-clock limit. A server that refuses
+    ignore_eos is asked again without it, and later requests leave it out (see no_ignore_eos)."""
+    key = (base_url, body.get("model"))
+    rejected = no_ignore_eos(eng)
+    if key in rejected:
+        body = {k: v for k, v in body.items() if k != "ignore_eos"}
+    res = _stream_request(eng, base_url, body, name, emit, limit)
+    if body.get("ignore_eos") and _rejects_ignore_eos(res):
+        rejected.add(key)
+        emit("tune_step", message="    the server doesn't accept ignore_eos: answers may end early "
+                                  "(speeds are per token, so still comparable)")
+        res = _stream_request(eng, base_url, {k: v for k, v in body.items() if k != "ignore_eos"},
+                              name, emit, limit)
+    return res
+
+
+def no_ignore_eos(eng):
+    """(base_url, served model) pairs whose server refused ignore_eos in this tuning session."""
+    if not hasattr(eng, "_tune_no_ignore_eos"):
+        eng._tune_no_ignore_eos = set()
+    return eng._tune_no_ignore_eos
+
+
+def _stream_request(eng, base_url, body, name, emit, limit):
     """One streamed request with live progress (every PROGRESS_EVERY_S: waiting for the first
     token, or ~tokens so far and tok/s) and a wall-clock limit. Returns client.stream_chat's result."""
     st, t0 = client.Stream(), time.time()
@@ -681,6 +711,9 @@ def tune(eng, label, emit=lambda *a, **k: None, max_starts=16, min_gain=0.03, us
         if warm_info:
             notes.insert(0, f"warm start from {warm_info['from']}: inherited "
                             f"{', '.join(warm_info['inherited']) or 'nothing'}")
+    if any(model == m["served_name"] for _, model in no_ignore_eos(eng)):
+        notes.insert(0, f"the server doesn't accept ignore_eos, so workload answers could end before "
+                        f"{gen_tokens} tokens (speeds are per token)")
     if best_r.facts.get("extra_swap_mb") and best_r is not base:
         warnings.append(f"the chosen flags use more memory than the defaults: macOS swapped "
                         f"~{best_r.facts['extra_swap_mb']} MB more of other apps' memory; close apps during runs, "
