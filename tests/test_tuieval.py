@@ -2512,6 +2512,37 @@ class WarmTune(unittest.TestCase):
         self.assertEqual(out.score("projected"), 66.0)
         self.assertEqual(out.score("total"), 10.0)
 
+    def test_server_refusing_ignore_eos_is_asked_without_it(self):
+        sent = []
+
+        def server(eng, base_url, body, *a):   # refuses unknown fields, like a strict server
+            sent.append(dict(body))
+            if "ignore_eos" in body:
+                return {"error": 'server returned HTTP 400: {"error":{"message":"unsupported request field: '
+                                 'ignore_eos"}}', "answer": "", "reasoning": ""}
+            return {"error": None, "answer": "ok", "reasoning": ""}
+        orig = self.tune._stream_request
+        self.tune._stream_request = server
+        self.addCleanup(setattr, self.tune, "_stream_request", orig)
+        body = {"model": "new", "messages": [], "ignore_eos": True}
+        res = self.tune._request(self.eng, "http://x", body, "p", lambda *a, **k: None, 60)
+        self.assertIsNone(res["error"])
+        self.assertEqual(["ignore_eos" in b for b in sent], [True, False])   # retried without it
+        self.tune._request(self.eng, "http://x", body, "p", lambda *a, **k: None, 60)
+        self.assertEqual(len(sent), 3)   # later requests leave it out at once
+        self.assertNotIn("ignore_eos", sent[-1])
+        self.assertIn(("http://x", "new"), self.tune.no_ignore_eos(self.eng))
+
+    def test_other_request_errors_are_not_retried(self):
+        sent = []
+        orig = self.tune._stream_request
+        self.tune._stream_request = lambda eng, url, body, *a: sent.append(body) or {
+            "error": "server returned HTTP 400: bad messages", "answer": "", "reasoning": ""}
+        self.addCleanup(setattr, self.tune, "_stream_request", orig)
+        res = self.tune._request(self.eng, "http://x", {"model": "new", "ignore_eos": True}, "p",
+                                 lambda *a, **k: None, 60)
+        self.assertEqual((len(sent), res["error"]), (1, "server returned HTTP 400: bad messages"))
+
     def test_family_ignores_the_mtp_layer(self):
         # one GGUF lists KV heads per layer, none on the MTP (last) layer; the other gives one number
         d = self.tmp.name
