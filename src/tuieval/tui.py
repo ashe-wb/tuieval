@@ -751,10 +751,16 @@ class SetupScreen(Screen):
         self.refresh_packs()
         self.refresh_models()
         state = self.app.load_state()
-        self.apply_selection(state, quiet=True)
-        if not state:
+        if state:   # packs and options carry over; models start unticked every time
+            self.apply_selection({k: v for k, v in state.items() if k != "models"}, quiet=True)
+        else:
             self.first_time_defaults()
         self.query_one("#suites", SelectionList).focus()
+
+    def clear_models(self):
+        """Untick every model (Setup shown again after a run: each run picks its models afresh)."""
+        self.selected_models = set()
+        self.refresh_models()
 
     def first_time_defaults(self):
         """With nothing chosen before: tick the only pack and the only local model, and start on
@@ -1155,7 +1161,7 @@ class SetupScreen(Screen):
             reasons = sorted({j.note for j in jobs if j.status == "skipped"})
             self.notify(f"Nothing selected can run: {'; '.join(reasons)}", severity="warning")
             return
-        self.app.save_state(sel)
+        self.app.save_state({k: v for k, v in sel.items() if k != "models"})   # models aren't remembered
         # Packs whose earlier answers a start would set aside (Retest, everything already done, or
         # other questions or settings): the user picks per pack before anything moves.
         rows, rerun = retest_rows(e, labels, suites, repeat, tier, picks, force)
@@ -1349,7 +1355,7 @@ class TuneScreen(Screen):
     def action_back(self):
         if self.running:
             self.notify("Tuning keeps going; the header shows its progress. Press w to come back.")
-        self.app.back_to_setup()
+        self.app.back_to_setup(clear_models=True)
 
 
 # ------------------------------------------------------------------ add model
@@ -2825,7 +2831,7 @@ class RunScreen(Screen):
         if self.running:
             self.notify("Pick models and packs, then Start: add them to this run or queue them after it.",
                         timeout=8)
-        self.app.back_to_setup()  # Setup still holds the last selection
+        self.app.back_to_setup(clear_models=True)  # packs and options stay; models are picked afresh
         self.app.screen.query_one("#models").focus()
 
     @on(Button.Pressed, "#done-runs")
@@ -2835,7 +2841,7 @@ class RunScreen(Screen):
     def action_back(self):
         if self.running:
             self.notify("The run keeps going; the header shows its progress. Press w to come back.")
-        self.app.back_to_setup()
+        self.app.back_to_setup(clear_models=True)
 
 
 # ------------------------------------------------------------------ results
@@ -3789,9 +3795,12 @@ class EvalsApp(App):
         return (f"\n\nThe {len(self.queue)} queued item(s) are dropped (the queue isn't kept after quitting): "
                 + "; ".join(i.title for i in self.queue) + ".")
 
-    def back_to_setup(self):
+    def back_to_setup(self, clear_models=False):
+        """clear_models: Setup is being shown for a new pick (New run, Back), so no model stays ticked."""
         while len(self.screen_stack) > 2 and not isinstance(self.screen, SetupScreen):
             self.pop_screen()
+        if clear_models and isinstance(self.screen, SetupScreen):
+            self.screen.clear_models()
 
     def show_session(self, screen):
         if screen is None or screen is self.screen:

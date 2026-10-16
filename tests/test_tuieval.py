@@ -2016,6 +2016,32 @@ class FirstRun(unittest.TestCase):
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout.strip()
         self.assertEqual(out, "['first'] ['my-model'] smoke False")   # tuning shows once something has run
 
+    def test_setup_never_starts_with_models_ticked(self):
+        tuieval(self.ws, "add", "my-model", "--server", "local")
+        os.makedirs(os.path.join(self.ws, "logs"), exist_ok=True)
+        write(os.path.join(self.ws, "logs", "tui_state.json"),
+              json.dumps({"models": ["my-model"], "packs": ["first"], "tier": "certify", "repeat": 2}))
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval.tui import EvalsApp
+            from textual.widgets import SelectionList
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(140, 40)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    print(s.query_one("#suites", SelectionList).selected, sorted(s.selected_models), s.tier())
+                    s.selected_models = {"my-model"}
+                    s.refresh_models()
+                    app.back_to_setup(clear_models=True)   # what New run and Back do
+                    await pilot.pause()
+                    print(s.query_one("#suites", SelectionList).selected, sorted(s.selected_models))
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60).stdout
+        self.assertEqual(out.strip().splitlines(), ["['first'] [] certify", "['first'] []"])
+
     def test_trimmed_names_keep_both_ends(self):
         from tuieval.tui import fit_first_column, mid_trim, trim_names
         name = "some-author--some-long-model-name-q4_k_m-vllm"
