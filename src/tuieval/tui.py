@@ -2779,8 +2779,8 @@ class RunScreen(Screen):
     def action_watch_next(self):
         """Stream the next model running alongside (from its next answer)."""
         active = self.active()
-        if len(active) < 2:
-            self.notify("Only one model is running right now.")
+        if not active or active == [self.watch]:
+            self.notify("Only one model is running right now." if active else "No model is running right now.")
             return
         self.watch = active[(active.index(self.watch) + 1) % len(active)] if self.watch in active else active[0]
         with self.buf_lock:

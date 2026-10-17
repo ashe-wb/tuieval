@@ -847,6 +847,17 @@ class Parallel(unittest.TestCase):
         self.assertEqual({out["first"], out["switched"]}, {"a", "b"})   # v streams the other model
         self.assertTrue(any(r.get("ran_alongside") for r in self.results("a")["results"]))
 
+    def test_watch_next_moves_to_the_last_model_running(self):
+        from tuieval.tui import RunScreen
+        run = unittest.mock.MagicMock(watch="a", buf={"reasoning": [], "answer": []}, buf_lock=threading.Lock())
+        run.active.return_value = ["b"]          # a finished; only b is still running
+        RunScreen.action_watch_next(run)
+        self.assertEqual(run.watch, "b")
+        run.active.return_value = ["b"]
+        RunScreen.action_watch_next(run)          # already watching the only one
+        self.assertEqual(run.watch, "b")
+        run.notify.assert_called_with("Only one model is running right now.")
+
     def test_skip_one_model_keeps_the_other(self):
         e, events = self.engine()
         jobs = e.plan(["a", "b"], ["apps"], None, "certify", False, {})

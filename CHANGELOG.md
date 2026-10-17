@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: `v` on the run screen switches to the last model still running when the stream shows one that has finished.
 - Setup opens with no models ticked: at launch, after New run, and after Back from a run or tune. Packs and options are still remembered.
 - Tuning: a server that refuses the `ignore_eos` request field is asked again without it, so strict servers can be tuned; the profile notes that workload answers may end early.
 - Fix: a server that crashes mid-request (the stream ends with no finish reason) was graded as an empty or cut-short answer; it's a server error now, never counted against the model.
