@@ -341,9 +341,28 @@ def read_log_sections(path):
         return None
     head, sep, rest = text.partition("\n\n=== REASONING ===\n")
     if not sep:
-        return None
+        _, sep, transcript = text.partition("\n=== AGENT OUTPUT ===\n")   # an agent pack's task
+        return (transcript, "") if sep else None
     reasoning, sep, answer = rest.partition("\n\n=== ANSWER ===\n")
     return reasoning, answer if sep else ""
+
+
+def agent_checks(test):
+    """The test files that grade an agent pack's task, for What's checked."""
+    out = []
+    for title, folder in (("VISIBLE TESTS (the originals, whatever the agent did to them)",
+                           os.path.join(test["task_dir"], "repo", test.get("visible_tests", "tests"))),
+                          ("HIDDEN TESTS (the agent never sees them)", os.path.join(test["task_dir"], "hidden"))):
+        for dirpath, dirnames, files in os.walk(folder):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            for fn in sorted(f for f in files if f.endswith(".py")):
+                try:
+                    with open(os.path.join(dirpath, fn), errors="replace") as f:
+                        out.append(f"=== {title}: {os.path.relpath(os.path.join(dirpath, fn), folder)} ===\n"
+                                   + f.read())
+                except OSError:
+                    pass
+    return "\n".join(out) or "(no test files found)"
 
 
 def find_reasoning(e, entry):
@@ -609,7 +628,15 @@ class AnswerScreen(ModalScreen):
         toks = rec.get("completion_tokens")
         split = ", ".join(f"{k} {rec[k + '_tokens']:,}" for k in ("reasoning", "answer")
                           if rec.get(k + "_tokens") is not None)
-        facts = [f"finish {finish}",
+        a = rec.get("agent") or {}
+        facts = [f"{a.get('version') or a.get('name')}: {a.get('stop')}",
+                 f"{rec['total_s'] / 60:.1f} min" if rec.get("total_s") is not None else "",
+                 f"{a['turns']} turns" if a.get("turns") is not None else "",
+                 f"{a['output_tokens']:,} output tokens" if a.get("output_tokens") else "",
+                 f"{a['tool_calls']} tool calls" if a.get("tool_calls") is not None else "",
+                 f"[yellow]{a['tool_errors']} tool errors[/yellow]" if a.get("tool_errors") else "",
+                 "ran the tests" if a.get("ran_tests") else "[yellow]never ran the tests[/yellow]",
+                 f"on {rec['machine']}" if rec.get("machine") else ""] if a else [f"finish {finish}",
                  (f"{toks:,} tokens" + (f" ({split})" if split else "")
                   + (f" [yellow]over the {rec['over_budget']:,} limit sent (the provider didn't stop it)[/yellow]"
                      if rec.get("over_budget") else "")) if toks else "",
@@ -642,15 +669,19 @@ class AnswerScreen(ModalScreen):
         self.query_one("#answer-grading-text", Static).update("\n".join(grading))
 
         reasoning, source = find_reasoning(e, entry)
+        title = "Agent transcript" if a else "Reasoning"
         if reasoning is None:
-            label = f"[b]Reasoning[/b]  [dim]{rec.get('reasoning_chars', 0):,} chars; not available: {source}[/dim]"
+            label = f"[b]{title}[/b]  [dim]{rec.get('reasoning_chars', 0):,} chars; not available: {source}[/dim]"
             reasoning = ""
         else:
-            label = f"[b]Reasoning[/b]  [dim]logs/live/{rich_escape(source)}[/dim]"
+            label = f"[b]{title}[/b]  [dim]logs/live/{rich_escape(source)}[/dim]"
         self.query_one("#answer-reasoning-label", Label).update(label)
         answer = rec.get("answer") or ""
         if rec.get("tool_calls"):
             answer += "\n\n=== TOOL CALLS ===\n" + json.dumps(rec["tool_calls"], indent=2)
+        if a:
+            answer = (answer or "(no final message)") + "\n\n=== CHANGES ===\n" + (a.get("diff") or "(none)") \
+                + ("\n… (cut here; the whole diff is in the transcript's log)" if a.get("diff_cut") else "")
         for wid, text in (("#answer-reasoning", reasoning), ("#answer-answer", answer or "(empty)")):
             self.query_one(wid, TextArea).load_text(text)
         self.texts = {"reasoning": reasoning, "answer": answer}
@@ -671,6 +702,8 @@ class AnswerScreen(ModalScreen):
                                                                           allow_unicode=True, width=100)
             if test.get("hidden_tests"):
                 checked += "\n=== HIDDEN TESTS (run against the last ```python block) ===\n" + test["hidden_tests"]
+            if test.get("task_dir"):   # an agent pack: its original visible tests and its hidden ones decide
+                checked += "\n" + agent_checks(test)
         self.query_one("#answer-question", TextArea).load_text(question)
         self.query_one("#answer-checked", TextArea).load_text(checked)
 

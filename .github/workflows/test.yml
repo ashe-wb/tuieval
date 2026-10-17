@@ -26,7 +26,7 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - run: pip install -e .
+      - run: pip install -e . pytest   # pytest grades the agent-pack tests
       - run: python -m unittest discover -s tests -v
 
   # Every push to main is published as a dev build (X.Y.0.devN, installed with pip install --pre);

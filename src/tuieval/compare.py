@@ -63,6 +63,7 @@ def _load_native(data):
             "machine": r.get("machine") or run.get("machine"), "prompt_tokens": r.get("prompt_tokens"),
             # other models served at the same time (parallel_models): its speed was shared with them
             "alongside": r.get("ran_alongside") or [],
+            "agent": r.get("agent"),   # an agent pack's task: the agent's stats (see agents.py)
         })
     return rows, info
 
@@ -573,6 +574,34 @@ def items(rows):
     return out
 
 
+def agent_table(rows):
+    """(header, table) summing up agent-pack tasks per model and pack, or None without any. A pack run
+    by more than one agent version is marked, since a new version can change how models do."""
+    groups = collections.defaultdict(list)
+    for r in rows:
+        if r.get("agent"):
+            groups[(r["model"], r["suite"])].append(r)
+    if not groups:
+        return None
+    header = ["model", "pack", "passed", "med min", "med turns", "out tokens", "tool errors", "ran tests",
+              "limits hit", "tests edited", "agent"]
+    table = []
+    for (model, suite), rs in sorted(groups.items()):
+        a = [r["agent"] for r in rs]
+        turns = [x["turns"] for x in a if x.get("turns") is not None]
+        out_tokens = sum(x.get("output_tokens") or 0 for x in a)
+        versions = sorted({x.get("version") or "?" for x in a})
+        table.append([model, suite, f"{sum(r['ok'] for r in rs)}/{len(rs)}",
+                      f"{median([r['latency'] / 60000 for r in rs]):.1f}", f"{median(turns):.0f}" if turns else "-",
+                      f"{out_tokens:,}" if out_tokens else "-",
+                      str(sum(x.get("tool_errors") or 0 for x in a)),
+                      f"{sum(bool(x.get('ran_tests')) for x in a)}/{len(a)}",
+                      str(sum(x.get("stop") in ("time limit", "turn limit") for x in a)),
+                      str(sum(bool(x.get("tests_edited")) for x in a)),
+                      " + ".join(versions) + (" (MIXED)" if len(versions) > 1 else "")])
+    return header, table
+
+
 def print_table(header, table):
     widths = [max(len(str(x)) for x in col) for col in zip(header, *table)]
     fmt = "  ".join("{:<%d}" % w for w in widths)
@@ -629,6 +658,10 @@ def main(argv):
     if any(r.get("difficulty") in LEVELS for r in rows):
         print("\nPass rate by difficulty:")
         print_table(header, table)
+    agents_summary = agent_table(rows)
+    if agents_summary:
+        print("\nAgent tasks (agent packs; MIXED = answers from more than one agent version):")
+        print_table(*agents_summary)
     machine = argv[argv.index("--machine") + 1] if "--machine" in argv else None
     if "--speed" in flags or machine:
         speeds = {}

@@ -85,6 +85,8 @@ packs/support-bot/
 
 Built-in graders: `answer` (a number or word on an `ANSWER:` line, or a correct refusal when the data isn't there), `rag` (grounded answers with citations), `reply` (free-form replies against rules), `tool_call` (the right tool with the right arguments, or rightly none) and `code` (Python run against hidden tests). Your own grader is one Python file in the workspace's `graders/` folder.
 
+**Agent packs** test models inside a coding agent: each test is a small project with a task. An agent you choose works on it, using the model tuieval serves, and the project's tests grade the result. See [docs/agent-packs.md](docs/agent-packs.md).
+
 `tuieval new-pack <name> --grader <grader>` creates a pack with working examples for any grader. **See [docs/writing-packs.md](docs/writing-packs.md)** for every field, gates, critical failures, difficulty labels, custom graders and how to write tests that separate good models from weak ones.
 
 ## The workspace
@@ -160,7 +162,7 @@ tuieval help
 
 ## Safety
 
-⚠️ The `code` grader executes model-written code on your machine. Run code packs inside a container or VM with no credentials in the environment.
+⚠️ The `code` grader executes model-written code on your machine, and an agent pack's agent runs commands as you. Run code and agent packs inside a container or VM with no credentials in the environment.
 
 ## Development
 

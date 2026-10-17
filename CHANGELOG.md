@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Agent packs (`kind = "agent"`): each test is a small project with a task, worked on by a command-line agent you define in `[agents]`, using the model tuieval serves, and graded by the task's visible and hidden tests. Results show the agent's stats, diff and transcript; `tuieval compare` adds an Agent tasks table; `tuieval selftest` checks each task's reference and wrong fixes. See docs/agent-packs.md.
 - Answers that used more tokens than the `max_tokens` sent (a provider that didn't stop them) are marked over budget: `(n over budget)` in the PTA index, an **over budget** column, `over` in Per question and a note in the answer view. `[defaults] over_budget = "fail"` fails them instead. Works on stored results.
 - Fix: Results → Per question opened the answers of the model one column to the right of the cell picked, and crashed on the last model's column.
 - Fix: `v` on the run screen switches to the last model still running when the stream shows one that has finished.

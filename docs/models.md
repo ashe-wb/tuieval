@@ -210,6 +210,7 @@ request_timeout_ms = 1800000   # per request; long thinking runs need it
 stall_timeout_ms = 300000      # no tokens this long once answering began: the server stalled (retried, not counted)
 over_budget = "flag"           # answers past the max_tokens sent (a provider that didn't stop them): "flag" or "fail"
 # reference = "<label>"        # the model Results → Insights compares against by default
+# agent = "<name>"             # the [agents.<name>] that runs agent packs (see docs/agent-packs.md)
 ready_timeout_s = 1200         # how long a model may take to load before giving up
 model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
 

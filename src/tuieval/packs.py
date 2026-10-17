@@ -7,6 +7,14 @@
       grader.py        optional: graders this pack brings with it (see graders/__init__.py)
       images/, …       assets referenced by tests
 
+An agent pack (pack.toml kind = "agent") has task folders instead of questions, run by a command-line
+coding agent and graded by tests (see agents.py):
+
+    packs/<name>/tasks/<id>/
+      task.md          the instruction        task.toml   description, category, difficulty, minutes, max_turns
+      repo/            what the agent sees    hidden/     tests it never sees, run to grade it
+      solution/, wrong/<name>/   a reference fix and wrong ones, for tuieval selftest
+
 Add a folder and it shows up in the TUI; delete or rename it and it's gone. Every pack has a
 fingerprint of its content, stored with results, so results from an older version of the
 questions are flagged instead of being compared as if nothing changed.
@@ -51,6 +59,10 @@ class Pack:
     certify_repeat: int    # repeats in a certification run (0 = models.toml default)
     stop_early: bool = False   # stop the pack once its FAIL is certain (pack.toml stop_early)
     max_tokens: int = 0    # output budget for this pack's answers (0 = [sampling] max_tokens)
+    kind: str = ""         # "" (questions) or "agent" (task folders run by an agent, see agents.py)
+    agent: str = ""        # agent packs: the [agents.<name>] that runs them ("" = [defaults] agent)
+    python: str = ""       # agent packs: the Python the tasks and their tests run with ("" = tuieval's)
+    min_context: int = 0   # context the pack needs, when its prompts don't show it (agent packs)
 
     @property
     def modules(self):
@@ -151,6 +163,88 @@ def _fingerprint(system, tools, grader, tests, images, max_tokens=0):
     return h.hexdigest()[:12]
 
 
+KINDS = ("", "agent")
+TASK_SKIP = {"__pycache__", ".pytest_cache", ".DS_Store", ".git"}   # never part of a task's fingerprint
+
+
+def _task_files(folder):
+    """(relative path, absolute path) of every file under folder, sorted; caches and .git left out."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = sorted(d for d in dirnames if d not in TASK_SKIP)
+        for fn in sorted(filenames):
+            if fn not in TASK_SKIP:
+                full = os.path.join(dirpath, fn)
+                out.append((os.path.relpath(full, folder), full))
+    return out
+
+
+def _read_tasks(path, meta):
+    """An agent pack's tests: one per folder in tasks/ (task.md, repo/, hidden/, optional task.toml)."""
+    root = os.path.join(path, "tasks")
+    if not os.path.isdir(root):
+        raise PackError(f"{path}: an agent pack needs a tasks/ folder with one folder per task")
+    tests = []
+    for name in sorted(os.listdir(root)):
+        d = os.path.join(root, name)
+        if not os.path.isdir(d) or name.startswith((".", "_")):
+            continue
+        for need in ("task.md", "repo", "hidden"):
+            if not os.path.exists(os.path.join(d, need)):
+                raise PackError(f"{d}: task has no {need}")
+        with open(os.path.join(d, "task.md")) as f:
+            text = f.read().strip()
+        tt = {}
+        if os.path.isfile(os.path.join(d, "task.toml")):
+            with open(os.path.join(d, "task.toml"), "rb") as f:
+                tt = tomllib.load(f)
+        first = next((l.strip("# ").strip() for l in text.splitlines() if l.strip()), name)
+        t = {"id": name, "input": text, "grader": "agent", "task_dir": d,
+             "description": tt.get("description") or first[:80], "category": tt.get("category", ""),
+             "difficulty": tt.get("difficulty", meta.get("difficulty", "unrated")),
+             "minutes": tt.get("minutes", meta.get("minutes", 15)),
+             "max_turns": tt.get("max_turns", meta.get("max_turns", 40)),
+             "visible_tests": tt.get("visible_tests", "tests"), "critical_trial": False}
+        if t["difficulty"] not in DIFFICULTIES + ("unrated",):
+            raise PackError(f"{d}: difficulty {t['difficulty']!r}; use easy, medium or hard")
+        for k in ("minutes", "max_turns"):
+            if isinstance(t[k], bool) or not isinstance(t[k], (int, float)) or t[k] <= 0:
+                raise PackError(f"{d}: {k} must be a number above 0, not {t[k]!r}")
+        tests.append(t)
+    if not tests:
+        raise PackError(f"{root}: no tasks")
+    return tests
+
+
+def _task_fingerprint(tests):
+    """Hash of what an agent sees and what grades it: each task's text, limits and every file of its
+    repo/ and hidden/ (task.toml's description, category and difficulty are labels only)."""
+    h = hashlib.sha256()
+    what = [{k: t[k] for k in ("id", "input", "minutes", "max_turns", "visible_tests")} for t in tests]
+    h.update(json.dumps({"kind": "agent", "tasks": what}, sort_keys=True).encode())
+    for t in tests:
+        for part in ("repo", "hidden"):
+            for rel, full in _task_files(os.path.join(t["task_dir"], part)):
+                h.update(f"\0{t['id']}/{part}/{rel}\0".encode())
+                with open(full, "rb") as f:
+                    h.update(f.read())
+    return h.hexdigest()[:12]
+
+
+def _load_agent_pack(name, path, meta, meta_path):
+    tests = _read_tasks(path, meta)
+    min_context = meta.get("min_context", 32768)
+    if isinstance(min_context, bool) or not isinstance(min_context, int) or min_context < 1:
+        raise PackError(f"{meta_path}: min_context must be a whole number above 0, not {min_context!r}")
+    gate = {"min_accuracy": 0.8, **meta.get("gate", {})}
+    return Pack(name=name, path=path, label=meta.get("label", name), group=meta.get("group", "Other"),
+                description=meta.get("description", ""), grader="agent", system="", needs=[], tools=[],
+                tests=tests, fingerprint=_task_fingerprint(tests), gate=gate, screen=int(meta.get("screen", 10)),
+                certify_repeat=int(meta.get("certify", {}).get("repeat", 0)),
+                stop_early=bool(meta.get("stop_early", False)), kind="agent", agent=str(meta.get("agent", "")),
+                python=str(meta.get("python", "")), min_context=min_context)
+
+
 def load_pack(path):
     name = os.path.basename(path.rstrip("/"))
     if os.path.isfile(os.path.join(path, "grader.py")):
@@ -158,6 +252,10 @@ def load_pack(path):
     meta_path = os.path.join(path, "pack.toml")
     with open(meta_path, "rb") as f:
         meta = tomllib.load(f)
+    if meta.get("kind", "") not in KINDS:
+        raise PackError(f"{meta_path}: kind must be \"agent\" or left out, not {meta['kind']!r}")
+    if meta.get("kind") == "agent":
+        return _load_agent_pack(name, path, meta, meta_path)
     images = []
 
     system = ""
