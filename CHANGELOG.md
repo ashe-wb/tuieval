@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Answers that used more tokens than the `max_tokens` sent (a provider that didn't stop them) are marked over budget: `(n over budget)` in the PTA index, an **over budget** column, `over` in Per question and a note in the answer view. `[defaults] over_budget = "fail"` fails them instead. Works on stored results.
 - Fix: Results → Per question opened the answers of the model one column to the right of the cell picked, and crashed on the last model's column.
 - Fix: `v` on the run screen switches to the last model still running when the stream shows one that has finished.
 - Setup opens with no models ticked: at launch, after New run, and after Back from a run or tune. Packs and options are still remembered.

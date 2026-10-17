@@ -107,6 +107,9 @@ def load_config(path):
         cfg = tomllib.load(f)
     builtin = builtin_config()
     cfg["defaults"] = {**builtin["defaults"], **cfg.get("defaults", {})}
+    if cfg["defaults"]["over_budget"] not in client.OVER_BUDGET_MODES:
+        raise ConfigError(f"{path}: [defaults] over_budget must be one of "
+                          f"{', '.join(map(repr, client.OVER_BUDGET_MODES))}, not {cfg['defaults']['over_budget']!r}")
     cfg.setdefault("sampling", builtin["sampling"])
     own = cfg.get("servers", {})
     cfg["servers"] = {**builtin["servers"], **own}
@@ -528,6 +531,11 @@ def read_result(path):
     return data
 
 
+def sent_max_tokens(data):
+    """The max_tokens a result file's requests were sent with: the pack's own, else the model's."""
+    return (data.get("pack") or {}).get("max_tokens") or (data.get("settings") or {}).get("max_tokens")
+
+
 def server_error(log, start):
     """Why a server stopped while loading: the last error line it wrote since start, when it
     names one (some servers refuse a context that does not fit with one)."""
@@ -925,9 +933,13 @@ class Engine:
         return cached[1]
 
     def records(self, label, pack_name):
-        """Stored result rows for a model and pack, or [] (smoke runs excluded)."""
+        """Stored result rows for a model and pack, or [] (smoke runs excluded), as scored: copies, with
+        answers past the max_tokens sent marked (and failed, with [defaults] over_budget = "fail")."""
         data = self._result(self.result_path(label, pack_name))
-        return data["results"] if data else []
+        if not data:
+            return []
+        return client.mark_over_budget([dict(r) for r in data["results"]], sent_max_tokens(data),
+                                       self.cfg["defaults"]["over_budget"])
 
     def certify_repeat(self, pack):
         return pack.certify_repeat or self.cfg["defaults"]["repeat"]
@@ -1126,7 +1138,7 @@ class Engine:
 
     def _partial_header(self, job):
         return {"pack_fingerprint": job.pack.fingerprint, "settings_fingerprint": settings_fingerprint(job.settings),
-                "settings": job.settings}
+                "settings": job.settings, "max_tokens": job.pack.max_tokens or job.sampling["max_tokens"]}
 
     def _header_ok(self, head, job):
         return header_matches(head, job.pack.fingerprint, job.settings)

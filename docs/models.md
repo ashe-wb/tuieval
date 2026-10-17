@@ -105,6 +105,7 @@ The **PTA index** puts parsimony (tokens), time and accuracy side by side, as a 
 - **P parsimony (tokens)**: the tokens used, reasoning and answer, on every question compared (each question at its median over repeats). Beside the bar: how many times the leanest model's, e.g. `2.4×` (`1.0×` is the leanest, ★ in the table's **tokens/answer**). Unlike time it doesn't depend on your machine: it's how much a model says to get to an answer, which is what you pay for on an API and what fills its context.
 - **T time**: the total time to answer those questions, as how many times the fastest model's, e.g. `28×` (★ in **time/answer**).
 - **A accuracy**: the share of answers to those questions that passed. Answers cut off at `max_tokens` count as wrong, but show in orange after the green, with `(n% truncated)` beside the number and a **truncated** column in the table: those failures are a model out of tokens (overthinking), not a wrong answer yet. A pack's own `max_tokens` gives it more room.
+- **Over budget**: some providers don't stop a model at `max_tokens` (thinking goes on past it), so the answer isn't cut off but the model had more room than the others. Answers that used more tokens than were sent as `max_tokens` show as `(n over budget)` beside the accuracy, an **over budget** column, `over` in Results → Per question and a note in the answer view. They're only flagged; `over_budget = "fail"` in `[defaults]` counts them as failed instead (stored results aren't changed, so switching back restores them).
 
 The P and T bars are as long as the tokens and time used: the model that used the most fills its bar, the others in proportion (at least one block), so **shorter is better**. The A bar is the share of answers right, so **longer is better**; it's full only when every answer passed. Each heading says which way is better.
 
@@ -207,6 +208,7 @@ A workspace's `models.toml` only needs what differs from these. `[defaults]` fil
 repeat = 3
 request_timeout_ms = 1800000   # per request; long thinking runs need it
 stall_timeout_ms = 300000      # no tokens this long once answering began: the server stalled (retried, not counted)
+over_budget = "flag"           # answers past the max_tokens sent (a provider that didn't stop them): "flag" or "fail"
 # reference = "<label>"        # the model Results → Insights compares against by default
 ready_timeout_s = 1200         # how long a model may take to load before giving up
 model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
