@@ -2421,6 +2421,81 @@ def fake_gguf(path, embedding=5120, size=0, kv_heads=4):
         f.write(out + b"\0" * max(0, size - len(out)))
 
 
+class OverBudget(unittest.TestCase):
+    """Answers that used more tokens than the max_tokens sent (a provider that didn't stop them) are
+    marked when results are read: flagged, or failed with [defaults] over_budget = "fail"."""
+
+    def setUp(self):
+        from tuieval import packs
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        d = os.path.join(self.ws, "packs", "p")
+        os.makedirs(d)
+        write(os.path.join(d, "pack.toml"), 'label = "p"\nmax_tokens = 100\n[gate]\nmin_accuracy = 0.5\n')
+        write(os.path.join(d, "tests.yaml"), "".join(f"- id: q{i}\n  input: q{i}\n  expected: 7\n" for i in range(4)))
+        rec = lambda i, ok, toks, **kw: {"test": f"q{i}", "description": f"q{i}", "pass": ok, "score": float(ok),
+                                         "reason": "ok" if ok else "wrong", "finish": "stop", "repeat": 0,
+                                         "completion_tokens": toks, **kw}
+        self.path = os.path.join(self.ws, "results", "m", "p.json")
+        os.makedirs(os.path.dirname(self.path))
+        with open(self.path, "w") as f:
+            json.dump({"format": "evals/1", "model": {"label": "m"},
+                       "pack": {"name": "p", "fingerprint": packs.load_pack(d).fingerprint, "max_tokens": 100},
+                       "run": {}, "settings": {"max_tokens": 16384},
+                       "results": [rec(0, True, 150),                              # past the pack's 100: over
+                                   rec(1, True, 90),
+                                   rec(2, False, 100, finish="length"),            # cut off: truncated, not over
+                                   rec(3, True, 500, tokens_estimated=True)]}, f)  # an estimate: never flagged
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def set_mode(self, mode):
+        path = os.path.join(self.ws, "models.toml")
+        write(path, read(path).replace("[defaults]\n", f'[defaults]\nover_budget = "{mode}"\n', 1))
+
+    def test_flag_marks_copies_and_shows_counts(self):
+        from tuieval import compare, engine, pta
+        e = engine.Engine(root=self.ws)
+        recs = e.records("m", "p")
+        self.assertEqual([r.get("over_budget") for r in recs], [100, None, None, None])
+        self.assertEqual([r["pass"] for r in recs], [True, True, False, True])
+        self.assertNotIn("over_budget", e._result(self.path)["results"][0])   # what a rerun writes back stays as stored
+        self.assertNotIn("over_budget", read(self.path))
+        rows, _ = compare.load([self.path])
+        self.assertEqual([r["over_budget"] for r in rows], [100, None, None, None])
+        cell = compare.per_question(rows)[0]["cells"]["m"]
+        self.assertEqual((cell["over"], cell["passed"]), (1, 1))
+        header, table = pta.table(pta.index(rows))
+        self.assertEqual(table[0][header.index("over budget")], "1/4")
+        self.assertIn("(1 over budget)", "\n".join(pta.bars(pta.index(rows), markup=False)))
+        self.assertIn("over budget", compare.scorecard(rows)[0])
+
+    def test_fail_mode_fails_them(self):
+        from tuieval import compare, engine
+        self.set_mode("fail")   # records() is what verdicts are computed from
+        e = engine.Engine(root=self.ws)
+        recs = e.records("m", "p")
+        self.assertEqual([r["pass"] for r in recs], [False, True, False, True])
+        self.assertTrue(recs[0]["reason"].startswith("OVER BUDGET: 150 tokens, over the 100 limit sent; ok"))
+        rows, _ = compare.load([self.path])
+        self.assertEqual([r["ok"] for r in rows], [False, True, False, True])
+        self.assertIn('"pass": true', read(self.path))                       # the stored grade is unchanged
+
+    def test_partials_and_bad_setting(self):
+        from tuieval import compare, engine
+        part = os.path.join(self.ws, "results", "m", "q.json.partial.jsonl")
+        with open(part, "w") as f:
+            f.write(json.dumps({"pack_fingerprint": "x", "max_tokens": 50, "settings": {"sampling": {"max_tokens": 999}}}) + "\n")
+            f.write(json.dumps({"test": "a", "description": "a", "pass": True, "score": 1.0, "reason": "ok",
+                                "finish": "stop", "completion_tokens": 60}) + "\n")
+        self.assertEqual([r["over_budget"] for r in compare.load_partials(os.path.join(self.ws, "results"))], [50])
+        self.set_mode("sometimes")
+        with self.assertRaisesRegex(engine.ConfigError, "over_budget must be one of"):
+            engine.Engine(root=self.ws)
+
+
 class FitCheck(unittest.TestCase):
     def test_default_follows_the_ctx_placeholder(self):
         from tuieval import engine

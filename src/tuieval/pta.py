@@ -78,6 +78,8 @@ def index(rows, models=None, memory=None):
                     # failed only because max_tokens ran out (overthinking, not wrong yet)
                     "cut": sum(c["truncated"] for c in cells),
                     "cut_pct": 100 * sum(c["truncated"] for c in cells) / answers if answers else None,
+                    # ran past the max_tokens sent: the provider didn't stop it, so it had more room than asked
+                    "over": sum(c.get("over", 0) for c in cells),
                     # generation speed and time to first token over the same answers (medians)
                     "tps": compare.median(r.get("gen_tps") for c in cells for r in c["rows"]),
                     "ttft": compare.median(r.get("ttft") for c in cells for r in c["rows"]),
@@ -147,6 +149,9 @@ def bars(result, width=20, markup=True, click=None):
                 part = min(width - full, max(1, round(width * cut / 100))) if cut else 0
                 if cut:   # after the accuracy, which stays aligned with the other rows'
                     num = f"{num:>6}  ({compare.pct(cut / 100)} truncated)"
+                if x.get("over"):
+                    note = f"({x['over']} over budget)"
+                    num = (f"{num}  " if cut else f"{num:>6}  ") + (f"[yellow]{note}[/yellow]" if markup else note)
             else:
                 full = _blocks(width, x.get(measure), most[measure])
                 num = times(x.get(shown))
@@ -183,10 +188,13 @@ def left_out_lines(result):
 def table(result):
     """(header, rows) for a plain table of the index."""
     n = result["questions"] or 1
-    header = ["model", "tokens/answer", "time/answer", "answers right", "truncated", "tok/s", "TTFT s", "memory GB"]
+    over = any(x.get("over") for x in result["models"])   # a column only when some answer ran past max_tokens
+    header = ["model", "tokens/answer", "time/answer", "answers right", "truncated", *(["over budget"] if over else []),
+              "tok/s", "TTFT s", "memory GB"]
     rows = [[x["model"], f"{round(x['tokens'] / n):,}" + (" ★" if x.get("fewest") else ""),
              fmt_secs(x["total_s"] / n) + (" ★" if x.get("fastest") else ""),
              f"{x['passed']}/{x['answers']}", f"{x.get('cut') or 0}/{x['answers']}",
+             *([f"{x.get('over') or 0}/{x['answers']}"] if over else []),
              _num(x.get("tps"), ".0f"), _num(x.get("ttft"), ".1f"),
              _num(x.get("memory_gb"), ".1f")] for x in result["models"]]
     return header, rows
@@ -222,7 +230,10 @@ def scope_note(result, models):
             "and how many times the leanest / fastest model's (1.0×, ★ in the table). A accuracy: answers right "
             "(longer is better)"
             + ("; orange, (n% truncated): answers cut off at max_tokens. They count as wrong, but the model ran "
-               "out of tokens rather than answering wrong." if any(x.get("cut") for x in result["models"]) else "."))
+               "out of tokens rather than answering wrong." if any(x.get("cut") for x in result["models"]) else ".")
+            + (" Over budget: answers that used more tokens than the max_tokens sent, because the provider didn't "
+               "stop them, so the model had more room than the others (over_budget = \"fail\" in models.toml's defaults fails them)."
+               if any(x.get("over") for x in result["models"]) else ""))
 
 
 def for_engine(e, labels=None, packs=None, results_dir=None):

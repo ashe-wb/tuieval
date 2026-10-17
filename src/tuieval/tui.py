@@ -610,7 +610,9 @@ class AnswerScreen(ModalScreen):
         split = ", ".join(f"{k} {rec[k + '_tokens']:,}" for k in ("reasoning", "answer")
                           if rec.get(k + "_tokens") is not None)
         facts = [f"finish {finish}",
-                 (f"{toks:,} tokens" + (f" ({split})" if split else "")) if toks else "",
+                 (f"{toks:,} tokens" + (f" ({split})" if split else "")
+                  + (f" [yellow]over the {rec['over_budget']:,} limit sent (the provider didn't stop it)[/yellow]"
+                     if rec.get("over_budget") else "")) if toks else "",
                  f"prompt {rec['prompt_tokens']:,} tokens" if rec.get("prompt_tokens") else "",
                  (f"TTFT {rec['ttft_s']:.1f}s" + (f" [yellow]⟲ {rec['cached_tokens']} cached[/yellow]"
                                                    if rec.get("cached_tokens") else "")) if rec.get("ttft_s") is not None else "",
@@ -3317,6 +3319,7 @@ class ResultsScreen(Screen):
         self.query_one("#pq-legend", Static).update(
             f"[dim]{len(tests)} questions. Each cell: result (passes/answers if repeated), median tokens, median seconds. "
             "[green]bold[/green] = fewest tokens among passing answers · [red]cut[/red] = hit max_tokens · "
+            "[yellow]over[/yellow] = ran past max_tokens (the provider didn't stop it) · "
             "◐ = pack unfinished (not in scores) · dim seconds = hosted, or measured on another machine; tokens compare "
             "across machines, seconds don't. ×tokens = most / fewest tokens across models. Enter on a cell opens the "
             "answers. Click a column name to sort by it (a model's column: by its tokens).[/dim]" + ("\n[yellow]Left out, being rerun with other questions or settings: " + ", ".join(
@@ -3376,7 +3379,8 @@ class ResultsScreen(Screen):
                              "max"),
                           hi(r["fewest"], str(r["fewest"]), "fewest", "max"),
                           hi(r["fastest"], str(r["fastest"]), "fastest", "max"),
-                          f"[red]{r['cut']}[/red]" if r["cut"] else "0"])
+                          (f"[red]{r['cut']}[/red]" if r["cut"] else "0")
+                          + (f" [yellow]+{r['over']} over[/yellow]" if r.get("over") else "")])
         table.add_columns(*header)
         table.add_rows(fit_first_column(header, cells, (self.size.width or self.app.size.width) - 3))
         line = f"[b]Comparison[/b] over the {len(shared)} questions all {len(models)} answered"
@@ -3413,6 +3417,7 @@ class ResultsScreen(Screen):
         if remote:
             secs = f"[dim]{secs}[/dim]"
         return (f"{mark} {tok_s} {secs}" + (" [red]cut[/red]" if c["truncated"] else "")
+                + (" [yellow]over[/yellow]" if c.get("over") else "")
                 + (" [cyan]◐[/cyan]" if c["partial"] else ""))
 
     PQ_FIXED = ("Test", "Pack", "Level", "Added", "×tokens")   # Per question's columns before the models

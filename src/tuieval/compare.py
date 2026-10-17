@@ -51,6 +51,8 @@ def _load_native(data):
             "ok": bool(r["pass"]), "score": float(r["score"]), "reason": r["reason"],
             "error": r["reason"].startswith(("server returned", "connection error")),
             "truncated": r.get("finish") == "length", "output": r.get("answer") or "",
+            # tokens past the max_tokens sent, which the provider didn't stop (client.mark_over_budget)
+            "over_budget": r.get("over_budget"),
             "tokens": r.get("completion_tokens") or 0, "reasoning_tokens": r.get("reasoning_tokens"),
             # a reused (cached) prompt makes time-to-first-token and prompt speed look faster than they are
             "answer_tokens": r.get("answer_tokens"), "ttft": None if r.get("cached_tokens") else r.get("ttft_s"),
@@ -67,13 +69,16 @@ def _load_native(data):
 
 def load(paths):
     """(rows, infos): one row per answer; one info per (model, result file)."""
+    from . import engine
     rows, infos = [], []
+    mode = over_budget_mode(paths)
     for path in paths:
         with open(path) as f:
             data = json.load(f)
         if data.get("format") != "evals/1":
             continue
         data["results"] = [r for r in data["results"] if not client.server_error_row(r)]
+        client.mark_over_budget(data["results"], engine.sent_max_tokens(data), mode)
         r, i = _load_native(data)
         for row, rec in zip(r, data["results"]):
             row.update(raw=rec, path=path, pack_fp=data["pack"]["fingerprint"])
@@ -93,17 +98,31 @@ def load(paths):
     return rows, infos
 
 
+def _configs(paths):
+    """The models.toml configs of the workspaces these results/<label>/<pack>.json are from (unreadable
+    ones left out)."""
+    from . import engine
+    out = []
+    for root in sorted({os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(p)))) for p in paths}):
+        try:
+            out.append(engine.load_config(os.path.join(root, "models.toml")))
+        except Exception:
+            continue
+    return out
+
+
+def over_budget_mode(paths):
+    """[defaults] over_budget of the workspace(s) the results are from: "fail" if any says so."""
+    return "fail" if any(c["defaults"]["over_budget"] == "fail" for c in _configs(paths)) else "flag"
+
+
 def configured_hosted(paths):
     """(labels, label prefixes) models.toml says are hosted, in the workspaces these results/<label>/
     <pack>.json are from: its hosted models, and the prefix of models named at run time on a hosted
     server (e.g. "or-"). Covers hosted models whose results aren't loaded."""
     from . import engine
     labels, prefixes = set(), set()
-    for root in {os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(p)))) for p in paths}:
-        try:
-            cfg = engine.load_config(os.path.join(root, "models.toml"))
-        except Exception:
-            continue    # no readable models.toml there: the results' own marks still apply
+    for cfg in _configs(paths):   # no readable models.toml: the results' own marks still apply
         labels |= {m["label"] for m in cfg["models"] if engine.hosted(cfg, m)}
         prefixes |= {engine.remote_label(n, s, "") for n, s in cfg["servers"].items()
                      if s.get("any_model") and engine.hosted(cfg, {"server": n})}
@@ -125,6 +144,7 @@ def load_partials(results_dir=None):
     <pack>.json.partial.jsonl, marked partial. They never count toward scores or verdicts."""
     results_dir = results_dir or workspace.path("results")
     rows = []
+    mode = over_budget_mode([os.path.join(results_dir, "x", "x.json")])
     for path in sorted(glob.glob(os.path.join(results_dir, "*", "*" + PARTIAL_SUFFIX))):
         label = os.path.basename(os.path.dirname(path))
         if label in ("smoke", "archive"):
@@ -137,6 +157,9 @@ def load_partials(results_dir=None):
         if len(lines) < 2:
             continue
         head, recs = lines[0], [r for r in lines[1:] if not client.server_error_row(r)]
+        # the limit sent: recorded in the header (older ones: the model's own)
+        client.mark_over_budget(recs, head.get("max_tokens") or ((head.get("settings") or {}).get("sampling") or {})
+                                .get("max_tokens"), mode)
         data = {"model": {"label": label}, "pack": {"name": os.path.basename(path)[:-len(PARTIAL_SUFFIX)],
                                                     "fingerprint": head.get("pack_fingerprint")},
                 "run": {}, "results": recs}
@@ -222,7 +245,9 @@ def scorecard(rows, rng=None):
     models = sorted({r["model"] for r in rows})
     suites = sorted({r["suite"] for r in rows})
     extra = dict(graders.COLUMNS)   # columns your graders add (graders.scorecard_column)
-    header = ["model"] + suites + ["overall", "95% CI", "mean score", "all repeats", *extra, "errors", "trunc", "rep"]
+    over = any(r.get("over_budget") for r in rows)   # a column only when some answer ran past max_tokens
+    header = ["model"] + suites + ["overall", "95% CI", "mean score", "all repeats", *extra, "errors", "trunc",
+                                   *(["over budget"] if over else []), "rep"]
     table = []
     for m in models:
         mine = [r for r in rows if r["model"] == m]
@@ -243,6 +268,7 @@ def scorecard(rows, rng=None):
                 cell = "error"
             line.append("-" if cell is None else str(cell))
         line += [str(sum(r["error"] for r in mine)), str(sum(r["truncated"] for r in mine)),
+                 *([str(sum(bool(r.get("over_budget")) for r in mine))] if over else []),
                  str(sum(repetitive(r["output"]) for r in mine))]
         table.append(line)
     return header, table
@@ -339,6 +365,7 @@ def per_question(rows):
         for c in t["cells"].values():
             v = sorted(c["rows"], key=lambda r: r.get("repeat", 0))
             c.update(rows=v, n=len(v), passed=sum(r["ok"] for r in v), truncated=sum(r["truncated"] for r in v),
+                     over=sum(bool(r.get("over_budget")) for r in v),
                      partial=any(r.get("partial") for r in v),
                      tokens=median(r["tokens"] or None for r in v), secs=median(r["latency"] / 1000 or None for r in v),
                      tps=median(r["gen_tps"] for r in v))
@@ -386,7 +413,8 @@ def compare_models(tests, models):
                     "med_tokens": median(c["tokens"] for c in cs), "med_secs": median(c["secs"] for c in cs),
                     "total_secs": sum(c["secs"] or 0 for c in cs) or None,
                     "tokens_per_pass": total / passed if passed else None,
-                    "fewest": fewest, "fastest": fastest, "cut": sum(c["truncated"] for c in cs)})
+                    "fewest": fewest, "fastest": fastest, "cut": sum(c["truncated"] for c in cs),
+                    "over": sum(c.get("over", 0) for c in cs)})
     return out
 
 

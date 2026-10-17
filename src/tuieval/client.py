@@ -42,6 +42,26 @@ def server_error_row(rec):
     return not rec.get("pass") and (is_server_error(rec.get("reason")) or is_unavailable(rec.get("reason")))
 
 
+OVER_BUDGET_MODES = ("flag", "fail")
+
+
+def mark_over_budget(records, limit, mode="flag"):
+    """Answers that used more tokens than the max_tokens sent and weren't cut off there: some providers
+    don't stop thinking at the limit. Each gets `over_budget` = the limit; with mode "fail", a passing
+    one fails. Estimated token counts are never flagged."""
+    if not limit:
+        return records
+    for r in records:
+        if r.get("finish") == "length" or r.get("tokens_estimated") or (r.get("completion_tokens") or 0) <= limit:
+            continue
+        r["over_budget"] = limit
+        if mode == "fail" and r.get("pass"):
+            r.update({"pass": False, "score": 0.0, "severity": None,
+                      "reason": f"OVER BUDGET: {r['completion_tokens']:,} tokens, over the {limit:,} limit sent; "
+                                + r.get("reason", "")})
+    return records
+
+
 class Cancelled(Exception):
     pass
 
