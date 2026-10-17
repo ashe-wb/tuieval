@@ -3296,7 +3296,7 @@ class ResultsScreen(Screen):
         here = self.app.engine.machine().id
         table = self.query_one("#per-question", DataTable)
         table.clear(columns=True)
-        table.add_columns("Test", "Pack", "Level", "Added", "×tokens", *models)
+        table.add_columns(*self.PQ_FIXED, *models)
         self.pq_tests, self.pq_models = {}, models
         for t in tests:
             cells = []
@@ -3415,11 +3415,13 @@ class ResultsScreen(Screen):
         return (f"{mark} {tok_s} {secs}" + (" [red]cut[/red]" if c["truncated"] else "")
                 + (" [cyan]◐[/cyan]" if c["partial"] else ""))
 
+    PQ_FIXED = ("Test", "Pack", "Level", "Added", "×tokens")   # Per question's columns before the models
+
     @on(DataTable.CellSelected, "#per-question")
     def per_question_selected(self, event):
-        col = event.coordinate.column - 4
+        col = event.coordinate.column - len(self.PQ_FIXED)
         t = self.pq_tests.get(event.cell_key.row_key.value)
-        if not t or col < 0:
+        if not t or not 0 <= col < len(self.pq_models):
             self.notify("Pick a model's cell to open its answers.")
             return
         c = t["cells"].get(self.pq_models[col])

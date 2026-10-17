@@ -1761,7 +1761,23 @@ class PTAIndex(unittest.TestCase):
                         await pilot.pause(0.3)
                         s = app.screen
                         sorts["opened"] = s.entries[s.index]["record"]["test"]
-                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone],
+                        s.dismiss()
+                        await pilot.pause(0.2)
+                        app.pq_models = set()
+                        app.screen.query_one("#pq-disagree").value = False
+                        app.screen.query_one(TabbedContent).active = "tab-per-question"
+                        app.screen.fill_per_question()
+                        await pilot.pause(0.3)
+                        opened = {}
+                        pq.focus()
+                        for col in range(5, len(pq.columns)):                  # each model's cell opens its own answers
+                            pq.move_cursor(row=0, column=col)
+                            await pilot.press("enter")
+                            await pilot.pause(0.3)
+                            opened[str(pq.ordered_columns[col].label.plain)] = app.screen.entries[0]["model"]
+                            app.screen.dismiss()
+                            await pilot.pause(0.2)
+                        print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone], "opened": opened,
                                           "tab": tab, "sorts": sorts, "fails": fails}))
                 asyncio.run(go())
             """)
@@ -1771,6 +1787,8 @@ class PTAIndex(unittest.TestCase):
             self.assertIsInstance(got, dict, got)
             self.assertTrue(got["bars"])
             self.assertEqual(got["disagree"], [4, 0])
+            self.assertGreaterEqual(len(got["opened"]), 2)
+            self.assertEqual(got["opened"], {m: m for m in got["opened"]})   # a cell opens its column's model
             self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
             self.assertEqual([(r[0], r[3]) for r in got["rows"]][0], ("good", "4/4"))
             s = got["sorts"]   # a click on a column name sorts by it, a second click reverses

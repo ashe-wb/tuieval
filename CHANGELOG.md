@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: Results → Per question opened the answers of the model one column to the right of the cell picked, and crashed on the last model's column.
 - Fix: `v` on the run screen switches to the last model still running when the stream shows one that has finished.
 - Setup opens with no models ticked: at launch, after New run, and after Back from a run or tune. Packs and options are still remembered.
 - Tuning: a server that refuses the `ignore_eos` request field is asked again without it, so strict servers can be tuned; the profile notes that workload answers may end early.
