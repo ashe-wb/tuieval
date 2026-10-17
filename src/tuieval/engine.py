@@ -44,12 +44,14 @@ import signal
 import socket
 import statistics
 import subprocess
+import tempfile
 import threading
 import time
 import tomllib
 import urllib.parse
 import urllib.request
 
+from . import agents
 from . import client
 from . import dates
 from . import graders
@@ -195,7 +197,8 @@ def stored_settings(data):
     """The settings a result file ran with, in the shape Engine.settings() returns."""
     if "serving" not in data:
         return data["settings"]
-    return {"sampling": data["settings"], "serving": data["serving"]}
+    return {"sampling": data["settings"], "serving": data["serving"],
+            **({"agent": data["agent"]} if data.get("agent") else {})}
 
 
 def settings_match(data, settings):
@@ -229,7 +232,7 @@ def describe_change(before, now):
     if "sampling" not in before:   # a result from before serving settings were recorded
         before = {"sampling": before, "serving": now.get("serving")}
     parts = []
-    for part in ("sampling", "serving"):
+    for part in ("sampling", "serving", "agent"):
         b, n = before.get(part) or {}, now.get(part) or {}
         for k in sorted(set(b) | set(n)):
             if b.get(k) != n.get(k):
@@ -671,8 +674,10 @@ def serves(ids, name):
 
 
 def pack_min_context(pack):
-    """Rough context a pack needs: its longest prompt (~4 chars/token) plus room to answer (the
-    pack's own max_tokens when it sets one)."""
+    """Rough context a pack needs: its own min_context (agent packs), else its longest prompt (~4
+    chars/token) plus room to answer (the pack's own max_tokens when it sets one)."""
+    if pack.min_context:
+        return pack.min_context
     return max(len(t["input"]) for t in pack.tests) // 4 + (pack.max_tokens or 4096)
 
 
@@ -961,8 +966,9 @@ class Engine:
         pack, m = self.packs.get(pack_name), self.model(label)
         if pack and data["pack"]["fingerprint"] != pack.fingerprint:
             return "outdated: questions changed"
-        if not settings_match(data, self.settings(m)):
-            before, now = data.get("serving") or {}, self.settings(m)["serving"]
+        settings = self.settings(m, pack)
+        if not settings_match(data, settings):
+            before, now = data.get("serving") or {}, settings["serving"]
             ran_on = before.get("machine")
             if "endpoint" in now and before.get("endpoint") != now["endpoint"]:
                 return ("outdated: ran before providers were pinned (answers could come from any of them)"
@@ -974,9 +980,9 @@ class Engine:
             if ran_on and ran_on != self.machine().id:
                 return f"outdated: ran on {ran_on}, and this server's answers depend on the machine"
             if "perf" in before and {**before, "perf": None} == {**now, "perf": None} \
-                    and data["settings"] == self.settings(m)["sampling"]:
+                    and data["settings"] == settings["sampling"] and data.get("agent") == settings.get("agent"):
                 return "outdated: memory settings retuned, and this server's answers depend on them"
-            return "outdated: " + describe_change(stored_settings(data), self.settings(m))
+            return "outdated: " + describe_change(stored_settings(data), settings)
         if pack is None:
             return "screened"
         keys = {(r["test"], r["repeat"]) for r in data["results"]}
@@ -1050,6 +1056,9 @@ class Engine:
                 factor = statistics.median(shared) if shared else 1.0
                 spr = ref[j.pack.name] * factor
                 borrowed.add((j.key, round(factor, 1) if shared else None, len(shared)))
+            elif j.pack.kind == "agent":   # never run by any model: half each task's time limit
+                spr = statistics.median(t["minutes"] for t in j.pack.tests) * 30
+                guessed.add((j.key, False))
             else:
                 spr = statistics.median(own.values()) if own else DEFAULT_SECONDS_PER_REQUEST
                 guessed.add((j.key, bool(own)))
@@ -1080,9 +1089,13 @@ class Engine:
         if thin:
             notes.append(f"{len(thin)} pack(s) measured on under 5 answers")
         if guessed:
+            agent = {k for k, _ in guessed if k.split("/", 1)[1] in self.packs and
+                     self.packs[k.split("/", 1)[1]].kind == "agent"}
             notes.append(f"{len(guessed)} pack(s) never run by any model: "
                          + ("the model's time on its other packs" if all(o for _, o in guessed)
-                            else f"{DEFAULT_SECONDS_PER_REQUEST} s per answer") + " assumed")
+                            else "half of each agent task's time limit" if len(agent) == len(guessed)
+                            else f"{DEFAULT_SECONDS_PER_REQUEST} s per answer"
+                            + (" (agent tasks: half their time limit)" if agent else "")) + " assumed")
         return total, notes
 
     def _done_keys(self, job):
@@ -1184,7 +1197,7 @@ class Engine:
         if head is None or data is None or pack is None:
             return False
         try:
-            settings = self.settings(self.model(label))
+            settings = self.settings(self.model(label), pack)
         except Exception:   # a model no longer in models.toml: nothing is replacing its results
             return False
         current = data["pack"]["fingerprint"] == pack.fingerprint and settings_match(data, settings)
@@ -1213,7 +1226,7 @@ class Engine:
                 job = Job(m, pack, reps, pack.pick(picked) if picked else pack.select(tier),
                           self.result_path(label, name, tier), effective_sampling(self.cfg, m), tier=tier,
                           merge=not retest or bool(picked), redo=retest and bool(picked), fresh=retest,
-                          settings=self.settings(m),
+                          settings=self.settings(m, pack),
                           stop_early=pack.stop_early if stop_early is None else bool(stop_early))
                 if job.stop_early:
                     job.first = self.most_failed_first(pack)
@@ -1221,7 +1234,10 @@ class Engine:
                 status = self.result_status(label, name, tier)
                 job.discards = self._discards(job)
                 missing = [n for n in pack.modules if not importlib.util.find_spec(n)]
-                if "vision" in pack.needs and not m["vision"]:
+                no_agent = agents.problem(self.cfg, pack, self.root) if pack.kind == "agent" else None
+                if no_agent:
+                    job.status, job.note = "skipped", no_agent
+                elif "vision" in pack.needs and not m["vision"]:
                     job.status, job.note = "skipped", "no vision"
                 elif "tools" in pack.needs and m.get("tools") is False:
                     job.status, job.note = "skipped", "no tool calling"
@@ -1425,9 +1441,13 @@ class Engine:
         return {"server": m["server"], "cmd": cmd, "server_args": list(m.get("server_args", [])),
                 "model_bytes": size}
 
-    def settings(self, m):
-        """What a result's settings fingerprint covers: request sampling plus serving identity."""
-        return {"sampling": effective_sampling(self.cfg, m), "serving": self.serving(m).identity}
+    def settings(self, m, pack=None):
+        """What a result's settings fingerprint covers: request sampling plus serving identity, and for
+        an agent pack the agent that runs it (agents.identity)."""
+        out = {"sampling": effective_sampling(self.cfg, m), "serving": self.serving(m).identity}
+        if pack is not None and pack.kind == "agent":
+            out["agent"] = agents.identity(self.cfg, pack)
+        return out
 
     def server_command(self, m, perf_args=None, port=None):
         """(cmd or None, cwd, base_url) for a model. cmd is None for an already-running server.
@@ -2124,6 +2144,86 @@ class Engine:
             body["tools"] = tools
         return body
 
+    def _agent_answer(self, job, test, rep, base_url, alive):
+        """Run one task of an agent pack (agents.py) and grade it; returns its result row. A server that
+        stops, or that the agent reports failing, never counts against the model: retried, then the
+        pack stops like any pack whose server keeps failing."""
+        name, agent = agents.agent_for(self.cfg, job.pack)
+        python = agents.python_for(job.pack, self.root)
+        m, s = job.model, job.sampling
+        key_env = self.cfg["servers"][m["server"]].get("api_key_env")
+        cmd = [expand(str(a), root=self.root) for a in agent["cmd"]]
+        live = os.path.join(self.log_dir, "live")
+        os.makedirs(live, exist_ok=True)
+        waits = list(self.SERVER_RETRY_WAITS_S)
+        while True:
+            log_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{job.label}_{job.pack.name}_{test['id'][:40]}.txt"
+            with tempfile.TemporaryDirectory(prefix="tuieval-agent-") as tmp, \
+                    open(os.path.join(live, log_name), "w") as log:
+                work = agents.prepare(test, tmp)
+                prompt = os.path.join(tmp, "task.md")
+                with open(prompt, "w") as f:
+                    f.write(test["input"] + agents.PROMPT_TAIL)
+                stats_path = os.path.join(tmp, "stats.json")
+                env = agents.env_for(python, {
+                    "TUIEVAL_BASE_URL": base_url.rstrip("/") + "/v1", "TUIEVAL_MODEL_ID": m["served_name"],
+                    "TUIEVAL_API_KEY": os.environ.get(key_env, "") if key_env else "",
+                    "TUIEVAL_PROMPT_FILE": prompt,
+                    "TUIEVAL_SAMPLING": json.dumps({**s, "max_tokens": job.pack.max_tokens or s["max_tokens"]}),
+                    "TUIEVAL_CONTEXT": str(self.serving(m).ctx or m.get("max_context") or ""),
+                    "TUIEVAL_MAX_TURNS": str(test["max_turns"]), "TUIEVAL_STATS_FILE": stats_path,
+                    "TUIEVAL_TASK": test["id"]})
+                log.write(f"MODEL: {m['served_name']}\nAGENT: {name}: {' '.join(cmd)}\nTASK: {test['id']}\n\n"
+                          f"=== PROMPT ===\n{test['input']}\n\n=== AGENT OUTPUT ===\n")
+                log.flush()
+                try:
+                    stop, seconds, code = agents.run(
+                        cmd, work, env, test["minutes"] * 60,
+                        lambda line: self.emit("delta", stream="reasoning", text=line, label=job.label),
+                        self._check, alive, log)
+                except agents.ServerGone as e:
+                    raise ModelFailed(str(e)) from e
+                except OSError as e:
+                    raise PackFailed(f"agent {name!r} couldn't start ({' '.join(cmd)}): {e}") from e
+                stats = agents.read_stats(stats_path)
+                if stats.get("server_error"):
+                    log.write(f"\n=== SERVER ERROR (not counted) ===\n{stats['server_error']}\n")
+                else:
+                    patch = agents.diff(work)
+                    g = agents.grade(test, work, python)
+                    edited = agents.tampered(test, work)
+                    log.write(f"\n=== STATS ===\n{json.dumps(stats, indent=1)}\n\n=== DIFF ===\n{patch}\n"
+                              f"\n=== TESTS ({'PASS' if g['pass'] else 'FAIL'}) ===\n{g['output']}\n")
+                    break
+            if not waits:
+                raise PackFailed(f"the agent kept reporting server errors on {test['id']}; answers so far kept, "
+                                 f"the rest run next time. Last: {str(stats['server_error'])[:300]}")
+            wait = waits.pop(0)
+            self.emit("server_retry", label=job.label, message=(
+                f"{job.label}: server error on {test['id']}, not counted; retrying in {wait}s "
+                f"({len(waits)} tries left): {str(stats['server_error'])[:200]}"))
+            for _ in range(wait):
+                self._check()
+                if not alive():
+                    raise ModelFailed(f"the server stopped: {stats['server_error']}")
+                self._cancel.wait(1)
+        final = str(stats.get("final_message") or "")
+        if final:
+            self.emit("delta", stream="answer", text=final, label=job.label)
+        return {"test": test["id"], "description": test["description"], "category": test.get("category", ""),
+                "difficulty": test.get("difficulty", "unrated"), "group": None, "critical_test": False,
+                "repeat": rep, "pass": g["pass"], "score": g["score"],
+                "reason": agents.reason(g, stop, edited, code, stats), "severity": None, "answer": final,
+                "tool_calls": [], "finish": "stop" if stop == "exited" else stop, "reasoning_chars": 0,
+                "log": log_name, "answered_at": dates.now(), "machine": self.machine().id, "total_s": seconds,
+                "agent": {"name": name, "version": stats.get("agent"), "stop": stop if stop != "exited" else
+                          stats.get("stop") or "exited",
+                          **{k: stats[k] for k in ("turns", "input_tokens", "output_tokens", "tool_calls",
+                                                   "tool_errors", "ran_tests") if k in stats},
+                          "exit_code": code, "tests_edited": edited, "visible": g["visible"],
+                          "hidden": g["hidden"], "failed": g["failed"], "diff": patch[:agents.DIFF_KEEP],
+                          "diff_cut": len(patch) > agents.DIFF_KEEP}}
+
     def _log_request(self, job, test, res, meta):
         """Write the full exchange (prompt, reasoning, answer) to logs/live/; returns the file name."""
         d = os.path.join(self.log_dir, "live")
@@ -2309,91 +2409,96 @@ class Engine:
                     lane.seen = self._local_lanes(lane, job.label)
                 self.emit("request_started", job=job, test=test["description"], test_id=test["id"],
                           has_image=bool(test.get("image")), repeat=rep, difficulty=test.get("difficulty", "unrated"))
-                waits = list(self.SERVER_RETRY_WAITS_S)
-                while True:
-                    self._stream = client.Stream()
-                    try:
-                        body = self._body(job, test, rep)
-                        res = client.stream_chat(base_url, body,
-                                                 lambda kind, text: self.emit("delta", stream=kind, text=text, label=job.label),
-                                                 timeout=timeout, stream=self._stream, headers=headers,
-                                                 stall_s=stall_s)
-                    except client.Cancelled:
-                        self._check()
-                        raise Cancelled()
-                    finally:
-                        self._stream = None
-                    self._check()
-                    if res["error"] and not alive():
-                        raise ModelFailed(f"the server stopped: {res['error']}")
-                    if client.is_unavailable(res["error"]):   # never an answer; retrying won't help
-                        raise ModelFailed(f"the model isn't available there (not counted against it): "
-                                          f"{res['error'][:300]}")
-                    if not client.is_server_error(res["error"]):
-                        break
-                    # the server failed, not the model: never recorded as an answer
-                    if not waits:
-                        raise PackFailed(
-                            f"server kept failing for {sum(self.SERVER_RETRY_WAITS_S) // 60} min on {test['id']}; "
-                            f"answers so far kept, the rest run next time. Last error: {res['error'][:300]}")
-                    wait = waits.pop(0)
-                    self.emit("server_retry", label=job.label, message=(
-                        f"{job.label}: server error on {test['id']}, not counted; retrying in {wait}s "
-                        f"({len(waits)} tries left): {res['error'][:200]}"))
-                    for _ in range(wait):
-                        self._check()
-                        if not alive():
-                            raise ModelFailed(f"the server stopped: {res['error']}")
-                        self._cancel.wait(1)
-                meta = client.metrics(res, tokenize_url)
-                ep = self.endpoint(job.model)
-                if not res["error"] and ep and ep.get("provider") and meta.get("provider") \
-                        and meta["provider"].lower() != ep["provider"].lower():
-                    res["error"] = (f"server returned an answer from {meta['provider']}, not the pinned "
-                                    f"{ep['provider']} ({ep['tag']}); not counted")
-                if res["error"]:
-                    g = {"pass": False, "score": 0.0, "reason": res["error"]}
+                if job.pack.kind == "agent":
+                    rec = self._agent_answer(job, test, rep, base_url, alive)
                 else:
-                    g = graders.grade(test, res["answer"], {"finish": res["finish"], "tool_calls": res["tool_calls"]})
-                log_name = self._log_request(job, test, res, meta)
-                rec = {"test": test["id"], "description": test["description"], "category": test.get("category", ""),
-                       "difficulty": test.get("difficulty", "unrated"),
-                       "group": test.get("group"), "critical_test": bool(test.get("critical_trial")),
-                       "repeat": rep, "pass": g["pass"], "score": g["score"], "reason": g["reason"],
-                       "severity": g.get("severity"), "answer": res["answer"], "tool_calls": res["tool_calls"],
-                       "finish": res["finish"], "reasoning_chars": len(res["reasoning"]),
-                       "log": log_name,   # logs/live/<log>: the reasoning, which the result doesn't keep
-                       "answered_at": dates.now(),
-                       **({"checks": g["checks"]} if "checks" in g else {}),
-                       "machine": self.machine().id,
-                       **({"quantization": ep.get("quantization")} if ep else {}),
-                       # other models served while this answer ran: they shared the machine, so its speed did too
-                       **({"ran_alongside": sorted(lane.seen)} if lane.seen else {}),
-                       "sent": "+".join(msg["role"] for msg in body["messages"]),  # proof: single turn
-                       **({"seed": body["seed"]} if "seed" in body else {}), **meta}
-                # The same long answer twice for one question, with sampling on, means a cached response
-                # rather than a fresh one. Flagged (and shown in the run), not failed.
-                fp = hashlib.sha256((res["reasoning"] + "\x00" + res["answer"]).encode()).hexdigest()[:16]
-                if not res["error"] and len(res["reasoning"]) + len(res["answer"]) >= 200 \
-                        and job.sampling.get("temperature", 0) > 0:
-                    rec["answer_sha"] = fp
-                    same = next((r["repeat"] for r in kept + new if r["test"] == test["id"]
-                                 and r.get("answer_sha") == fp), None)
-                    if same is not None:
-                        rec["identical_to_repeat"] = same
-                        self.emit("identical_answer", label=job.label, pack=job.pack.label, test=test["id"],
-                                  repeat=rep, same=same)
-                if meta.get("cached_tokens") and not warned_reuse:
-                    warned_reuse = True
-                    self.emit("prompt_reused", label=job.label, pack=job.pack.label, tokens=meta["cached_tokens"],
-                              server=job.model["server"],
-                              hosted=not self.cfg["servers"][job.model["server"]].get("cmd"))
+                    waits = list(self.SERVER_RETRY_WAITS_S)
+                    while True:
+                        self._stream = client.Stream()
+                        try:
+                            body = self._body(job, test, rep)
+                            res = client.stream_chat(base_url, body,
+                                                     lambda kind, text: self.emit("delta", stream=kind, text=text,
+                                                                                  label=job.label),
+                                                     timeout=timeout, stream=self._stream, headers=headers,
+                                                     stall_s=stall_s)
+                        except client.Cancelled:
+                            self._check()
+                            raise Cancelled()
+                        finally:
+                            self._stream = None
+                        self._check()
+                        if res["error"] and not alive():
+                            raise ModelFailed(f"the server stopped: {res['error']}")
+                        if client.is_unavailable(res["error"]):   # never an answer; retrying won't help
+                            raise ModelFailed(f"the model isn't available there (not counted against it): "
+                                              f"{res['error'][:300]}")
+                        if not client.is_server_error(res["error"]):
+                            break
+                        # the server failed, not the model: never recorded as an answer
+                        if not waits:
+                            raise PackFailed(
+                                f"server kept failing for {sum(self.SERVER_RETRY_WAITS_S) // 60} min on {test['id']}; "
+                                f"answers so far kept, the rest run next time. Last error: {res['error'][:300]}")
+                        wait = waits.pop(0)
+                        self.emit("server_retry", label=job.label, message=(
+                            f"{job.label}: server error on {test['id']}, not counted; retrying in {wait}s "
+                            f"({len(waits)} tries left): {res['error'][:200]}"))
+                        for _ in range(wait):
+                            self._check()
+                            if not alive():
+                                raise ModelFailed(f"the server stopped: {res['error']}")
+                            self._cancel.wait(1)
+                    meta = client.metrics(res, tokenize_url)
+                    ep = self.endpoint(job.model)
+                    if not res["error"] and ep and ep.get("provider") and meta.get("provider") \
+                            and meta["provider"].lower() != ep["provider"].lower():
+                        res["error"] = (f"server returned an answer from {meta['provider']}, not the pinned "
+                                        f"{ep['provider']} ({ep['tag']}); not counted")
+                    if res["error"]:
+                        g = {"pass": False, "score": 0.0, "reason": res["error"]}
+                    else:
+                        g = graders.grade(test, res["answer"],
+                                          {"finish": res["finish"], "tool_calls": res["tool_calls"]})
+                    log_name = self._log_request(job, test, res, meta)
+                    rec = {"test": test["id"], "description": test["description"], "category": test.get("category", ""),
+                           "difficulty": test.get("difficulty", "unrated"),
+                           "group": test.get("group"), "critical_test": bool(test.get("critical_trial")),
+                           "repeat": rep, "pass": g["pass"], "score": g["score"], "reason": g["reason"],
+                           "severity": g.get("severity"), "answer": res["answer"], "tool_calls": res["tool_calls"],
+                           "finish": res["finish"], "reasoning_chars": len(res["reasoning"]),
+                           "log": log_name,   # logs/live/<log>: the reasoning, which the result doesn't keep
+                           "answered_at": dates.now(),
+                           **({"checks": g["checks"]} if "checks" in g else {}),
+                           "machine": self.machine().id,
+                           **({"quantization": ep.get("quantization")} if ep else {}),
+                           # other models served while this answer ran: they shared the machine, so its speed did too
+                           **({"ran_alongside": sorted(lane.seen)} if lane.seen else {}),
+                           "sent": "+".join(msg["role"] for msg in body["messages"]),  # proof: single turn
+                           **({"seed": body["seed"]} if "seed" in body else {}), **meta}
+                    # The same long answer twice for one question, with sampling on, means a cached response
+                    # rather than a fresh one. Flagged (and shown in the run), not failed.
+                    fp = hashlib.sha256((res["reasoning"] + "\x00" + res["answer"]).encode()).hexdigest()[:16]
+                    if not res["error"] and len(res["reasoning"]) + len(res["answer"]) >= 200 \
+                            and job.sampling.get("temperature", 0) > 0:
+                        rec["answer_sha"] = fp
+                        same = next((r["repeat"] for r in kept + new if r["test"] == test["id"]
+                                     and r.get("answer_sha") == fp), None)
+                        if same is not None:
+                            rec["identical_to_repeat"] = same
+                            self.emit("identical_answer", label=job.label, pack=job.pack.label, test=test["id"],
+                                      repeat=rep, same=same)
+                    if meta.get("cached_tokens") and not warned_reuse:
+                        warned_reuse = True
+                        self.emit("prompt_reused", label=job.label, pack=job.pack.label, tokens=meta["cached_tokens"],
+                                  server=job.model["server"],
+                                  hosted=not self.cfg["servers"][job.model["server"]].get("cmd"))
                 with open(partial, "a") as f:
                     f.write(json.dumps(rec) + "\n")
                 new.append(rec)
                 job.done += 1
-                job.passed += bool(g["pass"])
-                job.failed += not g["pass"]
+                job.passed += bool(rec["pass"])
+                job.failed += not rec["pass"]
                 self.emit("request_done", job=job, record=rec)
                 mine.append(rec)
                 stopped = self._stop_reason(job, mine)
@@ -2455,6 +2560,7 @@ class Engine:
                      **({"max_tokens": job.pack.max_tokens} if job.pack.max_tokens else {})},
             "settings": job.sampling,
             "serving": job.settings.get("serving"),
+            **({"agent": job.settings["agent"]} if job.settings.get("agent") else {}),
             "settings_fingerprint": settings_fingerprint(job.settings),
             "run": {"tier": job.tier, "repeat": job.repeat, "started": job.started, "finished": job.finished,
                     "wall_s": round(job.finished - job.started, 1), **run_info},
@@ -2474,6 +2580,8 @@ def regrade(path, packs_dir=None):
     pack = packs_mod.load_packs(packs_dir).get(data["pack"]["name"])
     if pack is None:
         raise ConfigError(f"pack {data['pack']['name']!r} not found")
+    if pack.kind == "agent":
+        raise ConfigError("an agent pack is graded by its tests when it runs; retest it instead")
     tests = {t["id"]: t for t in pack.tests}
     before = sum(r["pass"] for r in data["results"])
     for r in data["results"]:

@@ -18,11 +18,16 @@ plus exactly one user message, never an earlier answer), every server's `request
 a fixed seed differs per repeat, and each repeat round asks the tests in a different order.
 
 Tests without a reference are listed as warnings: they still run, they just aren't self-checked.
+
+Agent packs (kind = "agent"): every task's untouched repo/ must fail its tests, its solution/ must pass
+them, and each wrong/<name>/ must fail, graded as a run grades the agent's work (agents.check_task).
 """
 import collections
 import hashlib
 import json
+import os
 
+from . import agents
 from . import graders
 from . import packs as packs_mod
 from . import verdict
@@ -115,6 +120,29 @@ def check_pack(pack):
     return errors, warnings
 
 
+def check_agent_pack(pack, root):
+    """(errors, warnings) for an agent pack: each task's repo fails, solution/ passes, wrong/ fail."""
+    errors, warnings = check_gate(pack), []
+    python = agents.python_for(pack, root)
+    if not os.path.isfile(python):
+        return errors + [f"python {python} (pack.toml python) doesn't exist"], warnings
+    for t in pack.tests:
+        if not os.path.isdir(os.path.join(t["task_dir"], "solution")):
+            warnings.append(f"{t['id']}: no solution/ → add a reference fix, so selftest can check the task")
+        if t.get("difficulty", "unrated") == "unrated":
+            warnings.append(f"{t['id']}: no difficulty label → add difficulty to its task.toml")
+        errors += agents.check_task(t, python)
+    return errors, warnings
+
+
+def _wrong_count(pack):
+    if pack.kind == "agent":
+        return sum(len([w for w in os.listdir(os.path.join(t["task_dir"], "wrong"))
+                        if os.path.isdir(os.path.join(t["task_dir"], "wrong", w))])
+                   for t in pack.tests if os.path.isdir(os.path.join(t["task_dir"], "wrong")))
+    return sum(len(t.get("wrong", [])) for t in pack.tests)
+
+
 def check_isolation(pack, eng, repeats=3):
     """Errors if a request for this pack could carry anything from an earlier one."""
     from . import engine
@@ -165,14 +193,19 @@ def run(pack_names=None, packs_dir=None, verbose=True):
     for name, pack in packs.items():
         if pack_names and name not in pack_names:
             continue
-        errors, warnings = check_pack(pack)
-        if eng:
-            errors += check_isolation(pack, eng)
-        refs = sum(1 for t in pack.tests if t.get("reference") is not None or
-                   (t.get("grader") == "tool_call" and t.get("expect_tool")))
+        if pack.kind == "agent":
+            from . import workspace
+            errors, warnings = check_agent_pack(pack, eng.root if eng else workspace.root())
+            refs = sum(os.path.isdir(os.path.join(t["task_dir"], "solution")) for t in pack.tests)
+        else:
+            errors, warnings = check_pack(pack)
+            if eng:
+                errors += check_isolation(pack, eng)
+            refs = sum(1 for t in pack.tests if t.get("reference") is not None or
+                       (t.get("grader") == "tool_call" and t.get("expect_tool")))
         status = "ok" if not errors else f"{len(errors)} ERRORS"
         print(f"{name:14s} {len(pack.tests):4d} tests  {refs:4d} self-checked  "
-              f"{sum(len(t.get('wrong', [])) for t in pack.tests):4d} wrong answers  {status}")
+              f"{_wrong_count(pack):4d} wrong answers  {status}")
         if verbose:
             for e in errors[:20]:
                 print("   ERROR", e)

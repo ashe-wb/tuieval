@@ -15,6 +15,8 @@ Two shortcuts to a first set of real questions:
 - **From a spreadsheet:** `tuieval new-pack quiz --from questions.csv` makes one test per row from a `question` and an `answer` column (optional: `id`, `category`, `difficulty`, `tolerance`, and `wrong` with known-wrong answers separated by `|`). Numbers are checked with the tolerance, words case-insensitively, and `NOT_AVAILABLE` means the right answer is "the question doesn't say".
 - **Drafted by a model:** `tuieval new-pack support-bot --grader reply --about "refund questions for a shoe store"` also writes `DRAFT-PROMPT.md`. Paste it into the strongest model you have, save the YAML it writes as `tests.yaml`, and run `tuieval selftest`: it catches drafted tests whose expected answer is wrong or whose grader can't tell a mistake from the right answer. Read the questions anyway; you know your domain better than the model.
 
+An **agent pack** (`kind = "agent"`) has task folders instead of questions: a coding agent works on each one, and tests grade the result. See [agent-packs.md](agent-packs.md).
+
 To try a different set of questions, copy a pack (`cp -r packs/support-bot packs/support-bot-v2`), edit the copy, and pick whichever you want in the TUI.
 
 ## Fingerprints

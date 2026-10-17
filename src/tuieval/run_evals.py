@@ -127,9 +127,14 @@ class Printer:
         speed = f"{r['gen_tps']:.0f} tok/s, " if r.get("gen_tps") else ""
         ttft = f"TTFT {r['ttft_s']:.1f}s, " if r.get("ttft_s") is not None else ""
         where = f"{CYAN}{job.key} [{job.done}/{job.total}]{RESET} " if self.side_by_side else ""
+        if r.get("agent"):   # an agent pack's task: minutes and turns, not one request's tokens
+            a = r["agent"]
+            facts = ", ".join([f"{r['total_s'] / 60:.1f} min"] + ([f"{a['turns']} turns"] if a.get("turns") else [])
+                              + ([f"{a['output_tokens']:,} tokens"] if a.get("output_tokens") else []))
+        else:
+            facts = f"{r.get('completion_tokens')} tokens, {ttft}{speed}{r['total_s']:.1f}s"
         print(f"{RESET}{'' if self.side_by_side else chr(10)}{where}{mark} {r['description']}{RESET}{calls} "
-              f"{DIM}({r.get('completion_tokens')} tokens, {ttft}{speed}{r['total_s']:.1f}s) {r['reason'][:120]}{RESET}",
-              flush=True)
+              f"{DIM}({facts}) {r['reason'][:120]}{RESET}", flush=True)
 
     def on_job_done(self, job):
         color = GREEN if job.status == "done" else RED if job.status == "failed" else ""

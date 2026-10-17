@@ -3,6 +3,7 @@
 Uses a temporary workspace and tests/mock_server.py on a free local port; no model or GPU needed.
 """
 import glob
+import importlib.util
 import json
 import math
 import os
@@ -3197,6 +3198,274 @@ class ServerCrash(unittest.TestCase):
                 rows += [r for r in (json.loads(text).get("results", []) if path.endswith(".json") else
                                      [json.loads(l) for l in text.splitlines() if l.strip()]) if "test" in r]
             self.assertEqual(rows, [])
+
+
+FAKE_AGENT = r'''
+"""A fake coding agent for the tests: does what mode.txt beside it says."""
+import json, os, shutil, sys, time, urllib.request
+
+here = os.path.dirname(os.path.abspath(__file__))
+mode = open(os.path.join(here, "mode.txt")).read().strip()
+stats = {"agent": "fake 1.0", "turns": 0, "tool_calls": 0, "tool_errors": 0, "ran_tests": False}
+
+
+def save(**kw):
+    stats.update(kw)
+    with open(os.environ["TUIEVAL_STATS_FILE"], "w") as f:
+        json.dump(stats, f)
+
+
+models = json.load(urllib.request.urlopen(os.environ["TUIEVAL_BASE_URL"] + "/models", timeout=10))
+print("serving:", [m["id"] for m in models["data"]], flush=True)
+with open(os.path.join(here, "seen.jsonl"), "a") as f:
+    f.write(json.dumps({**{k: v for k, v in os.environ.items() if k.startswith("TUIEVAL_")}, "cwd": os.getcwd(),
+                        "python": shutil.which("python"), "files": sorted(os.listdir("."))}) + "\n")
+if mode == "fix":
+    src = open("calc.py").read()
+    open("calc.py", "w").write(src.replace("a - b", "a + b").replace("a + a", "a * b"))
+    save(turns=3, tool_calls=2, ran_tests=True, stop="done", final_message="Fixed calc.py")
+elif mode == "cheat":
+    shutil.rmtree("tests")
+    save(turns=1, stop="done", final_message="Removed the failing tests")
+elif mode == "loop":
+    while True:
+        print("still working", flush=True)
+        time.sleep(0.3)
+elif mode == "crash":
+    sys.exit(3)
+elif mode == "flaky":    # the model's server fails once per task, then the agent fixes it
+    mark = os.path.join(here, "failed-" + os.environ["TUIEVAL_TASK"])
+    if not os.path.exists(mark):
+        open(mark, "w").close()
+        save(stop="error", server_error="server returned HTTP 503")
+    else:
+        src = open("calc.py").read()
+        open("calc.py", "w").write(src.replace("a - b", "a + b").replace("a + a", "a * b"))
+        save(turns=2, stop="done", final_message="Fixed")
+'''
+
+
+@unittest.skipUnless(importlib.util.find_spec("pytest"), "agent packs are graded with pytest")
+class AgentPacks(unittest.TestCase):
+    """Agent packs: task folders a command-line agent works on in a scratch copy, graded by the task's
+    original visible tests plus hidden ones. The agent gets the model's URL from tuieval, its stats and
+    changes are recorded, limits stop it, and a server failure is never counted against the model."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        self.pack_dir = os.path.join(self.ws, "packs", "agentic")
+        os.makedirs(self.pack_dir)
+        self.pack_toml()
+        for tid, body, fix, visible, hidden in (
+                ("add", "def add(a, b):\n    return a - b\n", "a + b", "add(1, 1) == 2",
+                 ["add(2, 3) == 5", "add(-1, 1) == 0"]),
+                ("mul", "def mul(a, b):\n    return a + a\n", "a * b", "mul(2, 2) == 4",
+                 ["mul(3, 4) == 12", "mul(0, 5) == 0"])):
+            t = os.path.join(self.pack_dir, "tasks", tid)
+            for sub in ("repo/tests", "hidden", "solution", "wrong/constant"):
+                os.makedirs(os.path.join(t, sub))
+            write(os.path.join(t, "task.md"), f"Fix `{tid}` in calc.py.\n")
+            write(os.path.join(t, "task.toml"), 'category = "bug fix"\ndifficulty = "easy"\n')
+            write(os.path.join(t, "repo", "calc.py"), body)
+            write(os.path.join(t, "repo", "pytest.ini"), "[pytest]\npythonpath = .\n")
+            write(os.path.join(t, "repo", "tests", "test_calc.py"),
+                  f"from calc import {tid}\n\n\ndef test_visible():\n    assert {visible}\n")
+            write(os.path.join(t, "hidden", "test_hidden.py"), f"from calc import {tid}\n" + "".join(
+                f"\n\ndef test_hidden_{i}():\n    assert {h}\n" for i, h in enumerate(hidden)))
+            write(os.path.join(t, "solution", "calc.py"), body.replace("a - b", fix).replace("a + a", fix))
+            write(os.path.join(t, "wrong", "constant", "calc.py"),   # passes the visible test only
+                  f"def {tid}(a, b):\n    return {visible.split('== ')[1]}\n")
+        agents_dir = os.path.join(self.ws, "agents")
+        os.makedirs(agents_dir)
+        write(os.path.join(agents_dir, "fake_agent.py"), FAKE_AGENT)
+        self.mode("fix")
+        self.mock = Mock(os.path.join(self.ws, "packs"), "oracle")
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f'\n[servers.m]\nurl = "http://127.0.0.1:{self.mock.port}"\n'
+                    f'\n[agents.fake]\ncmd = [{json.dumps(sys.executable)}, "{{root}}/agents/fake_agent.py"]\n')
+        tuieval(self.ws, "add", "mock", "--server", "m", "--label", "m")
+
+    def tearDown(self):
+        self.mock.stop()
+        self.tmp.cleanup()
+
+    def pack_toml(self, extra=""):
+        write(os.path.join(self.pack_dir, "pack.toml"),
+              f'label = "Agentic"\nkind = "agent"\nagent = "fake"\npython = {json.dumps(sys.executable)}\n'
+              f'{extra}[certify]\nrepeat = 1\n[gate]\nmin_accuracy = 0.1\n')
+
+    def mode(self, m):
+        write(os.path.join(self.ws, "agents", "mode.txt"), m)
+
+    def run_pack(self, *extra):
+        return tuieval(self.ws, "run", "--packs", "agentic", "--tier", "certify", *extra, check=False)
+
+    def rows(self):
+        data = json.loads(read(os.path.join(self.ws, "results", "m", "agentic.json")))
+        return data, {r["test"]: r for r in data["results"]}
+
+    def seen(self):
+        return [json.loads(l) for l in read(os.path.join(self.ws, "agents", "seen.jsonl")).splitlines()]
+
+    def test_load_and_fingerprint(self):
+        from tuieval import packs
+        p = packs.load_pack(self.pack_dir)
+        self.assertEqual((p.kind, p.agent, [t["id"] for t in p.tests]), ("agent", "fake", ["add", "mul"]))
+        self.assertEqual(p.tests[0]["description"], "Fix `add` in calc.py.")
+        self.assertEqual((p.tests[0]["minutes"], p.tests[0]["max_turns"]), (15, 40))
+        fp = p.fingerprint
+        write(os.path.join(self.pack_dir, "tasks", "add", "task.toml"), 'category = "other"\ndifficulty = "hard"\n')
+        self.assertEqual(packs.load_pack(self.pack_dir).fingerprint, fp)      # labels only
+        write(os.path.join(self.pack_dir, "tasks", "add", "hidden", "test_more.py"), "def test_x():\n    pass\n")
+        self.assertNotEqual(packs.load_pack(self.pack_dir).fingerprint, fp)   # what grades it changed
+        os.makedirs(os.path.join(self.pack_dir, "tasks", "add", "repo", "__pycache__"))
+        fp2 = packs.load_pack(self.pack_dir).fingerprint
+        write(os.path.join(self.pack_dir, "tasks", "add", "repo", "__pycache__", "x.pyc"), "junk")
+        self.assertEqual(packs.load_pack(self.pack_dir).fingerprint, fp2)     # caches don't count
+        os.remove(os.path.join(self.pack_dir, "tasks", "mul", "task.md"))
+        with self.assertRaises(packs.PackError):
+            packs.load_pack(self.pack_dir)
+
+    def test_selftest(self):
+        out = tuieval(self.ws, "selftest", "agentic").stdout
+        self.assertRegex(out, r"agentic\s+2 tests\s+2 self-checked\s+2 wrong answers\s+ok")
+        write(os.path.join(self.pack_dir, "tasks", "mul", "wrong", "constant", "calc.py"),
+              "def mul(a, b):\n    return a * b\n")      # a "wrong" fix that is right
+        p = tuieval(self.ws, "selftest", "agentic", check=False)
+        self.assertIn("mul: wrong/constant passes", p.stdout)
+        self.assertNotEqual(p.returncode, 0)
+
+    def test_fix_passes_with_stats_diff_and_env(self):
+        p = self.run_pack()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        data, rows = self.rows()
+        self.assertEqual(data["agent"], {"name": "fake", "cmd": [sys.executable, "{root}/agents/fake_agent.py"]})
+        for tid in ("add", "mul"):
+            r = rows[tid]
+            self.assertTrue(r["pass"], r["reason"])
+            self.assertEqual(r["score"], 1.0)
+            self.assertEqual(r["answer"], "Fixed calc.py")
+            a = r["agent"]
+            self.assertEqual((a["version"], a["turns"], a["stop"], a["hidden"], a["visible"], a["tests_edited"]),
+                             ("fake 1.0", 3, "done", "2/2", "1/1", []))
+            self.assertIn("calc.py | 2 +-", a["diff"])
+            self.assertTrue(os.path.isfile(os.path.join(self.ws, "logs", "live", r["log"])))
+        seen = self.seen()
+        self.assertEqual(len(seen), 2)
+        s = seen[0]
+        self.assertEqual(s["TUIEVAL_BASE_URL"], f"http://127.0.0.1:{self.mock.port}/v1")
+        self.assertEqual(s["TUIEVAL_MODEL_ID"], "mock")
+        self.assertEqual(json.loads(s["TUIEVAL_SAMPLING"])["max_tokens"], 16384)
+        self.assertTrue(s["TUIEVAL_PROMPT_FILE"].endswith("task.md"))
+        self.assertEqual((s["TUIEVAL_TASK"], s["TUIEVAL_MAX_TURNS"], s["TUIEVAL_API_KEY"]), ("add", "40", ""))
+        self.assertEqual(os.path.dirname(s["python"]), os.path.dirname(sys.executable))   # the pack's Python first
+        self.assertNotIn("hidden", s["files"])                     # the agent never sees the hidden tests
+        self.assertFalse(s["cwd"].startswith(self.ws))             # it works in a scratch copy
+        self.assertEqual(read(os.path.join(self.pack_dir, "tasks", "add", "repo", "calc.py")),
+                         "def add(a, b):\n    return a - b\n")      # the task itself is untouched
+        # done: a second run asks nothing again
+        self.run_pack()
+        self.assertEqual(len(self.seen()), 2)
+        out = tuieval(self.ws, "compare").stdout
+        self.assertIn("Agent tasks", out)
+        self.assertRegex(out, r"\nm\s+agentic\s+2/2\s+[\d.]+\s+3\s+-\s+0\s+2/2\s+0\s+0\s+fake 1.0\n")
+
+    def test_deleting_the_tests_gains_nothing(self):
+        self.mode("cheat")
+        self.run_pack()
+        _, rows = self.rows()
+        r = rows["add"]
+        self.assertFalse(r["pass"])
+        self.assertEqual(r["agent"]["tests_edited"], ["tests/test_calc.py"])
+        self.assertIn("edited the tests: tests/test_calc.py", r["reason"])
+        self.assertIn("visible 0/1", r["reason"])
+
+    def test_time_limit_stops_the_agent(self):
+        self.mode("loop")
+        self.pack_toml("minutes = 0.03\n")
+        t0 = time.time()
+        self.run_pack()
+        self.assertLess(time.time() - t0, 60)
+        _, rows = self.rows()
+        self.assertFalse(rows["add"]["pass"])
+        self.assertEqual((rows["add"]["finish"], rows["add"]["agent"]["stop"]), ("time limit", "time limit"))
+        self.assertIn("stopped at the time limit", rows["add"]["reason"])
+        out = subprocess.run(["pgrep", "-f", "fake_agent.py"], capture_output=True, text=True).stdout
+        self.assertEqual(out.strip(), "")                            # nothing left running
+
+    def test_crash_is_a_fail_with_its_exit_code(self):
+        self.mode("crash")
+        self.run_pack()
+        _, rows = self.rows()
+        self.assertFalse(rows["add"]["pass"])
+        self.assertIn("the agent exited with code 3", rows["add"]["reason"])
+
+    def test_server_error_is_retried_not_counted(self):
+        self.mode("flaky")
+        p = self.run_pack()
+        self.assertIn("server error on add, not counted", p.stdout + p.stderr)
+        _, rows = self.rows()
+        self.assertTrue(rows["add"]["pass"] and rows["mul"]["pass"])
+        self.assertEqual(len(self.seen()), 4)
+
+    def test_agent_change_outdates_results_and_unknown_agent_skips(self):
+        self.run_pack()
+        out = subprocess.run([sys.executable, "-c", "from tuieval import engine; e = engine.Engine(); "
+                              "print(e.result_status('m', 'agentic'))"], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws)).stdout
+        self.assertEqual(out.strip(), "certified")
+        text = read(os.path.join(self.ws, "models.toml")).replace('"{root}/agents/fake_agent.py"]',
+                                                                   '"{root}/agents/fake_agent.py", "--v2"]')
+        write(os.path.join(self.ws, "models.toml"), text)
+        out = subprocess.run([sys.executable, "-c", "from tuieval import engine; e = engine.Engine(); "
+                              "print(e.result_status('m', 'agentic'))"], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws)).stdout
+        self.assertTrue(out.startswith("outdated: settings changed: cmd"), out)
+        write(os.path.join(self.pack_dir, "pack.toml"), read(os.path.join(self.pack_dir, "pack.toml"))
+              .replace('agent = "fake"', 'agent = "nobody"'))
+        p = self.run_pack()
+        self.assertIn("agent 'nobody' isn't defined", p.stdout + p.stderr)
+
+    def test_answer_view_shows_transcript_changes_and_tests(self):
+        self.run_pack()
+        code = textwrap.dedent("""
+            import asyncio, json, os
+            from tuieval.tui import AnswerScreen, EvalsApp
+            from textual.widgets import Label, Static, TextArea
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    data = json.load(open(os.path.join(os.environ["TUIEVAL_HOME"], "results", "m", "agentic.json")))
+                    rec = next(r for r in data["results"] if r["test"] == "add")
+                    app.push_screen(AnswerScreen([{"record": rec, "pack": "agentic", "model": "m"}]))
+                    await pilot.pause()
+                    s = app.screen
+                    print(json.dumps({"head": str(s.query_one("#answer-head", Static).render()),
+                                      "label": str(s.query_one("#answer-reasoning-label", Label).render()),
+                                      **{k: s.query_one("#answer-" + k, TextArea).text
+                                         for k in ("reasoning", "answer", "checked")}}))
+            asyncio.run(go())
+        """)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else self.fail(p.stderr)
+        self.assertIn("fake 1.0: done", out["head"])
+        self.assertIn("3 turns", out["head"])
+        self.assertIn("Agent transcript", out["label"])
+        self.assertIn("serving: ['mock']", out["reasoning"])
+        self.assertIn("=== TESTS (PASS) ===", out["reasoning"])
+        self.assertTrue(out["answer"].startswith("Fixed calc.py\n\n=== CHANGES ===\n"))
+        self.assertIn("+    return a + b", out["answer"])
+        self.assertIn("HIDDEN TESTS (the agent never sees them): test_hidden.py", out["checked"])
+        self.assertIn("assert add(2, 3) == 5", out["checked"])
+
+    def test_regrade_leaves_agent_results_alone(self):
+        self.run_pack()
+        p = tuieval(self.ws, "regrade")
+        self.assertIn("agent pack is graded by its tests when it runs", p.stdout)
 
 
 if __name__ == "__main__":
