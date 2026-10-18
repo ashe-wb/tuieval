@@ -1412,8 +1412,12 @@ class AddToRun(unittest.TestCase):
 
     def test_tui_never_queues_the_same_thing_twice(self):
         """Start while a run is going never adds or queues a model and pack already running or queued."""
+        hold = os.path.join(self.tmp.name, "hold")   # the first run stays going until every pick is made
+        write(hold, "")
+        path = os.path.join(self.ws, "models.toml")
+        write(path, read(path).replace('"--delay", "0.2"', f'"--delay", "0.2", "--hold", {json.dumps(hold)}'))
         code = textwrap.dedent("""
-            import asyncio, json, time
+            import asyncio, json, os, time
             from tuieval.tui import EvalsApp, RunScreen, SetupScreen, ChoiceScreen
             from textual.widgets import SelectionList
             async def pick(app, pilot, models, packs=("apps",)):
@@ -1459,6 +1463,7 @@ class AddToRun(unittest.TestCase):
                     if isinstance(s, ChoiceScreen):
                         s.dismiss("queue")
                     await pilot.pause()
+                    os.remove(os.environ["HOLD"])
                     deadline = time.time() + 300   # the queued runs start one after another: wait for all three
                     while time.time() < deadline:
                         await pilot.pause(0.2)
@@ -1469,7 +1474,7 @@ class AddToRun(unittest.TestCase):
             asyncio.run(go())
         """)
         p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
-                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS="", HOLD=hold))
         out = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else p.stderr
         self.assertIsInstance(out, dict, out)
         self.assertEqual(out["same"], [False, 0])

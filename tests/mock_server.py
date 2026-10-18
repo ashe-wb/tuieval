@@ -56,6 +56,7 @@ class Handler(BaseHTTPRequestHandler):
     answers, mode, model, delay, max_output = {}, "oracle", "mock", 0.0, None
     stall, stall_before, silent = 0.0, 0.0, False
     die_after = None
+    hold, answered = None, 0   # while the hold file exists, answers after the first wait (a run that stays going)
 
     def log_message(self, *a):
         pass
@@ -120,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 time.sleep(0.2)
 
+        while self.hold and Handler.answered and os.path.exists(self.hold):
+            wait(0.2)
         wait(self.stall_before)
         send({"choices": [{"delta": {"reasoning_content": "Thinking it over. "}}]})
         wait(self.stall)
@@ -136,6 +139,7 @@ class Handler(BaseHTTPRequestHandler):
                           "prompt_per_second": 500.0, "cache_n": 0}})
         die_if_due()
         self.wfile.write(b"data: [DONE]\n\n")
+        Handler.answered += 1
 
 
 class Server(ThreadingHTTPServer):
@@ -157,11 +161,12 @@ def main(argv=None):
     p.add_argument("--stall-before", type=float, default=0.0)
     p.add_argument("--silent", action="store_true")
     p.add_argument("--die-after", type=int)
+    p.add_argument("--hold", help="while this file exists, every answer after the first waits")
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
     Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
     Handler.max_output = a.max_output
     Handler.stall, Handler.stall_before, Handler.silent = a.stall, a.stall_before, a.silent
-    Handler.die_after = a.die_after
+    Handler.die_after, Handler.hold = a.die_after, a.hold
     srv = Server(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:
