@@ -49,7 +49,8 @@ def _load_native(data):
             "model": m["label"], "suite": pack["name"], "test": f"{pack['name']}: {r['test']}",
             "name": f"{pack['name']}: {r['description']}",
             "ok": bool(r["pass"]), "score": float(r["score"]), "reason": r["reason"],
-            "error": r["reason"].startswith(("server returned", "connection error")),
+            # a timeout is the model too slow (client.is_server_error), not an error; older results called it one
+            "error": r["reason"].startswith(("server returned", "connection error")) and "timed out" not in r["reason"],
             "truncated": r.get("finish") == "length", "output": r.get("answer") or "",
             # tokens past the max_tokens sent, which the provider didn't stop (client.mark_over_budget)
             "over_budget": r.get("over_budget"),

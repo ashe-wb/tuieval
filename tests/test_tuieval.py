@@ -3005,7 +3005,7 @@ class StallGuard(unittest.TestCase):
     def test_keepalives_dont_outlast_the_timeout(self):
         from tuieval import client
         res, took = self.ask("--stall-before", "5", timeout=1, stall_s=1)
-        self.assertIn("timed out", res["error"])
+        self.assertTrue(res["error"].startswith("time limit: timed out"), res["error"])
         self.assertFalse(client.is_server_error(res["error"]))   # slow, like any timeout: counts
         self.assertLess(took, 4)
 

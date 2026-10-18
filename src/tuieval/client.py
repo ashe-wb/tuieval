@@ -153,7 +153,7 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
         for raw in r:
             now = time.time()
             if now - start > timeout:
-                out["error"] = f"connection error: timed out after {timeout:.0f} s in all"
+                out["error"] = f"time limit: timed out after {timeout:.0f} s in all"
                 break
             if stall_s and out["ttft_s"] is not None and now - last > stall_s:
                 out["error"] = _stalled(stall_s)
