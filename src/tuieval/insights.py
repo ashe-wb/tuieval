@@ -6,8 +6,9 @@
   2 use cases       accuracy per model and use case (pack group) as a heatmap; the best marked
   3 vs base         a fine-tune against its base model (models.toml `base`): per pack, and the question
                     categories it gained or lost most
-  4 why they fail   each model's answers split into right, wrong, cut off, no answer / bad format, code
-                    crashed or hung, and critical failures
+  4 why they fail   each model's answers split into right, near miss (most checks passed), partly right,
+                    wrong, cut off (or out of time), no answer / bad format, code crashed or hung, and
+                    critical failures
   5 accuracy / cost accuracy against median tokens (or seconds) per question; the models no other beats
                     on both
   6 questions       questions every model fails (check them), every model passes (no signal), and the
@@ -267,7 +268,8 @@ def categories(rows, m, base, min_q=2):
 
 
 # ---------------------------------------------------------------- 4 why they fail
-KINDS = (("right", "green", "█"), ("wrong", "red", "█"), ("cut off", "yellow", "█"),
+KINDS = (("right", "green", "█"), ("near miss", "#87af5f", "█"), ("partly right", "#af875f", "█"),
+         ("wrong", "red", "█"), ("cut off", "yellow", "█"),
          ("no answer / format", "magenta", "█"), ("code crashed or hung", "cyan", "█"), ("critical", "#ff5faf", "▓"))
 FORMAT = ("No 'ANSWER:' line", "Empty answer", "No code", "no tool call")
 CRASHED = ("Timed out after", "Harness crashed", "grader error")
@@ -278,13 +280,15 @@ def kind(r):
         return "right"
     if r.get("severity") == "critical":
         return "critical"
-    if r["truncated"] or r["reason"].startswith(("TRUNCATED", "OVER BUDGET")):
+    if r["truncated"] or r["reason"].startswith(("TRUNCATED", "OVER BUDGET", "time limit")):
         return "cut off"
     if r["reason"].startswith(FORMAT):
         return "no answer / format"
     if r["reason"].startswith(CRASHED):
         return "code crashed or hung"
-    return "wrong"
+    # partial credit (e.g. checks passed): close isn't the same as all wrong
+    score = r.get("score") or 0
+    return "near miss" if score >= compare.NEAR_MISS else "partly right" if score > 0 else "wrong"
 
 
 def _split(counts, total, width):
@@ -322,7 +326,9 @@ def failure_mix(rows, models, width=36):
             top, n = max(((k, c[k]) for k, *_ in KINDS[1:-1]), key=lambda x: x[1])
             if n / fails >= 0.4 and top != "wrong":
                 actions.append(f"{m}: {n} of its {fails} failures are {top}: " + {
-                    "cut off": "it thinks too long for max_tokens, rather than reasoning wrong.",
+                    "cut off": "it thinks too long for max_tokens (or the time limit), rather than reasoning wrong.",
+                    "near miss": "they pass most of their checks: it's closer than its accuracy shows.",
+                    "partly right": "they pass some of their checks, not none.",
                     "no answer / format": "it doesn't follow the answer format (check its chat template and the "
                                           "pack's instructions).",
                     "code crashed or hung": "its code crashes or never finishes."}[top])
