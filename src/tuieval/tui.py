@@ -2963,6 +2963,9 @@ class ResultsScreen(Screen):
         self.rows, self.infos, self.partial_rows, self.superseded = [], [], [], set()
         if not hasattr(self.app, "pq_models"):
             self.app.pq_models = set()
+        if getattr(self.app, "pack_pick", None):   # the pack lists open on All packs again
+            self.app.pq_models = self.app.pack_pick["before"]
+        self.app.pack_pick = None
         if not hasattr(self.app, "result_sorts"):
             self.app.result_sorts = {}   # table id -> (column name, descending), kept for this session
         self.fill()
@@ -3054,7 +3057,7 @@ class ResultsScreen(Screen):
         for i, (model, test, reason, level) in enumerate(compare.failures(rows)):
             when = dates.day(dates.answered_at(self.fail_rows[i].get("raw") or {}))
             f.add_row(model, diff_badge(level), rich_escape(test), when, rich_escape(reason[:130]), key=str(i))
-        self.query_one("#fail-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
+        self.query_one("#fail-models", Button).label = self.models_label(chosen)
         n = len(self.fail_rows)
         self.query_one("#fail-count", Static).update(
             f"{n} failure{'s' * (n != 1)}" + (f" of {len(chosen)} model{'s' * (len(chosen) != 1)}" if chosen else ""))
@@ -3072,7 +3075,6 @@ class ResultsScreen(Screen):
         self.app.push_screen(AnswerScreen(keep, keep.index(entries[i]), what="failure"))
 
     # -- per question: tokens and time for every model on the same question
-    @on(Select.Changed, "#pq-pack")
     @on(Select.Changed, "#pq-level")
     @on(Checkbox.Changed, "#pq-partial")
     @on(Checkbox.Changed, "#pq-shared")
@@ -3214,7 +3216,7 @@ class ResultsScreen(Screen):
         finally:
             self.filling_insights = False
         chosen = {m for m in self.app.pq_models if m in every}
-        self.query_one("#ins-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
+        self.query_one("#ins-models", Button).label = self.models_label(chosen)
         main = os.path.abspath(self.results_dir or e.results_dir) == os.path.abspath(e.results_dir)
         bases = {m["label"]: m["base"] for m in e.cfg["models"] if m.get("base")}
         by = self.query_one("#ins-cost", Select).value or "tokens"
@@ -3222,9 +3224,46 @@ class ResultsScreen(Screen):
         body.update("\n\n".join(insights.render(p, i) for i, p in enumerate(out, 1)))
 
     @on(Select.Changed, "#pta-pack")
-    def pta_changed(self):
-        if getattr(self, "rows", None) is not None:
-            self.fill_pta()
+    @on(Select.Changed, "#pq-pack")
+    def pack_changed(self, event):
+        """A pack picked (PTA index or Per question, kept the same in both): compare the models that
+        answered every question of it (the Models button can change that); All packs: back to the
+        models picked before."""
+        if getattr(self, "rows", None) is None:
+            return
+        e, pack = self.app.engine, event.value or ""
+        for other, values in (("#pta-pack", "pta_pack_values"), ("#pq-pack", "pq_pack_values")):
+            sel = self.query_one(other, Select)
+            if sel is not event.select and sel.value != pack and pack in getattr(self, values, [""]):
+                with sel.prevent(Select.Changed):
+                    sel.value = pack
+        shared = self.query_one("#pq-shared", Checkbox)
+        p = self.app.pack_pick or {"before": set(self.app.pq_models), "shared": shared.value}
+        before = p["before"]
+        if not pack:
+            self.app.pack_pick = None
+            with shared.prevent(Checkbox.Changed):   # set_models may have ticked it
+                shared.value = p["shared"]
+            self.set_models(before)
+            return
+        rows = [r for r in self.rows if r.get("path") not in self.superseded]
+        complete = set(compare.complete_models(rows, pack, [t["id"] for t in e.packs[pack].tests]
+                                               if pack in e.packs else None))
+        self.app.pack_pick = {"pack": pack, "models": complete, "before": before, "shared": p["shared"]}
+        if not complete:
+            self.notify(f"No model has answered every question of {self.pack_label(pack)} yet: "
+                        "the models picked before are kept.", severity="warning", timeout=8)
+        self.set_models(complete or before)
+
+    def pack_label(self, pack):
+        return self.app.engine.packs[pack].label if pack in self.app.engine.packs else pack
+
+    def models_label(self, chosen):
+        """The Models buttons' text: the models a pack pick chose say so."""
+        p = self.app.pack_pick
+        if chosen and p and chosen == p["models"]:
+            return f"Models: {len(chosen)} complete on {self.pack_label(p['pack'])}"
+        return f"Models: {len(chosen)} picked" if chosen else "Models: all"
 
     def fill_pta(self):
         """The PTA index (pta.py) of the picked models (Models button, shared with Per question) on
@@ -3245,7 +3284,7 @@ class ResultsScreen(Screen):
             rows = [r for r in rows if r["suite"] == sel.value]
         present = {r["model"] for r in rows}
         chosen = {m for m in self.app.pq_models if m in present}
-        self.query_one("#pta-models", Button).label = f"Models: {len(chosen)} picked" if chosen else "Models: all"
+        self.query_one("#pta-models", Button).label = self.models_label(chosen)
         t = self.query_one("#pta", DataTable)
         t.clear(columns=True)
         if not present:
@@ -3300,8 +3339,7 @@ class ResultsScreen(Screen):
         all_tests = compare.per_question(rows)
         self.pq_all_tests = all_tests
         chosen = {m for m in self.app.pq_models if any(m in t["cells"] for t in all_tests)}
-        self.query_one("#pq-models", Button).label = (
-            f"Models: {len(chosen)} picked" if chosen else "Models: all")
+        self.query_one("#pq-models", Button).label = self.models_label(chosen)
         tests = []
         for t in all_tests:
             if (pack and t["suite"] != pack) or (level and t["difficulty"] != level):

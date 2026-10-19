@@ -390,6 +390,17 @@ def with_models(test, models):
     return dict(test, cells=cells, spread=_spread(cells))
 
 
+def complete_models(rows, suite, test_ids=None):
+    """The models whose rows answer every question of a pack: test_ids (the pack's current tests),
+    or every question of it seen in the rows. Partial rows (a pack still running) don't count."""
+    rows = [r for r in rows if r["suite"] == suite and not r.get("partial")]
+    wanted = {f"{suite}: {t}" for t in test_ids} if test_ids is not None else {r["test"] for r in rows}
+    answered = {}
+    for r in rows:
+        answered.setdefault(r["model"], set()).add(r["test"])
+    return sorted(m for m, tests in answered.items() if wanted and wanted <= tests)
+
+
 def compare_models(tests, models):
     """Per model over per_question entries that all `models` answered: passes, token and time
     totals/medians (totals add each question's median over repeats, so repeats don't inflate them), questions where it used the fewest tokens / was fastest (among passing

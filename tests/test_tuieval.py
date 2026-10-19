@@ -1656,6 +1656,83 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual(sorted(cells, key=sort_key), ["10/20", "3/4", "4/4", "abc", "-"])
         self.assertEqual(sorted(cells, key=lambda c: sort_key(c, True)), ["4/4", "3/4", "10/20", "abc", "-"])
 
+    def test_complete_models(self):
+        from tuieval import compare
+        rows = [{"model": m, "suite": s, "test": f"{s}: {t}", **({"partial": True} if m == "running" else {})}
+                for m, s, ts in (("full", "p", "abc"), ("half", "p", "ab"), ("running", "p", "abc"), ("full", "o", "a"))
+                for t in ts]
+        self.assertEqual(compare.complete_models(rows, "p", ["a", "b", "c"]), ["full"])   # half misses c; running is ◐
+        self.assertEqual(compare.complete_models(rows, "p", ["a", "b"]), ["full", "half"])
+        self.assertEqual(compare.complete_models(rows, "p", ["a", "b", "c", "d"]), [])     # a question added since
+        self.assertEqual(compare.complete_models(rows, "p"), ["full"])                     # pack gone: questions seen
+        self.assertEqual(compare.complete_models(rows, "x", []), [])
+
+    def test_results_pack_picks_the_models_that_answered_all_of_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            for name, ids in (("apps", "abcd"), ("other", "ab")):
+                d = os.path.join(ws, "packs", name)
+                os.makedirs(d)
+                write(os.path.join(d, "pack.toml"), f'label = "{name.title()}"\n[certify]\nrepeat = 1\n')
+                write(os.path.join(d, "tests.yaml"), "".join(
+                    f"- {{id: {t}, input: question {t}, expected: 1, reference: 'ANSWER: 1', wrong: ['ANSWER: 2'], "
+                    "difficulty: easy}\n" for t in ids))
+            mock = Mock(os.path.join(ws, "packs"), "oracle")
+            try:
+                with open(os.path.join(ws, "models.toml"), "a") as f:
+                    f.write(f'\n[servers.here]\nurl = "http://127.0.0.1:{mock.port}"\n')
+                for label in ("full", "half", "solo"):
+                    tuieval(ws, "add", "mock", "--server", "here", "--label", label)
+                tuieval(ws, "run", "--tier", "certify", "--only", "full")
+                tuieval(ws, "run", "--tier", "certify", "--only", "half", "--packs", "apps", "--tests", "a,b")
+                tuieval(ws, "run", "--tier", "certify", "--only", "solo", "--packs", "other")
+            finally:
+                mock.stop()
+            code = textwrap.dedent("""
+                import asyncio
+                from tuieval.tui import EvalsApp, ResultsScreen
+                from textual.widgets import Button, DataTable, Select
+                async def go():
+                    app = EvalsApp({})
+                    async with app.run_test(size=(180, 50)) as pilot:
+                        await pilot.pause()
+                        app.pq_models = {"half"}                      # picked by hand before
+                        app.push_screen(ResultsScreen())
+                        await pilot.pause(0.5)
+                        s = app.screen
+                        def state():
+                            pq = s.query_one("#per-question", DataTable)
+                            cols = [str(c.label) for c in pq.ordered_columns][len(s.PQ_FIXED):]
+                            return (sorted(app.pq_models), s.query_one("#pta-pack", Select).value,
+                                    str(s.query_one("#pq-models", Button).label), cols, s.query_one("#pq-shared").value)
+                        s.query_one("#pq-pack", Select).value = "apps"
+                        await pilot.pause(0.3)
+                        print(state())
+                        s.query_one("#pta-pack", Select).value = "other"
+                        await pilot.pause(0.3)
+                        print(state())
+                        s.query_one("#pta-pack", Select).value = ""
+                        await pilot.pause(0.3)
+                        print(state())
+                        app.pq_models = set()                         # none picked: All packs gives every model again
+                        s.set_models(set())
+                        await pilot.pause(0.3)
+                        for pack in ("apps", ""):
+                            s.query_one("#pq-pack", Select).value = pack
+                            await pilot.pause(0.3)
+                            print(state())
+                asyncio.run(go())
+            """)
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""), timeout=60)
+            self.assertEqual(out.stdout.strip().splitlines(), [
+                "(['full'], 'apps', 'Models: 1 complete on Apps', ['full'], False)",
+                "(['full', 'solo'], 'other', 'Models: 2 complete on Other', ['full', 'solo'], False)",
+                "(['half'], '', 'Models: 1 picked', ['half'], False)",
+                "(['full'], 'apps', 'Models: 1 complete on Apps', ['full'], True)",     # none picked before: ticked
+                "([], '', 'Models: all', ['full', 'half', 'solo'], False)"], out.stderr[-2000:])
+
     def test_cli_report_and_tui(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = os.path.join(tmp, "ws")
