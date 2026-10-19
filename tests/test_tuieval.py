@@ -1618,8 +1618,8 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual(bars["plain"][-2:], ["██████░░░░", "60.0%"])                  # none truncated: nothing beside it
         self.assertIn("[#ff8c00]██[/]", pta.bars(res, 10)[2] + pta.bars(res, 10)[3])
         header, table = pta.table(res)
-        self.assertEqual(header[4], "truncated")
-        self.assertEqual({r[0]: r[4] for r in table}, {"thinker": "2/10", "plain": "0/10"})
+        self.assertEqual(header[4:6], ["score", "truncated"])
+        self.assertEqual({r[0]: r[5] for r in table}, {"thinker": "2/10", "plain": "0/10"})
         self.assertIn("truncated", pta.scope_note(res, ["thinker", "plain"]))
         self.assertNotIn("truncated", pta.scope_note(pta.index(rows[10:]), ["plain"]))
 
@@ -1655,6 +1655,82 @@ class PTAIndex(unittest.TestCase):
         cells = ["3/4", "-", "10/20", "4/4", "abc"]       # numbers, then text; empty cells last both ways
         self.assertEqual(sorted(cells, key=sort_key), ["10/20", "3/4", "4/4", "abc", "-"])
         self.assertEqual(sorted(cells, key=lambda c: sort_key(c, True)), ["4/4", "3/4", "10/20", "abc", "-"])
+
+    def test_partial_credit_score(self):
+        from tuieval import compare, insights, pta
+
+        def row(model, test, ok, score, reason="Failed", **kw):
+            return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "score": score, "latency": 1000,
+                    "tokens": 10, "truncated": False, "gen_tps": None, "repeat": 0, "reason": reason, **kw}
+        rows = ([row("close", f"q{i}", False, 5 / 6, "Failed 1/6 checks: x") for i in range(2)]
+                + [row("far", f"q{i}", False, 0.0, "Failed 6/6 checks: x") for i in range(2)]
+                + [row("half", "q0", True, 1.0, "ok"), row("half", "q1", False, 0.0, "Failed 6/6 checks: x")])
+        res = pta.index(rows)
+        self.assertEqual([(x["model"], x["A"], round(x["S"])) for x in res["models"]],
+                         [("half", 50, 50), ("close", 0, 83), ("far", 0, 0)])   # accuracy first, then score
+        self.assertEqual([x["model"] for x in pta.index(rows, sort="score")["models"]], ["close", "half", "far"])
+        bars = {l.split()[0]: l for l in pta.bars(res, 10, markup=False)[2:]}
+        self.assertIn("0%  score 83.3%", bars["close"])
+        self.assertNotIn("score", bars["half"] + bars["far"])               # shown only when it differs
+        header, table = pta.table(res)
+        self.assertEqual({r[0]: r[header.index("score")] for r in table}, {"half": "50.0%", "close": "83.3%", "far": "0%"})
+        self.assertEqual([compare.checks_passed(r) for r in (rows[0], rows[2], rows[4])], [(5, 6), (0, 6), None])
+        self.assertEqual(compare.checks_passed({"reason": "x", "raw": {"checks": {"a": None, "b": "err"}}}), (1, 2))
+        self.assertEqual([insights.kind(r) for r in (rows[0], rows[2], rows[4])], ["near miss", "wrong", "right"])
+        self.assertEqual(insights.kind(row("m", "q", False, 0.5)), "partly right")
+        self.assertEqual(insights.kind(row("m", "q", False, 0.0, "time limit: timed out after 600 s in all")), "cut off")
+        self.assertEqual(insights.kind(row("m", "q", False, 0.9, severity="critical")), "critical")
+        p = insights.failure_mix(rows, ["close", "far", "half"])
+        self.assertIn("0% right (2 answers; 2 near miss)", re.sub(r"\[[^\]]*\]", "", "\n".join(p["lines"])))
+
+    def test_results_show_partial_credit(self):
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval.tui import EvalsApp, ResultsScreen
+            from textual.widgets import DataTable, Select, Static, TabbedContent
+            def row(model, test, ok, score, reason):
+                return {"model": model, "suite": "p", "test": f"p: {test}", "name": f"p: {test}", "ok": ok,
+                        "score": score, "reason": reason, "error": False, "truncated": False, "output": "",
+                        "tokens": 10, "latency": 1000, "gen_tps": None, "prompt_tps": None, "ttft": None,
+                        "repeat": 0, "difficulty": "hard", "raw": {}, "path": "x", "alongside": []}
+            rows = ([row("close", f"q{i}", False, 5 / 6, "Failed 1/6 checks: x") for i in range(2)]
+                    + [row("half", "q0", True, 1.0, "ok"), row("half", "q1", False, 0.0, "Failed 6/6 checks: x")])
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(180, 50)) as pilot:
+                    await pilot.pause()
+                    app.push_screen(ResultsScreen())
+                    await pilot.pause(0.5)
+                    s = app.screen
+                    s.rows, s.infos = rows, []
+                    s.fill_pta()
+                    await pilot.pause(0.2)
+                    first = s.pta_result["models"][0]["model"]
+                    s.query_one("#pta-sort", Select).value = "score"
+                    await pilot.pause(0.3)
+                    print(first, s.pta_result["models"][0]["model"])
+                    s.fill_failures()
+                    t = s.query_one("#failures", DataTable)
+                    print(sorted(str(t.get_row_at(i)[4]) for i in range(t.row_count)))
+                    s.query_one("#fail-kind", Select).value = "near miss"
+                    await pilot.pause(0.3)
+                    print(t.row_count, str(s.query_one("#fail-count", Static).render()))
+                    s.fill_per_question()
+                    pq = s.query_one("#per-question", DataTable)
+                    cols = [str(c.label) for c in pq.ordered_columns]
+                    print(sorted(str(pq.get_row_at(i)[cols.index("close")]).split()[1] for i in range(pq.row_count)))
+            asyncio.run(go())
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "ws")
+            tuieval(tmp, "init", ws)
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""), timeout=60)
+        self.assertEqual(out.stdout.strip().splitlines(), [
+            "half close",                                         # by accuracy, then by score
+            "['[#87af5f]near miss 5/6[/]', '[#87af5f]near miss 5/6[/]', '[red]wrong 0/6[/]']",
+            "2 2 near miss failures",
+            "['5/6', '5/6']"], out.stderr[-2000:])
 
     def test_complete_models(self):
         from tuieval import compare

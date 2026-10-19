@@ -402,6 +402,8 @@ def cmd_pta(argv):
     p.add_argument("--only", help="comma-separated model labels (default: every model with results)")
     p.add_argument("--packs", help="comma-separated packs (default: all)")
     p.add_argument("--width", type=int, default=20, help="bar width in characters (default 20)")
+    p.add_argument("--sort", choices=("accuracy", "score"), default="accuracy",
+                   help="order models by answers right (default) or by score (partial credit)")
     p.add_argument("--models")
     p.add_argument("--results-dir")
     a = p.parse_args(argv)
@@ -410,7 +412,7 @@ def cmd_pta(argv):
     e = engine.Engine(models_path=a.models, results_dir=a.results_dir)
     labels = [x.strip() for x in a.only.split(",")] if a.only else None
     packs = [x.strip() for x in a.packs.split(",")] if a.packs else None
-    result, models = pta.for_engine(e, labels, packs)
+    result, models = pta.for_engine(e, labels, packs, sort=a.sort)
     out = Console(highlight=False)
     if not models:
         sys.exit("no finished results to compare" + (" for those models or packs" if labels or packs else ""))

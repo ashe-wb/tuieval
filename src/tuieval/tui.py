@@ -2892,6 +2892,10 @@ class ResultsScreen(Screen):
     def action_runs(self):
         self.app.open_sessions()
 
+    FAIL_KINDS = [("Every kind", ""), ("Near misses", "near miss"), ("Partly right", "partly right"),
+                  ("Wrong", "wrong"), ("Cut off", "cut off"), ("No answer / format", "no answer / format"),
+                  ("Code crashed or hung", "code crashed or hung"), ("Critical", "critical")]
+
     READINESS_HELP = ("[dim]PASS needs a Certify run with zero critical failures over enough trials and an "
                       "accuracy lower bound that clears the pack's gate (pack.toml). Screening can only FAIL "
                       "or look promising.[/dim]")
@@ -2913,6 +2917,8 @@ class ResultsScreen(Screen):
             with TabPane("PTA index", id="tab-pta"):
                 with Horizontal(id="pta-controls"):
                     yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
+                    yield Select([("By accuracy", "accuracy"), ("By score", "score")], id="pta-sort",
+                                 allow_blank=False, value="accuracy")
                     yield Button("Models: all", id="pta-models")
                 yield Static("[dim]P parsimony (tokens): tokens used, reasoning and answer. T time: total time. "
                              "A accuracy: answers right. Verdicts and critical failures are in Production "
@@ -2954,6 +2960,7 @@ class ResultsScreen(Screen):
             with TabPane("Failures", id="tab-failures"):
                 with Horizontal(id="fail-controls"):
                     yield Button("Models: all", id="fail-models")
+                    yield Select(self.FAIL_KINDS, id="fail-kind", allow_blank=False, value="")
                     yield Static(id="fail-count")
                 yield Static("[dim]Enter on a row shows the whole answer, its reasoning and what was checked.[/dim]")
                 yield DataTable(id="failures", zebra_stripes=True, cursor_type="row")
@@ -3045,23 +3052,39 @@ class ResultsScreen(Screen):
         self.sort_tables()
 
     def fill_failures(self):
-        """Every wrong answer, of the models picked (Models: shared with the other tabs)."""
+        """Every wrong answer, of the models picked (Models: shared with the other tabs), of the kind picked
+        (insights.kind: near miss, partly right, wrong, cut off, …)."""
+        from . import insights
         f = self.query_one("#failures", DataTable)
         f.clear(columns=True)
-        f.add_columns("Model", "Level", "Test", "Answered", "Reason")
+        f.add_columns("Model", "Level", "Test", "Answered", "Kind", "Reason")
         every = {r["model"] for r in self.rows}
         chosen = {m for m in self.app.pq_models if m in every}
-        rows = [r for r in self.rows if not chosen or r["model"] in chosen]
+        wanted = self.query_one("#fail-kind", Select).value or ""
+        rows = [r for r in self.rows if (not chosen or r["model"] in chosen)
+                and (r["ok"] or not wanted or insights.kind(r) == wanted)]
         # compare.failures lists the failed rows in order, so they line up with fail_rows
         self.fail_rows = [r for r in rows if not r["ok"]]
+        colors = {k: c for k, c, _ in insights.KINDS}
         for i, (model, test, reason, level) in enumerate(compare.failures(rows)):
-            when = dates.day(dates.answered_at(self.fail_rows[i].get("raw") or {}))
-            f.add_row(model, diff_badge(level), rich_escape(test), when, rich_escape(reason[:130]), key=str(i))
+            r = self.fail_rows[i]
+            when = dates.day(dates.answered_at(r.get("raw") or {}))
+            k = insights.kind(r)
+            checks = compare.checks_passed(r)
+            label = f"{k} {checks[0]}/{checks[1]}" if checks and k in ("near miss", "partly right", "wrong") else k
+            f.add_row(model, diff_badge(level), rich_escape(test), when, f"[{colors[k]}]{label}[/]",
+                      rich_escape(reason[:130]), key=str(i))
         self.query_one("#fail-models", Button).label = self.models_label(chosen)
         n = len(self.fail_rows)
         self.query_one("#fail-count", Static).update(
-            f"{n} failure{'s' * (n != 1)}" + (f" of {len(chosen)} model{'s' * (len(chosen) != 1)}" if chosen else ""))
+            f"{n} {'' if not wanted else wanted + ' '}failure{'s' * (n != 1)}"
+            + (f" of {len(chosen)} model{'s' * (len(chosen) != 1)}" if chosen else ""))
         self.sort_table(f)
+
+    @on(Select.Changed, "#fail-kind")
+    def fail_kind_changed(self):
+        if getattr(self, "rows", None) is not None:
+            self.fill_failures()
 
     @on(DataTable.RowSelected, "#failures")
     def failure_selected(self, event):
@@ -3223,6 +3246,13 @@ class ResultsScreen(Screen):
         out = insights.panels(rows, models, e.packs, ref, bases, by, engine=e if main else None)
         body.update("\n\n".join(insights.render(p, i) for i, p in enumerate(out, 1)))
 
+    @on(Select.Changed, "#pta-sort")
+    def pta_sort_changed(self):
+        """The Sort dropdown orders the bars and the table, taking over from a column sorted by a click."""
+        self.app.result_sorts.pop("pta", None)
+        if getattr(self, "rows", None) is not None:
+            self.fill_pta()
+
     @on(Select.Changed, "#pta-pack")
     @on(Select.Changed, "#pq-pack")
     def pack_changed(self, event):
@@ -3293,7 +3323,8 @@ class ResultsScreen(Screen):
             self.query_one("#pta-left-out", Static).update("")
             return
         # none picked: every model with enough answers (pta.index leaves out the rest, and says so)
-        result = pta.index(rows, sorted(chosen) or None, pta.memory_gb(self.infos))
+        result = pta.index(rows, sorted(chosen) or None, pta.memory_gb(self.infos),
+                           self.query_one("#pta-sort", Select).value or "accuracy")
         self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
         self.pta_result = result
         removed = [m for m in self.pta_removed_now() if m in present]
@@ -3439,7 +3470,8 @@ class ResultsScreen(Screen):
             tt = r["total_secs"]
             cells.append([r["model"],
                           hi(tt, ("-" if not tt else f"{tt:.1f}s" if tt < 60 else fmt_secs(tt)), "total_secs", "min"),
-                          hi(r["passed"], f"{r['passed']}/{r['n']}", "passed", "max"),
+                          hi(r["passed"], f"{r['passed']}/{r['n']}", "passed", "max")
+                          + (f" [dim]{r['score']:.0%}[/dim]" if r["passed"] < r["n"] and r["score"] else ""),
                           hi(r["med_tokens"], f"{r['med_tokens']:,.0f}" if r["med_tokens"] else "-", "med_tokens", "min"),
                           hi(r["total_tokens"], f"{r['total_tokens']:,.0f}", "total_tokens", "min"),
                           hi(r["tokens_per_pass"], f"{r['tokens_per_pass']:,.0f}" if r["tokens_per_pass"] else "-",
@@ -3469,7 +3501,7 @@ class ResultsScreen(Screen):
                      "shared the machine's speed: compare their times with care.[/yellow]")
         title.update(line + "  [dim]Time / Tokens: each question's median, added up. Med tok / Med s: median "
                      "per answer. Tok/✓: tokens per answer right. Prompt t/s / Gen t/s: all tokens over all the time "
-                     "they took (cached prompts left out). Fewest / Fastest: questions won; ties count for both. "
+                     "they took (cached prompts left out). Passed: questions right on every repeat, then the score (partial credit, e.g. checks passed) when some failed. Fewest / Fastest: questions won; ties count for both. "
                      "Cut off: answers that hit max_tokens.[/dim]")
 
     @staticmethod
@@ -3478,6 +3510,9 @@ class ResultsScreen(Screen):
                 else f"[yellow]{c['passed']}/{c['n']}[/yellow]")
         if c["n"] > 1 and c["passed"] in (0, c["n"]):
             mark += f"[dim]{c['n']}[/dim]"
+        if c["passed"] < c["n"] and c.get("score"):   # partial credit: how close it came
+            checks = compare.checks_passed(c["rows"][0]) if c["n"] == 1 else None
+            mark += f" [yellow]{checks[0]}/{checks[1]}[/yellow]" if checks else f" [yellow]{c['score']:.0%}[/yellow]"
         tok = c["tokens"]
         tok_s = "-" if not tok else (f"{tok / 1000:.1f}k" if tok >= 1000 else f"{tok:.0f}")
         if tok and best and tok == best and c["passed"]:
@@ -3624,6 +3659,7 @@ class EvalsApp(App):
     #ins-controls #ins-cost { width: 20; }
     #ins-body { height: 1fr; }
     #pta-controls Select { width: 28; margin-right: 1; }
+    #pta-controls #pta-sort { width: 18; }
     #pta-bars { height: auto; padding: 1 0 0 0; }
     #pta { width: 1fr; height: auto; margin-top: 1; }
     #pta-left-out { height: auto; padding: 1 0 0 0; }
@@ -3632,6 +3668,7 @@ class EvalsApp(App):
     #pq-models { margin-right: 1; min-width: 20; }
     #fail-controls { height: 3; }
     #fail-models { margin-right: 1; min-width: 20; }
+    #fail-kind { width: 28; margin-right: 1; }
     #fail-count { width: auto; padding: 1 1; }
     #pq-compare-title { padding: 0 1; height: auto; }
     #pq-summary { height: auto; }   /* every picked model, no scrolling: the tab scrolls instead */

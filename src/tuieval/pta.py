@@ -7,6 +7,9 @@
                            model's ("28×").
     A  accuracy            the share of answers to those questions that passed (%).
 
+Beside A, the score: partial credit averaged over the same answers (e.g. a code answer passing 5 of 6
+checks scores 83%, where A counts it wrong). Shown when it differs from A; models can be ordered by it.
+
 The P and T bars are as long as the tokens and time used (the model that used the most fills its bar,
 the others in proportion, at least one block), so shorter is better; the A bar: longer is better.
 P and T also carry a 0-100 score (100 for the best, POINTS_PER_DOUBLING points less for every
@@ -46,11 +49,15 @@ def memory_gb(infos):
     return out
 
 
-def index(rows, models=None, memory=None):
-    """{"questions": n shared, "models": [{model, P, T, A, cut, cut_pct, tokens, total_s, passed, answers, alongside,
+SORTS = ("accuracy", "score")
+
+
+def index(rows, models=None, memory=None, sort="accuracy"):
+    """{"questions": n shared, "models": [{model, P, T, A, S, cut, cut_pct, tokens, total_s, passed, answers, alongside,
     fewest, fastest, tps, ttft, memory_gb}],
     "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
-    most-answered model}, best accuracy first. models: the ones to compare (default: every model in rows
+    most-answered model}, best accuracy (sort="accuracy") or score (sort="score") first. S: the mean
+score (partial credit) in %. models: the ones to compare (default: every model in rows
     with enough answers; models named here are compared whatever their count). memory: memory_gb()."""
     no_answers = sorted({r["model"] for r in rows} - {r["model"] for r in rows if not r.get("error")})
     rows = [r for r in rows if not r.get("error")]     # a server or connection error isn't an answer
@@ -75,6 +82,7 @@ def index(rows, models=None, memory=None):
                     "total_s": sum(c["secs"] or 0 for c in cells),
                     "passed": sum(c["passed"] for c in cells), "answers": answers,
                     "A": 100 * sum(c["passed"] for c in cells) / answers if answers else None,
+                    "S": 100 * sum(c["score"] * c["n"] for c in cells) / answers if answers else None,
                     # failed only because max_tokens ran out (overthinking, not wrong yet)
                     "cut": sum(c["truncated"] for c in cells),
                     "cut_pct": 100 * sum(c["truncated"] for c in cells) / answers if answers else None,
@@ -95,7 +103,8 @@ def index(rows, models=None, memory=None):
         x["time_x"] = x["total_s"] / fastest if fastest and x["total_s"] else None
         x["fewest"] = bool(fewest) and x["tokens"] == fewest
         x["fastest"] = bool(fastest) and x["total_s"] == fastest
-    out.sort(key=lambda x: (-(x["A"] or 0), -(x["T"] or 0), x["model"]))
+    first, then = ("S", "A") if sort == "score" else ("A", "S")
+    out.sort(key=lambda x: (-(x[first] or 0), -(x[then] or 0), -(x["T"] or 0), x["model"]))
     return {"questions": len(shared), "models": out, "left_out": left_out, "no_answers": no_answers,
             "most": most}
 
@@ -145,6 +154,10 @@ def bars(result, width=20, markup=True, click=None):
                 if v is not None and v < 100:   # full only when every answer passed
                     full = min(full, width - 1)
                 num = "-" if v is None else compare.pct(v / 100)
+                score = x.get("S")
+                if score is not None and v is not None and compare.pct(score / 100) != num:
+                    note = f"score {compare.pct(score / 100)}"
+                    num = f"{num:>6}  " + (f"[dim]{note}[/dim]" if markup else note)
                 cut = x.get("cut_pct") or 0
                 part = min(width - full, max(1, round(width * cut / 100))) if cut else 0
                 if cut:   # after the accuracy, which stays aligned with the other rows'
@@ -189,11 +202,12 @@ def table(result):
     """(header, rows) for a plain table of the index."""
     n = result["questions"] or 1
     over = any(x.get("over") for x in result["models"])   # a column only when some answer ran past max_tokens
-    header = ["model", "tokens/answer", "time/answer", "answers right", "truncated", *(["over budget"] if over else []),
+    header = ["model", "tokens/answer", "time/answer", "answers right", "score", "truncated", *(["over budget"] if over else []),
               "tok/s", "TTFT s", "memory GB"]
     rows = [[x["model"], f"{round(x['tokens'] / n):,}" + (" ★" if x.get("fewest") else ""),
              fmt_secs(x["total_s"] / n) + (" ★" if x.get("fastest") else ""),
-             f"{x['passed']}/{x['answers']}", f"{x.get('cut') or 0}/{x['answers']}",
+             f"{x['passed']}/{x['answers']}", "-" if x.get("S") is None else compare.pct(x["S"] / 100),
+             f"{x.get('cut') or 0}/{x['answers']}",
              *([f"{x.get('over') or 0}/{x['answers']}"] if over else []),
              _num(x.get("tps"), ".0f"), _num(x.get("ttft"), ".1f"),
              _num(x.get("memory_gb"), ".1f")] for x in result["models"]]
@@ -228,7 +242,7 @@ def scope_note(result, models):
     return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
             "P parsimony (tokens) and T time: bars as long as the tokens / time used (shorter is better), "
             "and how many times the leanest / fastest model's (1.0×, ★ in the table). A accuracy: answers right "
-            "(longer is better)"
+            "(longer is better); score: partial credit, e.g. 5 of 6 checks passed is 83% (shown when it differs)"
             + ("; orange, (n% truncated): answers cut off at max_tokens. They count as wrong, but the model ran "
                "out of tokens rather than answering wrong." if any(x.get("cut") for x in result["models"]) else ".")
             + (" Over budget: answers that used more tokens than the max_tokens sent, because the provider didn't "
@@ -236,14 +250,14 @@ def scope_note(result, models):
                if any(x.get("over") for x in result["models"]) else ""))
 
 
-def for_engine(e, labels=None, packs=None, results_dir=None):
+def for_engine(e, labels=None, packs=None, results_dir=None, sort="accuracy"):
     """(result, models) from a workspace's finished results (results on their way out excluded)."""
     paths = [p for p in compare.default_paths(results_dir or e.results_dir) if not e.superseded(p)]
     rows, infos = compare.load(paths) if paths else ([], [])
     if packs:
         rows = [r for r in rows if r["suite"] in packs]
     models = sorted({r["model"] for r in rows} & set(labels) if labels else {r["model"] for r in rows})
-    return index(rows, models if labels else None, memory_gb(infos)), models
+    return index(rows, models if labels else None, memory_gb(infos), sort), models
 
 
 def markdown(result, models):

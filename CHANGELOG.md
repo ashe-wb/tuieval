@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Partial credit: the PTA index shows each model's score (e.g. 5 of 6 checks passed is 83%) beside accuracy, and can be ordered by it (By score, `tuieval pta --sort score`). Why models fail splits failures into near miss, partly right and wrong; Failures shows each one's kind and checks and filters by kind; Per question cells show `✗ 5/6`. Verdicts are unchanged.
 - Results: picking a pack (PTA index or Per question) compares the models that answered all of it; the Models button can change that, and All packs goes back to the earlier pick.
 - Fix: a request that runs out of time says `time limit: timed out after N s`, not `connection error`, and `tuieval compare` counts it against the model like the run does (it was left out as an error).
 - Agent packs (`kind = "agent"`): each test is a small project with a task, worked on by a command-line agent you define in `[agents]`, using the model tuieval serves, and graded by the task's visible and hidden tests. Results show the agent's stats, diff and transcript; `tuieval compare` adds an Agent tasks table; `tuieval selftest` checks each task's reference and wrong fixes. See docs/agent-packs.md.

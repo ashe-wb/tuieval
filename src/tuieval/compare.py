@@ -351,10 +351,22 @@ def speed(rows, infos, machine=None, speeds=None):
     return header, table, frontier
 
 
+NEAR_MISS = 0.8   # a failed answer scoring at least this (e.g. 5 of 6 checks) is a near miss
+
+
+def checks_passed(r):
+    """(passed, total) checks of a failed code answer (from its stored checks, or its reason), else None."""
+    checks = (r.get("raw") or {}).get("checks")
+    if checks:
+        return sum(v is None for v in checks.values()), len(checks)
+    m = re.match(r"Failed (\d+)/(\d+) checks", r.get("reason") or "")
+    return (int(m[2]) - int(m[1]), int(m[2])) if m else None
+
+
 def per_question(rows):
     """[{test, name, suite, difficulty, cells: {model: cell}, spread}] with one cell per model that
-    answered: n answers, passes, median tokens / seconds / tok/s over repeats, truncated count,
-    partial (some answers from a pack still running), rows (the answers, for the detail view).
+    answered: n answers, passes, mean score (partial credit), median tokens / seconds / tok/s over repeats,
+    truncated count, partial (some answers from a pack still running), rows (the answers, for the detail view).
     spread = {"tokens": .., "secs": ..}: largest / smallest model median (1 if one model)."""
     tests = {}
     for r in rows:
@@ -369,6 +381,7 @@ def per_question(rows):
             c.update(rows=v, n=len(v), passed=sum(r["ok"] for r in v), truncated=sum(r["truncated"] for r in v),
                      over=sum(bool(r.get("over_budget")) for r in v),
                      partial=any(r.get("partial") for r in v),
+                     score=statistics.fmean(r.get("score", r["ok"]) for r in v),
                      tokens=median(r["tokens"] or None for r in v), secs=median(r["latency"] / 1000 or None for r in v),
                      tps=median(r["gen_tps"] for r in v))
         t["spread"] = _spread(t["cells"])
@@ -404,7 +417,7 @@ def complete_models(rows, suite, test_ids=None):
 def compare_models(tests, models):
     """Per model over per_question entries that all `models` answered: passes, token and time
     totals/medians (totals add each question's median over repeats, so repeats don't inflate them), questions where it used the fewest tokens / was fastest (among passing
-    answers for tokens; ties count for each), answers cut off."""
+    answers for tokens; ties count for each), answers cut off, mean score (partial credit)."""
     out = []
     for m in models:
         cs = [t["cells"][m] for t in tests]
@@ -421,6 +434,7 @@ def compare_models(tests, models):
                 fastest += 1
         rs = [r for c in cs for r in c["rows"]]
         out.append({"model": m, "n": len(cs), "passed": passed, "total_tokens": total,
+                    "score": statistics.fmean(c["score"] for c in cs) if cs else None,
                     "avg_pp_tps": _rate([(r.get("prompt_tokens"), r["prompt_tps"]) for r in rs]),
                     "avg_gen_tps": _rate([(r["tokens"], r["gen_tps"]) for r in rs]),
                     "med_tokens": median(c["tokens"] for c in cs), "med_secs": median(c["secs"] for c in cs),
