@@ -15,6 +15,9 @@ the others in proportion, at least one block), so shorter is better; the A bar: 
 P and T also carry a 0-100 score (100 for the best, POINTS_PER_DOUBLING points less for every
 doubling), used to order models with the same accuracy.
 
+Beside each name, the repeats: how many times it answered each of those questions ("×3", or "×1-3" when
+it varies). A ×1 model's accuracy rests on one answer per question, so it is rougher than a ×3 one's.
+
 Models are compared on the questions all of them answered, so one that skipped some never looks
 faster. Server and connection errors aren't answers. By default a model with fewer than half as many
 answers as the most-answered model is left out (listed, so it can be picked), or it would shrink the
@@ -54,7 +57,7 @@ SORTS = ("accuracy", "score")
 
 def index(rows, models=None, memory=None, sort="accuracy"):
     """{"questions": n shared, "models": [{model, P, T, A, S, cut, cut_pct, tokens, total_s, passed, answers, alongside,
-    fewest, fastest, tps, ttft, memory_gb}],
+    fewest, fastest, tps, ttft, memory_gb, repeats: (fewest, most) answers per question}],
     "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
     most-answered model}, best accuracy (sort="accuracy") or score (sort="score") first. S: the mean
 score (partial credit) in %. models: the ones to compare (default: every model in rows
@@ -92,6 +95,7 @@ score (partial credit) in %. models: the ones to compare (default: every model i
                     "tps": compare.median(r.get("gen_tps") for c in cells for r in c["rows"]),
                     "ttft": compare.median(r.get("ttft") for c in cells for r in c["rows"]),
                     "memory_gb": (memory or {}).get(m),
+                    "repeats": (min(c["n"] for c in cells), max(c["n"] for c in cells)) if cells else None,
                     # answers that ran while other models were served shared the machine's speed
                     "alongside": any(r.get("alongside") for c in cells for r in c["rows"])})
     fastest = min((x["total_s"] for x in out if x["total_s"] > 0), default=None)
@@ -116,6 +120,14 @@ LETTERS = (("P", "parsimony (tokens)", "▼ shorter is better", "tokens", "token
            ("A", "accuracy", "▲ longer is better", "A", "A", "green"))
 
 
+def repeats(x):
+    """How many times a model answered each question compared: "×3", "×1-3", or "" when unknown."""
+    r = x.get("repeats")
+    if not r:
+        return ""
+    return f"×{r[0]}" if r[0] == r[1] else f"×{r[0]}-{r[1]}"
+
+
 def times(v):
     """A multiple of the best: "1.0×", "2.4×", "28×"."""
     return "-" if v is None else f"{v:.1f}×" if v < 9.95 else f"{v:.0f}×"
@@ -138,6 +150,8 @@ def bars(result, width=20, markup=True, click=None):
     if not result["models"]:
         return []
     name_w = max(len(x["model"]) for x in result["models"])
+    rep_w = max(len(repeats(x)) for x in result["models"])
+    name_w += rep_w + 1 if rep_w else 0   # the repeats sit after the name, in its column
     # each column: the bar, a space, "100%" or "9.8×" (6), then a gap; at least as wide as its heading
     cell_w = max(width + 9, *(len(t) + 2 for k, name, better, *_ in LETTERS for t in (f"{k} {name}", better)))
     pad = " " * (name_w + 2)
@@ -173,11 +187,14 @@ def bars(result, width=20, markup=True, click=None):
             bar = (f"[{color}]{bar}[/]" + (f"[#ff8c00]{'█' * part}[/]" if part else "") + f"[grey37]{rest}[/]"
                    if markup else bar + cut_bar + rest)
             cells.append(f"{bar} {num:>6}" + " " * max(0, cell_w - width - 1 - max(6, len(num))))
-        name = f"{x['model']:<{name_w}}"
+        tag = repeats(x)
+        name = f"{x['model'] + (' ' + tag if tag else ''):<{name_w}}"
         if markup:
-            pad_w = name_w - len(x["model"])
-            name = (f"[@click={click}({row})]{rich_escape(x['model'])}[/]" + " " * pad_w if click
-                    else rich_escape(name))
+            pad_w = name_w - len(x["model"]) - (len(tag) + 1 if tag else 0)
+            # a single answer per question in yellow: its accuracy is the roughest
+            tag = f" [{'yellow' if x['repeats'][1] == 1 else 'dim'}]{tag}[/]" if tag else ""
+            name = ((f"[@click={click}({row})]{rich_escape(x['model'])}[/]" if click else rich_escape(x["model"]))
+                    + tag + " " * pad_w)
         lines.append((f"{name}  " + "".join(cells)).rstrip())
     return lines
 
@@ -202,9 +219,9 @@ def table(result):
     """(header, rows) for a plain table of the index."""
     n = result["questions"] or 1
     over = any(x.get("over") for x in result["models"])   # a column only when some answer ran past max_tokens
-    header = ["model", "tokens/answer", "time/answer", "answers right", "score", "truncated", *(["over budget"] if over else []),
+    header = ["model", "repeats", "tokens/answer", "time/answer", "answers right", "score", "truncated", *(["over budget"] if over else []),
               "tok/s", "TTFT s", "memory GB"]
-    rows = [[x["model"], f"{round(x['tokens'] / n):,}" + (" ★" if x.get("fewest") else ""),
+    rows = [[x["model"], repeats(x) or "-", f"{round(x['tokens'] / n):,}" + (" ★" if x.get("fewest") else ""),
              fmt_secs(x["total_s"] / n) + (" ★" if x.get("fastest") else ""),
              f"{x['passed']}/{x['answers']}", "-" if x.get("S") is None else compare.pct(x["S"] / 100),
              f"{x.get('cut') or 0}/{x['answers']}",
@@ -243,6 +260,10 @@ def scope_note(result, models):
             "P parsimony (tokens) and T time: bars as long as the tokens / time used (shorter is better), "
             "and how many times the leanest / fastest model's (1.0×, ★ in the table). A accuracy: answers right "
             "(longer is better); score: partial credit, e.g. 5 of 6 checks passed is 83% (shown when it differs)"
+            + (f"; ×n beside a name: answers per question. ×1 models answered each question once, so one "
+               f"answer more or less right moves their accuracy by {100 / result['questions']:.0f} points; "
+               "repeats steady it" if len({x.get("repeats") for x in result["models"]}) > 1
+               or any(x.get("repeats") and x["repeats"][1] == 1 for x in result["models"]) else "")
             + ("; orange, (n% truncated): answers cut off at max_tokens. They count as wrong, but the model ran "
                "out of tokens rather than answering wrong." if any(x.get("cut") for x in result["models"]) else ".")
             + (" Over budget: answers that used more tokens than the max_tokens sent, because the provider didn't "

@@ -502,6 +502,9 @@ class PickTests(unittest.TestCase):
         self.assertIn("done earlier", out)                                       # nothing missing: not re-asked
         tuieval(self.ws, "run", "--tests", "apps:d", "--tier", "certify")
         self.assertEqual(self.status(), "certified")
+        code = "from tuieval import engine; print(engine.Engine().result_repeats('m', 'apps'))"
+        self.assertEqual(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,   # ✓×1 on Setup
+                                        env=dict(os.environ, TUIEVAL_HOME=self.ws)).stdout.strip(), "(1, 1)")
 
         self.server("wrong")
         tuieval(self.ws, "run", "--tests", "apps:b", "--force")
@@ -1555,7 +1558,7 @@ class PTAIndex(unittest.TestCase):
     scale, and accuracy, all over the questions every compared model answered."""
 
     def test_index_compares_shared_questions(self):
-        from tuieval import pta
+        from tuieval import compare, pta
 
         def row(model, test, ok, secs, repeat=0):
             return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "latency": secs * 1000,
@@ -1574,9 +1577,9 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual((by["slow"]["P"], by["fast"]["P"]), (100, 70))          # 4x the tokens: two doublings
         self.assertEqual((pta.score(2, 1), pta.score(1000, 1)), (85, 0))
         header, table = pta.table(res)
-        self.assertEqual(header[1:4], ["tokens/answer", "time/answer", "answers right"])
+        self.assertEqual(header[1:5], ["repeats", "tokens/answer", "time/answer", "answers right"])
         cells = {r[0]: r for r in table}
-        self.assertEqual((cells["slow"][1], cells["fast"][1:3]), ("10 ★", ["40", "2.0s ★"]))   # per answer
+        self.assertEqual((cells["slow"][2], cells["fast"][2:4]), ("10 ★", ["40", "2.0s ★"]))   # per answer
         bars = pta.bars(res, 10, markup=False)
         self.assertEqual(bars[0].split(), ["P", "parsimony", "(tokens)", "T", "time", "A", "accuracy"])
         self.assertEqual(bars[1].split(), ["▼", "shorter", "is", "better"] * 2 + ["▲", "longer", "is", "better"])
@@ -1585,8 +1588,13 @@ class PTAIndex(unittest.TestCase):
                          (fast.index("██████████"), fast.index("███░░░░░░░")))       # its heading
         # P and T bars as long as tokens and time (shorter is better): fast used 4x the tokens of slow but
         # took 4 s against 13 s, so it has the longest token bar and the shortest time bar
-        self.assertEqual(fast.split(), ["fast", "██████████", "4.0×", "███░░░░░░░", "1.0×", "█████░░░░░", "50.0%"])
-        self.assertEqual(slow.split()[1:5], ["██░░░░░░░░", "1.0×", "██████████", "3.2×"])
+        self.assertEqual(fast.split(), ["fast", "×1", "██████████", "4.0×", "███░░░░░░░", "1.0×", "█████░░░░░", "50.0%"])
+        self.assertEqual(slow.split()[1:6], ["×1-2", "██░░░░░░░░", "1.0×", "██████████", "3.2×"])   # ×: answers per question
+        self.assertEqual((cells["slow"][1], cells["fast"][1]), ("×1-2", "×1"))
+        self.assertIn("×1 models answered each question once", pta.scope_note(res, ["slow", "fast"]))
+        full = [dict(r, score=float(r["ok"]), error=False, output="") for r in rows]
+        header, table = compare.scorecard(full)
+        self.assertEqual({r[0]: r[header.index("repeats")] for r in table}, {"slow": "×1-2", "fast": "×1"})
         self.assertEqual((pta.times(1), pta.times(9.84), pta.times(27.9)), ("1.0×", "9.8×", "28×"))
         self.assertEqual((by["fast"]["A"], by["slow"]["A"]), (50, 100))
         self.assertEqual([x["model"] for x in res["models"]], ["slow", "fast"])   # best accuracy first
@@ -1618,8 +1626,8 @@ class PTAIndex(unittest.TestCase):
         self.assertEqual(bars["plain"][-2:], ["██████░░░░", "60.0%"])                  # none truncated: nothing beside it
         self.assertIn("[#ff8c00]██[/]", pta.bars(res, 10)[2] + pta.bars(res, 10)[3])
         header, table = pta.table(res)
-        self.assertEqual(header[4:6], ["score", "truncated"])
-        self.assertEqual({r[0]: r[5] for r in table}, {"thinker": "2/10", "plain": "0/10"})
+        self.assertEqual(header[5:7], ["score", "truncated"])
+        self.assertEqual({r[0]: r[6] for r in table}, {"thinker": "2/10", "plain": "0/10"})
         self.assertIn("truncated", pta.scope_note(res, ["thinker", "plain"]))
         self.assertNotIn("truncated", pta.scope_note(pta.index(rows[10:]), ["plain"]))
 
@@ -1949,7 +1957,7 @@ class PTAIndex(unittest.TestCase):
             self.assertGreaterEqual(len(got["opened"]), 2)
             self.assertEqual(got["opened"], {m: m for m in got["opened"]})   # a cell opens its column's model
             self.assertEqual(got["tab"], "tab-pta")                  # Results opens on the PTA index
-            self.assertEqual([(r[0], r[3]) for r in got["rows"]][0], ("good", "4/4"))
+            self.assertEqual([(r[0], r[4]) for r in got["rows"]][0], ("good", "4/4"))
             s = got["sorts"]   # a click on a column name sorts by it, a second click reverses
             self.assertEqual((s["up"], s["down"], s["kept"]), (["hosted", "good"], ["good", "hosted"], ["good", "hosted"]))
             self.assertIn("answers right ▼", s["labels"])

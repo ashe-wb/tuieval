@@ -937,7 +937,10 @@ class SetupScreen(Screen):
         for n in e.packs:
             st = e.result_status(label, n)
             if st:
-                packs.append(f"{mark.get(st, '[yellow]~[/yellow]')}{n}")
+                reps = e.result_repeats(label, n) if st in ("certified", "screened") else None
+                times = ("" if not reps else f"[dim]×{reps[0]}[/dim]" if reps[0] == reps[1]
+                         else f"[dim]×{reps[0]}-{reps[1]}[/dim]")
+                packs.append(f"{mark.get(st, '[yellow]~[/yellow]')}{n}{times}")
                 if st.startswith("outdated"):
                     why.setdefault(st.removeprefix("outdated: "), []).append(n)
         if why:  # each reason once, not once per pack
@@ -951,7 +954,7 @@ class SetupScreen(Screen):
         hidden = (f"  [cyan]{' '.join(tags)}[/cyan]" if tags else "") + hidden
         detail.update(f"[b]{label}[/b]  [dim]{m['server']} · {m.get('model') or ''}[/dim]"
                       f"{serving_badge(e, m, not e.has_results())}{hidden}\n{verdicts}\n"
-                      + ("[dim]results (✓ certified ◐ screened ~ outdated … partial):[/dim] " + "  ".join(packs)
+                      + ("[dim]results (✓ certified ◐ screened ~ outdated … partial; ×n answers per question):[/dim] " + "  ".join(packs)
                          if packs else "[dim]no results yet[/dim]"))
 
     @on(Checkbox.Changed, "#show-hidden")

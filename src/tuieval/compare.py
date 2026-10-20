@@ -248,12 +248,14 @@ def scorecard(rows, rng=None):
     suites = sorted({r["suite"] for r in rows})
     extra = dict(graders.COLUMNS)   # columns your graders add (graders.scorecard_column)
     over = any(r.get("over_budget") for r in rows)   # a column only when some answer ran past max_tokens
-    header = ["model"] + suites + ["overall", "95% CI", "mean score", "all repeats", *extra, "errors", "trunc",
+    header = ["model", "repeats"] + suites + ["overall", "95% CI", "mean score", "all repeats", *extra, "errors", "trunc",
                                    *(["over budget"] if over else []), "rep"]
     table = []
     for m in models:
         mine = [r for r in rows if r["model"] == m]
-        line = [m]
+        per_test = collections.Counter(r["test"] for r in mine)   # answers per question: the repeats
+        few, most = min(per_test.values()), max(per_test.values())
+        line = [m, f"×{few}" if few == most else f"×{few}-{most}"]
         for s in suites:
             sub = [r for r in mine if r["suite"] == s]
             line.append(f"{sum(r['ok'] for r in sub)}/{len(sub)}" if sub else "-")
@@ -678,7 +680,8 @@ def main(argv):
     for note in settings_notes(infos):
         print("NOTE:", note)
     print_table(*scorecard(rows, rng))
-    print("\nmean score = average score, with partial credit; all repeats = tests passed on every repeat.")
+    print("\nrepeats = answers per question (×1: one answer each, the roughest accuracy).")
+    print("mean score = average score, with partial credit; all repeats = tests passed on every repeat.")
     print("trunc = hit max_tokens; rep = output ends in a degenerate repeated pattern.")
     header, table = by_difficulty(rows)
     if any(r.get("difficulty") in LEVELS for r in rows):
