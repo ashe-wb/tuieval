@@ -989,6 +989,14 @@ class Engine:
         need = {(t["id"], r) for t in pack.tests for r in range(self.certify_repeat(pack))}
         return "certified" if need <= keys else "screened"
 
+    def result_repeats(self, label, pack_name, tier="certify"):
+        """How many times each answered question of a stored result was asked: (fewest, most), or None."""
+        data = self._result(self.result_path(label, pack_name, tier))
+        if not data or not data["results"]:
+            return None
+        per_test = collections.Counter(r["test"] for r in data["results"])
+        return min(per_test.values()), max(per_test.values())
+
     def _partial_lines(self, path):
         """(header, answers) of an unfinished run's .partial.jsonl, cached like _result;
         (None, []) if there is none."""
