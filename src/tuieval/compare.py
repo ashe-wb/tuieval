@@ -52,6 +52,7 @@ def _load_native(data):
             # a timeout is the model too slow (client.is_server_error), not an error; older results called it one
             "error": r["reason"].startswith(("server returned", "connection error")) and "timed out" not in r["reason"],
             "truncated": r.get("finish") == "length", "output": r.get("answer") or "",
+            "loop": r.get("finish") == "loop",   # stopped live: it kept repeating itself (client.loop_unit)
             # tokens past the max_tokens sent, which the provider didn't stop (client.mark_over_budget)
             "over_budget": r.get("over_budget"),
             "tokens": r.get("completion_tokens") or 0, "reasoning_tokens": r.get("reasoning_tokens"),
@@ -273,7 +274,7 @@ def scorecard(rows, rng=None):
             line.append("-" if cell is None else str(cell))
         line += [str(sum(r["error"] for r in mine)), str(sum(r["truncated"] for r in mine)),
                  *([str(sum(bool(r.get("over_budget")) for r in mine))] if over else []),
-                 str(sum(repetitive(r["output"]) for r in mine))]
+                 str(sum(bool(r.get("loop")) or repetitive(r["output"]) for r in mine))]
         table.append(line)
     return header, table
 
@@ -682,7 +683,7 @@ def main(argv):
     print_table(*scorecard(rows, rng))
     print("\nrepeats = answers per question (×1: one answer each, the roughest accuracy).")
     print("mean score = average score, with partial credit; all repeats = tests passed on every repeat.")
-    print("trunc = hit max_tokens; rep = output ends in a degenerate repeated pattern.")
+    print("trunc = hit max_tokens; rep = output ends in a degenerate repeated pattern (or was stopped live as a loop).")
     header, table = by_difficulty(rows)
     if any(r.get("difficulty") in LEVELS for r in rows):
         print("\nPass rate by difficulty:")

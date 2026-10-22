@@ -624,7 +624,8 @@ class AnswerScreen(ModalScreen):
         quant = f"  [magenta]{rec['quantization']}[/magenta]" if rec.get("quantization") else ""
         finish = rec.get("finish") or "?"
         limit = f"this pack's max_tokens, {pack.max_tokens:,}" if pack and pack.max_tokens else "max_tokens"
-        finish = f"[bold red]{finish} (cut off at {limit})[/]" if finish == "length" else finish
+        finish = (f"[bold red]{finish} (cut off at {limit})[/]" if finish == "length"
+                  else f"[bold red]loop (stopped: it kept repeating itself)[/]" if finish == "loop" else finish)
         toks = rec.get("completion_tokens")
         split = ", ".join(f"{k} {rec[k + '_tokens']:,}" for k in ("reasoning", "answer")
                           if rec.get(k + "_tokens") is not None)

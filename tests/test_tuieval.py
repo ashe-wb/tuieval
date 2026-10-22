@@ -425,12 +425,12 @@ class PickTests(unittest.TestCase):
             self.mock.stop()
         self.tmp.cleanup()
 
-    def server(self, mode):
+    def server(self, mode, *flags):
         """(Re)start the mock on the same port: oracle answers right, wrong answers wrong."""
         first = self.mock is None
         if self.mock:
             self.mock.stop()
-        self.mock = Mock(os.path.join(self.ws, "packs"), mode, port=self.port)
+        self.mock = Mock(os.path.join(self.ws, "packs"), mode, self.port, 0.0, *flags)
         if first:
             tuieval(self.ws, "add", "mock", "--server", "m", "--label", "m")
 
@@ -444,6 +444,20 @@ class PickTests(unittest.TestCase):
         code = f"from tuieval import engine; print(engine.Engine().result_status('m', '{pack}'))"
         return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                               env=dict(os.environ, TUIEVAL_HOME=self.ws)).stdout.strip()
+
+    def test_a_looping_answer_is_stopped_and_failed(self):
+        self.server("oracle", "--loop", "</think>\n")   # the right answer, then stuck
+        tuieval(self.ws, "run", "--tests", "apps:a")
+        rec = json.loads(read(os.path.join(self.ws, "results", "m", "apps.json")))["results"][0]
+        self.assertEqual((rec["finish"], rec["pass"], rec["loop"]["stream"]), ("loop", False, "answer"))
+        self.assertTrue(rec["reason"].startswith("LOOP:"), rec["reason"])
+        self.assertLess(len(rec["answer"]), 3000)
+        path = os.path.join(self.ws, "models.toml")                      # off: it runs to the end, as before
+        write(path, read(path).replace("[defaults]\n", "[defaults]\nloop_stop_chars = 0\n", 1))
+        tuieval(self.ws, "run", "--tests", "apps:a", "--force")
+        rec = json.loads(read(os.path.join(self.ws, "results", "m", "apps.json")))["results"][0]
+        self.assertEqual(rec["finish"], "stop")
+        self.assertNotIn("loop", rec)
 
     def test_pick(self):
         from tuieval import packs
@@ -3187,6 +3201,32 @@ class StallGuard(unittest.TestCase):
         res, _ = self.ask("--die-after", "2", timeout=30)
         self.assertTrue(client.is_server_error(res["error"]), res["error"])
         self.assertIsNone(res["finish"])
+
+    def test_a_loop_is_stopped_early(self):
+        from tuieval import client, graders
+        res, took = self.ask("--loop", "</think>\n", timeout=30, loop_chars=2000)
+        self.assertIsNone(res["error"])
+        self.assertEqual((res["finish"], res["loop"]["stream"]), ("loop", "answer"))
+        self.assertEqual(sorted(res["loop"]["unit"]), sorted("</think>\n"))   # the unit, from wherever it was cut
+        self.assertLess(len(res["answer"]), 3000)                               # 45,000 chars were coming
+        g = graders.grade({"grader": "answer", "answer": "42"}, res["answer"], {"finish": "loop", "loop": res["loop"]})
+        self.assertFalse(g["pass"])
+        self.assertTrue(g["reason"].startswith("LOOP: the answer kept repeating"), g["reason"])
+        res, _ = self.ask("--loop", "</think>\n", timeout=30)                   # off: the whole answer
+        self.assertEqual(res["finish"], "stop")
+        self.assertGreater(len(res["answer"]), 40000)
+
+    def test_what_counts_as_a_loop(self):
+        from tuieval import client
+        prose = " ".join(f"step {i}: check the value and move on." for i in range(200))
+        self.assertIsNone(client.loop_unit(prose, 2000))
+        self.assertEqual(client.loop_unit("intro " + "wait, " * 400, 2000), "wait, ")
+        self.assertEqual(client.loop_unit("x" * 2500, 2000), "x")
+        self.assertIsNone(client.loop_unit("| --- " * 500, 2000))           # a ruler: no letter or digit
+        self.assertIsNone(client.loop_unit("wait, " * 300, 2000))           # shorter than min_chars
+        line = "a sentence that is a good deal longer than sixty-four chars in all.\n"
+        self.assertIsNone(client.loop_unit(line * 40, 2000))                # unit too long to call a loop
+        self.assertIsNone(client.loop_unit("wait, " * 400, 0))              # off
 
     def test_finish_without_done_is_an_answer(self):
         res, _ = self.ask("--die-after", "99", timeout=30)    # every chunk, then gone before [DONE]

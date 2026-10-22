@@ -137,6 +137,10 @@ def grade(test, answer, meta=None):
         return result(False, f"unknown grader {name!r}; known: {', '.join(sorted(REGISTRY))}")
     if meta.get("finish") == "length":
         return result(False, "TRUNCATED: hit max_tokens before finishing")
+    if meta.get("finish") == "loop":
+        loop = meta.get("loop") or {}
+        return result(False, f"LOOP: the {loop.get('stream', 'answer')} kept repeating "
+                             f"{loop.get('unit', '')[:40]!r}; stopped early (it would have run to max_tokens)")
     text = strip_thinking(answer)
     if not text and not meta.get("tool_calls"):
         return result(False, "Empty answer")

@@ -6,6 +6,8 @@
 repeat = 3
 request_timeout_ms = 1800000   # per request; long thinking runs need it
 stall_timeout_ms = 300000      # no tokens this long once answering began: the server stalled (retried, not counted)
+loop_stop_chars = 2000         # an answer (or reasoning) ending in one short unit repeated over this many chars is
+                               # stuck in a loop: stopped there and failed as LOOP, not left to run to max_tokens (0: off)
 over_budget = "flag"           # answers past the max_tokens sent (a provider that didn't stop them): "flag" or "fail"
 ready_timeout_s = 1200         # how long a model may take to load before giving up
 model_dirs = ["~/models"]      # where "Scan for models" looks for new GGUFs
