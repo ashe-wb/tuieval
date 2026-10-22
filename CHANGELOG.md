@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Answers stuck in a loop (one short unit repeated over 2000 chars, in the reasoning or the answer) are stopped as they stream and failed as `LOOP`, instead of running to max_tokens. `[defaults] loop_stop_chars` sets the length; 0 turns it off.
-- Repeats: the PTA index, `tuieval compare` and Setup show how many times each model answered each question (`×3`, `×1-3`), so single-run results stand out.
+- Repeats: the PTA index, Per question, `tuieval compare` and Setup show how many times each model answered each question (`×3`, `×1-3`), so single-run results stand out.
 - Partial credit: the PTA index shows each model's score (e.g. 5 of 6 checks passed is 83%) beside accuracy, and can be ordered by it (By score, `tuieval pta --sort score`). Why models fail splits failures into near miss, partly right and wrong; Failures shows each one's kind and checks and filters by kind; Per question cells show `✗ 5/6`. Verdicts are unchanged.
 - Results: picking a pack (PTA index or Per question) compares the models that answered all of it; the Models button can change that, and All packs goes back to the earlier pick.
 - Fix: a request that runs out of time says `time limit: timed out after N s`, not `connection error`, and `tuieval compare` counts it against the model like the run does (it was left out as an error).

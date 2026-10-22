@@ -1739,7 +1739,7 @@ class PTAIndex(unittest.TestCase):
                     print(t.row_count, str(s.query_one("#fail-count", Static).render()))
                     s.fill_per_question()
                     pq = s.query_one("#per-question", DataTable)
-                    cols = [str(c.label) for c in pq.ordered_columns]
+                    cols = [str(c.label).split(" ×")[0] for c in pq.ordered_columns]
                     print(sorted(str(pq.get_row_at(i)[cols.index("close")]).split()[1] for i in range(pq.row_count)))
             asyncio.run(go())
         """)
@@ -1801,7 +1801,7 @@ class PTAIndex(unittest.TestCase):
                         s = app.screen
                         def state():
                             pq = s.query_one("#per-question", DataTable)
-                            cols = [str(c.label) for c in pq.ordered_columns][len(s.PQ_FIXED):]
+                            cols = [str(c.label).split(" ×")[0] for c in pq.ordered_columns][len(s.PQ_FIXED):]
                             return (sorted(app.pq_models), s.query_one("#pta-pack", Select).value,
                                     str(s.query_one("#pq-models", Button).label), cols, s.query_one("#pq-shared").value)
                         s.query_one("#pq-pack", Select).value = "apps"
@@ -1955,7 +1955,7 @@ class PTAIndex(unittest.TestCase):
                             pq.move_cursor(row=0, column=col)
                             await pilot.press("enter")
                             await pilot.pause(0.3)
-                            opened[str(pq.ordered_columns[col].label.plain)] = app.screen.entries[0]["model"]
+                            opened[pq.ordered_columns[col].label.plain.split(" ×")[0]] = app.screen.entries[0]["model"]
                             app.screen.dismiss()
                             await pilot.pause(0.2)
                         print(json.dumps({"rows": rows, "bars": "P parsimony" in tri, "disagree": [both, alone], "opened": opened,
@@ -2271,6 +2271,7 @@ class FirstRun(unittest.TestCase):
         tuieval(self.ws, "add", "my-model", "--server", "local")
         code = textwrap.dedent("""
             import asyncio
+            from rich.text import Text
             from tuieval import compare
             from tuieval.tui import EvalsApp, ResultsScreen
             from textual.widgets import DataTable, TabbedContent
@@ -2288,14 +2289,56 @@ class FirstRun(unittest.TestCase):
                     app.screen.fill_pq_summary(compare.per_question(rows), models)
                     await pilot.pause(0.3)
                     t = app.screen.query_one("#pq-summary", DataTable)
-                    names = [str(t.get_row_at(i)[0]) for i in range(t.row_count)]
+                    names = [Text.from_markup(t.get_row_at(i)[0]).plain for i in range(t.row_count)]
                     print(t.row_count, t.region.height, t.virtual_size.width <= t.region.width,
-                          all(n.endswith("-q4_k_m-vllm") and "…" in n for n in names), len(set(names)))
+                          all(n.endswith("-q4_k_m-vllm ×1") and "…" in n for n in names), len(set(names)))
             asyncio.run(go())
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60)
-        self.assertEqual(out.stdout.strip(), "12 13 True True 12", out.stderr[-2000:])   # every row, no scroll
+        # every row, no scroll; a trimmed name keeps its ×n
+        self.assertEqual(out.stdout.strip(), "12 13 True True 12", out.stderr[-2000:])
+
+    def test_per_question_shows_repeats(self):
+        tuieval(self.ws, "add", "my-model", "--server", "local")
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval.tui import EvalsApp, ResultsScreen
+            from textual.widgets import DataTable, TabbedContent
+            rows = [{"model": m, "suite": "p", "test": f"p: q{q}", "ok": True, "latency": 1000, "tokens": 10,
+                     "truncated": False, "gen_tps": 20.0, "prompt_tps": None, "repeat": r, "score": 1.0}
+                    for m, reps in (("once", 1), ("thrice", 3)) for q in range(2) for r in range(reps)]
+            rows += [dict(rows[-1], test="p: q2", repeat=0)]   # one more question, answered once
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 40)) as pilot:
+                    await pilot.pause()
+                    app.push_screen(ResultsScreen())
+                    await pilot.pause(0.5)
+                    s = app.screen
+                    s.rows, s.partial_rows, s.superseded = rows, [], set()
+                    s.query_one(TabbedContent).active = "tab-per-question"
+                    await pilot.pause(0.3)
+                    s.fill_per_question()
+                    await pilot.pause(0.3)
+                    pq = s.query_one("#per-question", DataTable)
+                    heads = [c.label for c in pq.ordered_columns][len(s.PQ_FIXED):]
+                    print([h.plain for h in heads], [str(h.spans[0].style) for h in heads])
+                    app.result_sorts["per-question"] = ("thrice ×1-3", True)   # as a click on its name does
+                    s.sort_table(pq)
+                    head = pq.ordered_columns[-1].label
+                    print(head.plain, str(head.spans[0].style))
+                    t = s.query_one("#pq-summary", DataTable)
+                    print([t.get_row_at(i)[0] for i in range(t.row_count)])
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60)
+        self.assertEqual(out.stdout.strip().splitlines(), [
+            "['once ×1', 'thrice ×1-3'] ['yellow', 'dim']",   # over the questions shown
+            "thrice ×1-3 ▼ dim",                               # sorting keeps the ×n's colour
+            "['once [yellow]×1[/]', 'thrice [dim]×3[/]']",     # Comparison: only the questions both answered
+        ], out.stderr[-2000:])
 
     def test_results_open_on_pta_index(self):
         tuieval(self.ws, "add", "my-model", "--server", "local")

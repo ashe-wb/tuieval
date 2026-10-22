@@ -431,6 +431,15 @@ def trim_names(names, width):
     return trimmed if len(set(trimmed)) == len(set(names)) else list(names)
 
 
+def repeats_tag(counts):
+    """A model's answers per question as markup, as the PTA index shows them: "×3", or "×1-3" when it varies;
+    yellow when it's ×1 (one answer decides each result, the roughest), else dim. "" for no answers."""
+    if not counts:
+        return ""
+    few, most = min(counts), max(counts)
+    return f"[{'yellow' if most == 1 else 'dim'}]×{few}{'' if few == most else f'-{most}'}[/]"
+
+
 def fit_first_column(header, rows, room, floor=24):
     """rows with the first cell trimmed in the middle (mid_trim) so a table of these columns fits room
     cells across, but never below floor cells. Cells are Rich markup; each column adds 2 cells of padding."""
@@ -3136,7 +3145,10 @@ class ResultsScreen(Screen):
             base = column_name(col.label)
             label = base + SORT_ARROWS[desc] if base == name else base
             if col.label.plain != label:
-                col.label = Text(label)
+                text = col.label.copy()   # keeps its styling, e.g. a model's ×n
+                if len(text.plain) > len(base):   # right_crop(0) would empty it
+                    text.right_crop(len(text.plain) - len(base))
+                col.label = text + SORT_ARROWS[desc] if base == name else text
                 w = cell_len(label)   # room for the arrow (a column keeps the width it was added with)
                 col.content_width = max(col.content_width, w)
                 if not col.auto_width:
@@ -3404,7 +3416,9 @@ class ResultsScreen(Screen):
         here = self.app.engine.machine().id
         table = self.query_one("#per-question", DataTable)
         table.clear(columns=True)
-        table.add_columns(*self.PQ_FIXED, *models)
+        table.add_columns(*self.PQ_FIXED, *(Text.from_markup(
+            f"{rich_escape(m)} {repeats_tag([t['cells'][m]['n'] for t in tests if m in t['cells']])}".rstrip())
+            for m in models))
         self.pq_tests, self.pq_models = {}, models
         for t in tests:
             cells = []
@@ -3427,7 +3441,8 @@ class ResultsScreen(Screen):
             "[green]bold[/green] = fewest tokens among passing answers · [red]cut[/red] = hit max_tokens · "
             "[yellow]over[/yellow] = ran past max_tokens (the provider didn't stop it) · "
             "◐ = pack unfinished (not in scores) · dim seconds = hosted, or measured on another machine; tokens compare "
-            "across machines, seconds don't. ×tokens = most / fewest tokens across models. Enter on a cell opens the "
+            "across machines, seconds don't. ×tokens = most / fewest tokens across models. ×n beside a model: answers "
+            "per question (×1: one answer decides each result, the roughest). Enter on a cell opens the "
             "answers. Click a column name to sort by it (a model's column: by its tokens).[/dim]" + ("\n[yellow]Left out, being rerun with other questions or settings: " + ", ".join(
                 f"{os.path.basename(os.path.dirname(p))} · {os.path.basename(p)[:-5]}" for p in sorted(self.superseded))
                 + ". Only the new run's answers (◐) are shown for these.[/yellow]" if self.superseded else ""))
@@ -3469,6 +3484,7 @@ class ResultsScreen(Screen):
         def hi(v, text, key, good):
             ref = best.get(key) if good == "max" else low.get(key)
             return f"[bold green]{text}[/bold green]" if v is not None and v == ref and len(rows) > 1 else text
+        tags = {m: repeats_tag([t["cells"][m]["n"] for t in shared]) for m in models}
         cells = []
         for r in rows:
             tt = r["total_secs"]
@@ -3489,7 +3505,10 @@ class ResultsScreen(Screen):
                           (f"[red]{r['cut']}[/red]" if r["cut"] else "0")
                           + (f" [yellow]+{r['over']} over[/yellow]" if r.get("over") else "")])
         table.add_columns(*header)
-        table.add_rows(fit_first_column(header, cells, (self.size.width or self.app.size.width) - 3))
+        tag_w = max(Text.from_markup(tag).cell_len + 1 for tag in tags.values())
+        cells = fit_first_column(header, cells, (self.size.width or self.app.size.width) - 3 - tag_w,
+                                 floor=24 - tag_w)   # the column's floor counts the ×n too
+        table.add_rows([[f"{rich_escape(c[0])} {tags[r['model']]}"] + c[1:] for c, r in zip(cells, rows)])
         line = f"[b]Comparison[/b] over the {len(shared)} questions all {len(models)} answered"
         if len(models) == 2:
             h = compare.head_to_head(shared, *models)
@@ -3506,7 +3525,7 @@ class ResultsScreen(Screen):
         title.update(line + "  [dim]Time / Tokens: each question's median, added up. Med tok / Med s: median "
                      "per answer. Tok/✓: tokens per answer right. Prompt t/s / Gen t/s: all tokens over all the time "
                      "they took (cached prompts left out). Passed: questions right on every repeat, then the score (partial credit, e.g. checks passed) when some failed. Fewest / Fastest: questions won; ties count for both. "
-                     "Cut off: answers that hit max_tokens.[/dim]")
+                     "Cut off: answers that hit max_tokens. ×n beside a name: answers per question.[/dim]")
 
     @staticmethod
     def pq_cell(c, best, here):
