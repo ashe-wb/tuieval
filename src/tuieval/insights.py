@@ -280,7 +280,7 @@ def kind(r):
         return "right"
     if r.get("severity") == "critical":
         return "critical"
-    if r["truncated"] or r["reason"].startswith(("TRUNCATED", "OVER BUDGET", "time limit")):
+    if r["truncated"] or r["reason"].startswith(("TRUNCATED", "OVER BUDGET", "time limit", "LOOP")):
         return "cut off"
     if r["reason"].startswith(FORMAT):
         return "no answer / format"

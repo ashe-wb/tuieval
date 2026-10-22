@@ -13,6 +13,7 @@ Streams like llama.cpp: reasoning_content then content deltas, usage and timings
 PROCESSING"), or of silence with --silent; --stall-before S: the same before the first token.
 --die-after N: the process exits after N stream chunks (0: right after the headers), with no finish
 reason or [DONE], like a server that crashes mid-request.
+--loop TEXT: after the answer, TEXT 5000 times over (a model stuck in a loop).
 An answer longer than the request's max_tokens (one token per word) is cut off with finish
 "length". --max-output N also serves an OpenRouter-style endpoints list with that output limit.
 """
@@ -55,7 +56,7 @@ def reply_for(test, mode):
 class Handler(BaseHTTPRequestHandler):
     answers, mode, model, delay, max_output = {}, "oracle", "mock", 0.0, None
     stall, stall_before, silent = 0.0, 0.0, False
-    die_after = None
+    die_after, loop = None, None
     hold, answered = None, 0   # while the hold file exists, answers after the first wait (a run that stays going)
 
     def log_message(self, *a):
@@ -94,6 +95,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.mode == "unavailable":   # like OpenRouter with no provider serving the model
             return self._json({"error": {"message": f"No endpoints found for {self.model}.", "code": 404}}, 404)
         text, calls = reply_for(test, self.mode)
+        if self.loop:
+            text += self.loop * 5000
         finish = "tool_calls" if calls else "stop"
         if req.get("max_tokens") and len(text.split()) > req["max_tokens"]:
             text, finish = " ".join(text.split()[:req["max_tokens"]]), "length"
@@ -162,11 +165,12 @@ def main(argv=None):
     p.add_argument("--silent", action="store_true")
     p.add_argument("--die-after", type=int)
     p.add_argument("--hold", help="while this file exists, every answer after the first waits")
+    p.add_argument("--loop")
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
     Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
     Handler.max_output = a.max_output
     Handler.stall, Handler.stall_before, Handler.silent = a.stall, a.stall_before, a.silent
-    Handler.die_after, Handler.hold = a.die_after, a.hold
+    Handler.die_after, Handler.hold, Handler.loop = a.die_after, a.hold, a.loop
     srv = Server(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:

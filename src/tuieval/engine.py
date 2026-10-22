@@ -2400,6 +2400,7 @@ class Engine:
                   earlier_s=sum(s.get("wall_s") or 0 for s in job.earlier), sittings=len(job.earlier))
         timeout = self.cfg["defaults"]["request_timeout_ms"] / 1000
         stall_s = (self.cfg["defaults"].get("stall_timeout_ms") or 0) / 1000 or None
+        loop_chars = int(self.cfg["defaults"].get("loop_stop_chars") or 0) or None
         headers = self.request_headers(job.model)
         # a hosted API has no /tokenize to split reasoning from answer tokens (it reports the split)
         tokenize_url = None if self.cfg["servers"][job.model["server"]].get("api_key_env") else base_url
@@ -2429,7 +2430,7 @@ class Engine:
                                                      lambda kind, text: self.emit("delta", stream=kind, text=text,
                                                                                   label=job.label),
                                                      timeout=timeout, stream=self._stream, headers=headers,
-                                                     stall_s=stall_s)
+                                                     stall_s=stall_s, loop_chars=loop_chars)
                         except client.Cancelled:
                             self._check()
                             raise Cancelled()
@@ -2466,8 +2467,8 @@ class Engine:
                     if res["error"]:
                         g = {"pass": False, "score": 0.0, "reason": res["error"]}
                     else:
-                        g = graders.grade(test, res["answer"],
-                                          {"finish": res["finish"], "tool_calls": res["tool_calls"]})
+                        g = graders.grade(test, res["answer"], {"finish": res["finish"], "tool_calls": res["tool_calls"],
+                                                                "loop": res.get("loop")})
                     log_name = self._log_request(job, test, res, meta)
                     rec = {"test": test["id"], "description": test["description"], "category": test.get("category", ""),
                            "difficulty": test.get("difficulty", "unrated"),
@@ -2475,6 +2476,7 @@ class Engine:
                            "repeat": rep, "pass": g["pass"], "score": g["score"], "reason": g["reason"],
                            "severity": g.get("severity"), "answer": res["answer"], "tool_calls": res["tool_calls"],
                            "finish": res["finish"], "reasoning_chars": len(res["reasoning"]),
+                           **({"loop": res["loop"]} if res.get("loop") else {}),
                            "log": log_name,   # logs/live/<log>: the reasoning, which the result doesn't keep
                            "answered_at": dates.now(),
                            **({"checks": g["checks"]} if "checks" in g else {}),
@@ -2598,7 +2600,8 @@ def regrade(path, packs_dir=None):
             continue
         if r["reason"].startswith(("server returned", "connection error")):
             continue
-        g = graders.grade(t, r["answer"], {"finish": r["finish"], "tool_calls": r.get("tool_calls", [])})
+        g = graders.grade(t, r["answer"], {"finish": r["finish"], "tool_calls": r.get("tool_calls", []),
+                                           "loop": r.get("loop")})
         r.update({"pass": g["pass"], "score": g["score"], "reason": g["reason"], "severity": g.get("severity"),
                   "critical_test": bool(t.get("critical_trial")), "group": t.get("group")})
         r.pop("checks", None)

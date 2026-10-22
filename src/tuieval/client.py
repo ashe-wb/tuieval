@@ -9,9 +9,12 @@ answer together with the numbers that matter for choosing a local model:
   prompt_tps     prompt processing speed, tokens/s (llama.cpp reports it)
   prompt_tokens, completion_tokens, and — when the split can be known — reasoning_tokens and
   answer_tokens (tokens_estimated=True means the split was estimated from text length)
+  loop           set when the request was ended early because the model got stuck repeating itself
+                 ({"stream": "reasoning" or "answer", "unit": the repeated text}; finish is "loop")
 """
 import http.client
 import json
+import re
 import socket
 import time
 import urllib.parse
@@ -119,17 +122,37 @@ def count_tokens(base_url, text):
         return None
 
 
+LOOP_MAX_UNIT = 64   # longest repeated unit looked for (a short line, a closing tag, a phrase)
+LOOP_EVERY = 256     # chars of new text between checks
+
+
+def loop_unit(text, min_chars):
+    """The text the end of `text` repeats, exactly and back to back, over its last min_chars or more (a unit of
+    at most LOOP_MAX_UNIT chars with a letter or digit in it, so rulers like '-----' don't count), else None."""
+    if not min_chars or len(text) < min_chars:
+        return None
+    tail = text[-min_chars:]
+    for n in range(1, LOOP_MAX_UNIT + 1):
+        if tail[n:] == tail[:-n]:          # the tail has period n: one unit over and over
+            unit = tail[-n:]
+            return unit if re.search(r"[A-Za-z0-9]", unit) else None
+    return None
+
+
 def _stalled(stall_s):
     return f"server error: stalled, no tokens for {stall_s:.0f} s after it started answering"
 
 
-def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, headers=None, stall_s=None):
+def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, headers=None, stall_s=None,
+                loop_chars=None):
     """POST {base_url}/v1/chat/completions with streaming. Returns a dict (see module docstring).
 
     on_delta(kind, text) is called for "reasoning" and "answer" text as it arrives.
     timeout bounds the whole request, keep-alive comments (OpenRouter's ": OPENROUTER PROCESSING")
     included; running out counts against the model, like any slow answer. stall_s: once tokens have
     started, this long without one is the server stalling (a server error, never the model's answer).
+    loop_chars: when the reasoning or the answer ends in one short unit repeated over this many chars, the
+    model is stuck in a loop that would run to max_tokens: the request ends there (finish "loop").
     """
     stream = stream or Stream()
     body = dict(body, stream=True, stream_options={"include_usage": True})
@@ -138,6 +161,7 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
     out = {"answer": "", "reasoning": "", "tool_calls": [], "finish": None, "usage": {}, "timings": {},
            "ttft_s": None, "total_s": None, "error": None}
     reasoning, answer, tools = [], [], {}
+    tails, unchecked = {"reasoning": "", "answer": ""}, {"reasoning": 0, "answer": 0}   # for loop_chars
     done = False                      # [DONE] seen
     start = last = time.time()
     try:
@@ -195,6 +219,17 @@ def stream_chat(base_url, body, on_delta=None, timeout=1800, stream=None, header
                 if text:
                     answer.append(text)
                     on_delta and on_delta("answer", text)
+                for kind, piece in (("reasoning", think), ("answer", text)):
+                    if loop_chars and piece:
+                        tails[kind] = (tails[kind] + piece)[-loop_chars:]
+                        unchecked[kind] += len(piece)
+                        if unchecked[kind] >= LOOP_EVERY:
+                            unchecked[kind] = 0
+                            unit = loop_unit(tails[kind], loop_chars)
+                            if unit:
+                                out["finish"], out["loop"] = "loop", {"stream": kind, "unit": unit}
+            if out.get("loop"):
+                break
         if not out["error"] and not done and out["finish"] is None:
             # the stream just ended: a server that crashed or dropped the connection, not the model's answer
             out["error"] = "connection error: the stream ended before the server finished (no finish reason)"

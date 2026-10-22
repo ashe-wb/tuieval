@@ -198,6 +198,10 @@ On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM,
 | `thinking_param` | `reasoning` to send `[sampling] enable_thinking` as OpenRouter's `reasoning.enabled` |
 | `headers` | extra HTTP headers |
 
+## Answers stuck in a loop
+
+A model sometimes gets stuck repeating one short piece of text (a closing tag, "wait, ", a line) until it runs out of `max_tokens`, which can take many minutes and fails anyway. tuieval watches the reasoning and the answer as they stream: once either ends in one unit of up to 64 characters repeated back to back over the last `loop_stop_chars` characters (2000 by default; units without a letter or digit, like `-----`, don't count), it ends the request there. The answer fails with `LOOP: the answer kept repeating '…'`, its finish is `loop` (the answer view says so), Results → Insights counts it as cut off and `tuieval compare` in **rep**. Set `loop_stop_chars = 0` in `[defaults]` to let loops run to the end, as before.
+
 ## Built-in servers and defaults
 
 A workspace's `models.toml` only needs what differs from these. `[defaults]` fill in key by key. `[sampling]` applies only when `models.toml` has no `[sampling]` section at all, because sampling is part of every result's fingerprint. A server you define replaces the built-in one with the same name; to change one setting, copy the whole block into `models.toml` and edit it. `tuieval add` adds a `[servers.<name>]` block with just a `url` when it finds a model on a server that's already running.
@@ -210,6 +214,8 @@ A workspace's `models.toml` only needs what differs from these. `[defaults]` fil
 repeat = 3
 request_timeout_ms = 1800000   # per request; long thinking runs need it
 stall_timeout_ms = 300000      # no tokens this long once answering began: the server stalled (retried, not counted)
+loop_stop_chars = 2000         # an answer (or reasoning) ending in one short unit repeated over this many chars is
+                               # stuck in a loop: stopped there and failed as LOOP, not left to run to max_tokens (0: off)
 over_budget = "flag"           # answers past the max_tokens sent (a provider that didn't stop them): "flag" or "fail"
 # reference = "<label>"        # the model Results → Insights compares against by default
 # agent = "<name>"             # the [agents.<name>] that runs agent packs (see docs/agent-packs.md)
