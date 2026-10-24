@@ -711,6 +711,117 @@ class Retest(unittest.TestCase):
         self.assertEqual(self.passes("apps"), dict.fromkeys("abcd", True))
 
 
+class AddRepeats(unittest.TestCase):
+    """A chosen repeat count adds rounds to the saved answers (×1 + 2 = ×3); a retest, blank and a
+    resumed run don't add more."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, "ws")
+        tuieval(self.tmp.name, "init", self.ws)
+        d = os.path.join(self.ws, "packs", "apps")
+        os.makedirs(d)
+        write(os.path.join(d, "pack.toml"), 'label = "apps"\nscreen = 4\n[certify]\nrepeat = 1\n'
+                                            '[gate]\nmin_accuracy = 0.1\n')
+        write(os.path.join(d, "tests.yaml"), "".join(
+            f"- {{id: {t}, input: question {t}, expected: 1, reference: 'ANSWER: 1', wrong: ['ANSWER: 2'], "
+            "difficulty: easy}\n" for t in "abcd"))
+        port = free_port()
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(f'\n[servers.m]\nurl = "http://127.0.0.1:{port}"\n')
+        self.mock = Mock(os.path.join(self.ws, "packs"), "oracle", port=port)
+        tuieval(self.ws, "add", "mock", "--server", "m", "--label", "m")
+        tuieval(self.ws, "run", "--tier", "certify")
+        self.path = os.path.join(self.ws, "results", "m", "apps.json")
+
+    def tearDown(self):
+        self.mock.stop()
+        self.tmp.cleanup()
+
+    def rounds(self):
+        out = {}
+        for r in json.loads(read(self.path))["results"]:
+            out.setdefault(r["test"], set()).add(r["repeat"])
+        return {t: sorted(v) for t, v in out.items()}
+
+    def test_cli_adds_rounds(self):
+        out = tuieval(self.ws, "run", "--tier", "certify", "--repeat", "2").stdout
+        self.assertIn("×1 → ×3", out)
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1, 2]))
+        tuieval(self.ws, "run", "--tier", "certify")                      # blank: the pack's 1, done
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1, 2]))
+
+    def test_retest_counts_from_none(self):
+        tuieval(self.ws, "run", "--tier", "certify", "--repeat", "2", "--retest")
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1]))
+
+    def test_picked_tests_then_top_up(self):
+        tuieval(self.ws, "run", "--tier", "certify", "--tests", "apps:a", "--repeat", "1")
+        self.assertEqual(self.rounds(), {"a": [0, 1], "b": [0], "c": [0], "d": [0]})
+        tuieval(self.ws, "run", "--tier", "certify", "--repeat", "1")    # the most rounds (2) + 1, for all
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1, 2]))
+
+    def test_resumed_run_adds_no_more(self):
+        from tuieval import engine
+        e = engine.Engine(root=self.ws)
+        j = e.plan(["m"], ["apps"], 2, "certify", False, {})[0]
+        self.assertEqual((j.base, j.repeat, j.done), (1, 3, 4))
+        rows = [dict(r, repeat=1) for r in json.loads(read(self.path))["results"] if r["test"] in "ab"]
+        write(self.path + ".partial.jsonl", "".join(json.dumps(l) + "\n" for l in [e._partial_header(j)] + rows))
+        out = tuieval(self.ws, "run", "--tier", "certify", "--repeat", "2").stdout   # the same +2, resumed
+        self.assertIn("resuming after 6", out)
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1, 2]))
+
+    def test_preset_repeat_is_a_total(self):
+        from tuieval import engine
+        engine.save_preset(os.path.join(self.ws, "presets.toml"), "two", ["m"], ["apps"], 2)
+        tuieval(self.ws, "run", "--tier", "certify", "--preset", "two")
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1]))        # ×1 topped up to 2
+        tuieval(self.ws, "run", "--tier", "certify", "--preset", "two")       # already 2: nothing new
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1]))
+        tuieval(self.ws, "run", "--tier", "certify", "--preset", "two", "--repeat", "1")   # typed: adds
+        self.assertEqual(self.rounds(), dict.fromkeys("abcd", [0, 1, 2]))
+
+    def estimate(self, steps):
+        code = textwrap.dedent("""
+            import asyncio
+            from tuieval.tui import EvalsApp
+            from textual.widgets import SelectionList, Input
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 50)) as pilot:
+                    await pilot.pause()
+                    s = app.screen
+                    s.query_one("#suites", SelectionList).select("apps")
+                    s.selected_models = {"m"}
+                    s.refresh_models()
+                    s.query_one("#tier-certify").value = True
+            %s
+                    await pilot.pause()
+                    print(str(s.query_one("#estimate").render()))
+            asyncio.run(go())
+        """) % textwrap.indent(textwrap.dedent(steps), " " * 8)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""))
+        return p.stdout + p.stderr
+
+    def test_tui_estimate_says_more(self):
+        self.assertIn("2 more (×1 → ×3) repeat(s) = 8 answers", self.estimate("""
+            s.query_one("#repeat", Input).value = "2"
+        """))
+
+    def test_tui_preset_repeat_is_a_total(self):
+        out = self.estimate("""
+            s.apply_selection({"models": ["m"], "packs": ["apps"], "repeat": 2, "repeat_total": True}, quiet=True)
+            s.query_one("#tier-certify").value = True
+            await pilot.pause()
+            print(str(s.query_one("#estimate").render()))
+            s.query_one("#repeat", Input).value = "3"     # typed over: adds again
+        """)
+        self.assertIn("2 in all (preset) repeat(s) = 4 answers", out)
+        self.assertIn("3 more (×1 → ×4) repeat(s) = 12 answers", out)
+
+
 class Parallel(unittest.TestCase):
     """Several models at a time (parallel_models / --parallel): each runs in its own lane on its own
     port, answers note the models they ran alongside, and the scheduler keeps the memory and

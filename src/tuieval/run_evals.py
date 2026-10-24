@@ -101,7 +101,8 @@ class Printer:
             "so the server may be returning cached answers rather than fresh ones", RED)
 
     def on_job_started(self, job, resumed, earlier_s=0, sittings=0):
-        say(f"{job.key}: {job.count} tests x {job.repeat} repeats" + (f", resuming after {resumed}" if resumed else "")
+        reps = f"{job.repeat - job.base} more repeats (×{job.base} → ×{job.repeat})" if job.base else f"{job.repeat} repeats"
+        say(f"{job.key}: {job.count} tests x {reps}" + (f", resuming after {resumed}" if resumed else "")
             + (f" ({earlier_s / 60:.0f} min over {sittings} earlier sitting(s))" if sittings else ""))
 
     def on_request_started(self, job, test, test_id, has_image, repeat, difficulty="unrated"):
@@ -792,8 +793,9 @@ def main(argv=None):
     p.add_argument("--stop-early", action="store_true",
                    help="stop each pack once its FAIL is certain (a critical failure, or a bar out of reach), "
                         "asking first what models fail most (default: each pack's stop_early)")
-    p.add_argument("--repeat", type=int, help="times each question is asked, any tier (default: 1 for smoke and "
-                                                  "screen, the pack's certification count for certify)")
+    p.add_argument("--repeat", type=int, help="rounds to add: each question is asked N more times on top of its "
+                                                  "saved answers (with --retest, N in all). Default: up to 1 for "
+                                                  "smoke and screen, the pack's certification count for certify")
     p.add_argument("--tier", choices=engine.TIERS, default="screen",
                    help="smoke: 3 tests; screen (default): a spread sample; certify: everything, with repeats")
     p.add_argument("--smoke", action="store_const", const="smoke", dest="tier", help="same as --tier smoke")
@@ -838,12 +840,14 @@ def main(argv=None):
         sys.exit("no models to run yet: tuieval add <GGUF path or model id>, or name a hosted one with "
                  "--only openrouter:<model id>" if not models else
                  "no local models; hosted ones (they cost money) run only when named: --only <label>")
+    repeat_total = False
     if args.preset:
         presets = engine.load_presets(os.path.join(os.path.dirname(os.path.abspath(models_file(args.models))),
                                                    "presets.toml"))
         if args.preset not in presets:
             sys.exit(f"unknown preset {args.preset!r}; presets: {', '.join(presets) or 'none (save one in the TUI with p)'}")
         labels, pack_names, preset_repeat, tests = engine.resolve_preset(e.cfg, presets[args.preset], list(e.packs))
+        repeat_total = not args.repeat and bool(preset_repeat)   # a preset's count is the rounds in all
         args.repeat = args.repeat or preset_repeat
     if args.packs:
         pack_names = [x.strip() for x in args.packs.split(",")]
@@ -853,7 +857,8 @@ def main(argv=None):
     if args.tests:
         tests, pack_names = parse_tests(args.tests, pack_names if (args.packs or args.preset) else None, e.packs)
     try:
-        jobs = e.plan(labels, pack_names, args.repeat, args.tier, args.force, tests, args.stop_early or None)
+        jobs = e.plan(labels, pack_names, args.repeat, args.tier, args.force, tests, args.stop_early or None,
+                      repeat_total)
     except packs_mod.PackError as err:
         sys.exit(str(err))
 
