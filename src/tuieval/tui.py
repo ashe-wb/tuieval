@@ -1025,6 +1025,11 @@ class SetupScreen(Screen):
                 list(self.query_one("#suites", SelectionList).selected), repeat,
                 self.tier(), self.query_one("#force", Checkbox).value)
 
+    def repeat_total(self):
+        """Is the Repeats count the rounds in all? Yes while it's a loaded preset's; a typed one adds rounds."""
+        value = self.query_one("#repeat", Input).value
+        return bool(value) and value == getattr(self, "preset_repeat", None)
+
     def parallel(self):
         """Models at a time for the next run: the field, or blank for this machine's parallel_models."""
         try:
@@ -1088,16 +1093,21 @@ class SetupScreen(Screen):
                        "[b]s[/b] to start." + self.queue_hint())
             return
         picks = self.current_picks(suites)
-        jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks)
+        total = self.repeat_total()
+        jobs = self.app.engine.plan(labels, suites, repeat, tier, force, picks, total=total)
         rerun = not any(j.status == "waiting" for j in jobs)
         if rerun:   # everything has results: Start runs it again, so estimate that
-            jobs = self.app.engine.plan(labels, suites, repeat, tier, True, picks)
+            jobs = self.app.engine.plan(labels, suites, repeat, tier, True, picks, total=total)
         run = [j for j in jobs if j.status == "waiting"]
         skipped = [j for j in jobs if j.status == "skipped"]
         secs, notes = self.app.engine.estimate_seconds(jobs)
-        todo = sum(j.total for j in run)
-        reps = sorted({j.repeat for j in jobs})
-        reps_text = "/".join(map(str, reps)) + (" (pack default)" if repeat is None and len(reps) > 1 else "")
+        todo = sum(j.total - j.done for j in run)
+        reps = sorted({j.repeat - j.base for j in jobs})
+        reps_text = "/".join(map(str, reps)) + (" (pack default)" if repeat is None and len(reps) > 1 else "") \
+            + (" in all (preset)" if total else "")
+        bases = sorted({j.base for j in run if j.base})
+        if bases:   # a chosen count adds to the rounds already answered
+            reps_text += " more" + " [dim](" + ", ".join(f"×{b} → ×{b + repeat}" for b in bases) + ")[/dim]"
         text = (f"[b]{tier.title()}[/b]: [b]{len(labels)}[/b] model(s) × [b]{len(suites)}[/b] pack(s) × "
                 f"[b]{reps_text}[/b] repeat(s) = "
                 f"[b]{todo:,}[/b] answers · about [b]{fmt_secs(secs)}[/b]"
@@ -1158,6 +1168,7 @@ class SetupScreen(Screen):
         for name in sel.get("packs", []):
             if name in e.packs:
                 packs.select(name)
+        self.preset_repeat = str(sel["repeat"]) if sel.get("repeat") and sel.get("repeat_total") else None
         self.query_one("#repeat", Input).value = str(sel["repeat"]) if sel.get("repeat") else ""
         if "parallel" in sel:
             self.query_one("#parallel", Input).value = str(sel["parallel"]) if sel["parallel"] else ""
@@ -1201,10 +1212,11 @@ class SetupScreen(Screen):
             self.notify("Select at least one eval pack and one model.", severity="warning")
             return
         picks = self.current_picks(suites)
-        sel = {"models": labels, "packs": suites, "repeat": repeat, "tier": tier, "force": force, "tests": picks,
-               "parallel": self.parallel(), "stop_early": self.query_one("#stop-early", Checkbox).value}
+        total = self.repeat_total()
+        sel = {"models": labels, "packs": suites, "repeat": repeat, "repeat_total": total, "tier": tier, "force": force,
+               "tests": picks, "parallel": self.parallel(), "stop_early": self.query_one("#stop-early", Checkbox).value}
         e = self.app.engine
-        jobs = e.plan(labels, suites, repeat, tier, True, picks)
+        jobs = e.plan(labels, suites, repeat, tier, True, picks, total=total)
         if not any(j.status == "waiting" for j in jobs):
             reasons = sorted({j.note for j in jobs if j.status == "skipped"})
             self.notify(f"Nothing selected can run: {'; '.join(reasons)}", severity="warning")
@@ -1212,7 +1224,7 @@ class SetupScreen(Screen):
         self.app.save_state({k: v for k, v in sel.items() if k != "models"})   # models aren't remembered
         # Packs whose earlier answers a start would set aside (Retest, everything already done, or
         # other questions or settings): the user picks per pack before anything moves.
-        rows, rerun = retest_rows(e, labels, suites, repeat, tier, picks, force)
+        rows, rerun = retest_rows(e, labels, suites, repeat, tier, picks, force, total)
 
         def go(choices):
             if choices is None:
@@ -1640,7 +1652,7 @@ class PresetsScreen(ModalScreen):
         name = list(self.presets)[event.option_index]
         labels, packs, repeat, tests = engine.resolve_preset(self.app.engine.cfg, self.presets[name],
                                                              list(self.app.engine.packs))
-        self.dismiss(("load", {"models": labels, "packs": packs, "repeat": repeat, "tests": tests}))
+        self.dismiss(("load", {"models": labels, "packs": packs, "repeat": repeat, "repeat_total": True, "tests": tests}))
 
     @on(Button.Pressed, "#save")
     @on(Input.Submitted, "#name")
@@ -1765,7 +1777,8 @@ class QueuedRun:
         """(jobs, None), or (None, why it can't run) now."""
         sel = self.sel
         jobs = [j for j in eng.plan(sel["models"], sel["packs"], sel["repeat"], sel["tier"], self.retest,
-                                    self.tests(eng), sel.get("stop_early") or None) if j.key not in self.leave]
+                                    self.tests(eng), sel.get("stop_early") or None, sel.get("repeat_total", False))
+                if j.key not in self.leave]
         waiting = [j for j in jobs if j.status == "waiting"]
         if not waiting:
             return None, "every pack left is already done"
@@ -1850,13 +1863,13 @@ class RetestRow:
 CHOICE_TEXT = {"zero": "[b red]Zero[/b red]", "continue": "[b green]Continue[/b green]", "leave": "[dim]Leave out[/dim]"}
 
 
-def retest_rows(eng, labels, packs, repeat, tier, picks, force):
+def retest_rows(eng, labels, packs, repeat, tier, picks, force, total=False):
     """(rows, rerun): the packs Start would set earlier answers aside for, or could. rerun: Retest is
     off but everything selected is done, so Start runs it again. A pack whose questions or settings
     changed can't continue (Zero or Leave out); with Retest every pack with answers starts at Zero,
     without it a pack that can resume continues."""
-    base = eng.plan(labels, packs, repeat, tier, False, picks)
-    zero = {j.key: j for j in eng.plan(labels, packs, repeat, tier, True, picks)}
+    base = eng.plan(labels, packs, repeat, tier, False, picks, total=total)
+    zero = {j.key: j for j in eng.plan(labels, packs, repeat, tier, True, picks, total=total)}
     rerun = not force and not any(j.status == "waiting" for j in base)
     rows = []
     for b in base:

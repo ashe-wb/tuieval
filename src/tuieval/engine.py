@@ -443,7 +443,7 @@ def save_preset(path, name, labels, packs, repeat, tests=None):
 class Job:
     model: dict
     pack: packs_mod.Pack
-    repeat: int
+    repeat: int             # rounds each question has once it's done (earlier ones included)
     tests: list             # the tests this tier runs (or the ones picked)
     out_path: str
     sampling: dict
@@ -465,6 +465,7 @@ class Job:
     stop_early: bool = False  # stop once the pack's FAIL is certain (verdict.fail_certain)
     first: list = dataclasses.field(default_factory=list)   # test ids round 1 asks first (most failed)
     claimed: bool = False   # its model's server took it on: it can no longer be removed from the run
+    base: int = 0           # rounds already in its result file that a chosen repeat count adds to
 
     @property
     def label(self):
@@ -1148,6 +1149,17 @@ class Engine:
         redo = {t["id"] for t in job.tests}
         return [r for r in rows if r["test"] not in redo]
 
+    def saved_rounds(self, job):
+        """The most rounds any of the job's questions has in its finished result file (0 when the file
+        doesn't match the job's questions and settings). An unfinished run's answers don't count, so
+        resuming one doesn't add more rounds."""
+        data = self._result(job.out_path)
+        if not data or data["pack"]["fingerprint"] != job.pack.fingerprint or not settings_match(data, job.settings):
+            return 0
+        ids = {t["id"] for t in job.tests}
+        rounds = collections.Counter(t for t, _ in {(r["test"], r["repeat"]) for r in data["results"] if r["test"] in ids})
+        return max(rounds.values(), default=0)
+
     def _fill_progress(self, job):
         """Set a job's done/passed/failed and earlier sittings from what's stored."""
         kept, new, job.earlier = self._stored(job)
@@ -1212,10 +1224,13 @@ class Engine:
         return not current and header_matches(head, pack.fingerprint, settings)
 
     # ---- planning
-    def plan(self, labels, pack_names, repeat=None, tier="screen", force=False, tests=None, stop_early=None):
+    def plan(self, labels, pack_names, repeat=None, tier="screen", force=False, tests=None, stop_early=None,
+             total=False):
         """Jobs for models x packs. tier: smoke (3 tests), screen (a spread sample), certify (all
         tests). repeat: times each question is asked; None = the tier default (1 for smoke and
-        screen, the pack's certification repeats for certify). tests: {pack: [test ids]} runs just
+        screen, the pack's certification repeats for certify), counted in total; a number adds that
+        many rounds to the ones already in the result file (a retest starts from none), or with total
+        (a preset's count) is the rounds in all. tests: {pack: [test ids]} runs just
         those tests of a pack instead of the tier's sample (unknown ids raise PackError). Earlier
         matching results are kept and only missing answers are run, unless force; force with
         picked tests reruns those and keeps the pack's other answers. force is True, False, or the
@@ -1240,6 +1255,9 @@ class Engine:
                     job.first = self.most_failed_first(pack)
                 sv = self.serving(m)
                 status = self.result_status(label, name, tier)
+                if repeat and not total and job.merge and not job.redo and not (status or "").startswith("outdated"):
+                    job.base = self.saved_rounds(job)
+                    job.repeat = job.base + repeat
                 job.discards = self._discards(job)
                 missing = [n for n in pack.modules if not importlib.util.find_spec(n)]
                 no_agent = agents.problem(self.cfg, pack, self.root) if pack.kind == "agent" else None
@@ -1273,6 +1291,8 @@ class Engine:
                         job.note = f"{job.done} of {job.total} done earlier, running the rest"
                 if job.status != "waiting":
                     job.discards = []
+                elif job.base:
+                    job.note = "; ".join(filter(None, [job.note, f"×{job.base} → ×{job.repeat}"]))
                 for what, n, why in job.discards:
                     if what == "unfinished":   # (a finished file's reason is already the note)
                         job.note = "; ".join(filter(None, [job.note, f"{n} unfinished answers set aside ({why})"]))
