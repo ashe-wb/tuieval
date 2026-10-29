@@ -2451,6 +2451,52 @@ class FirstRun(unittest.TestCase):
             "['once [yellow]×1[/]', 'thrice [dim]×3[/]']",     # Comparison: only the questions both answered
         ], out.stderr[-2000:])
 
+    def test_pass_rate_counts_every_answer(self):
+        from tuieval import compare
+        row = {"suite": "p", "latency": 1000, "tokens": 10, "truncated": False, "gen_tps": 20.0, "prompt_tps": None}
+        oks = {"a": {"q0": [True, True], "q1": [True, False], "q2": [False, False, False, True]},   # ×2, ×2, ×4
+               "b": {"q0": [True], "q1": [False], "q2": [False]},
+               "c": {"q0": [False], "q1": [False], "q2": [False]}}
+        rows = [dict(row, model=m, test=f"p: {q}", ok=ok, repeat=r)
+                for m, qs in oks.items() for q, v in qs.items() for r, ok in enumerate(v)]
+        out = {r["model"]: r for r in compare.compare_models(compare.per_question(rows), list(oks))}
+        self.assertEqual(out["a"]["passed"], 1)                            # strict: right on every repeat
+        self.assertAlmostEqual(out["a"]["pass_rate"], (1 + 0.5 + 0.25) / 3)   # each question weighs the same
+        self.assertAlmostEqual(out["b"]["pass_rate"], 1 / 3)               # ×1: the same as passed / questions
+        self.assertEqual(out["c"]["pass_rate"], 0)
+
+    def test_comparison_shows_pass_rate(self):
+        tuieval(self.ws, "add", "my-model", "--server", "local")
+        code = textwrap.dedent("""
+            import asyncio
+            from rich.text import Text
+            from tuieval import compare
+            from tuieval.tui import EvalsApp, ResultsScreen
+            from textual.widgets import DataTable, TabbedContent
+            oks = {"steady": [[True, True], [True, True]], "shaky": [[True, True], [True, False]]}
+            rows = [{"model": m, "suite": "p", "test": f"p: q{q}", "ok": ok, "latency": 1000, "tokens": 10,
+                     "truncated": False, "gen_tps": 20.0, "prompt_tps": None, "repeat": r}
+                    for m, qs in oks.items() for q, v in enumerate(qs) for r, ok in enumerate(v)]
+            async def go():
+                app = EvalsApp({})
+                async with app.run_test(size=(160, 40)) as pilot:
+                    await pilot.pause()
+                    app.push_screen(ResultsScreen())
+                    await pilot.pause(0.5)
+                    app.screen.query_one(TabbedContent).active = "tab-per-question"
+                    await pilot.pause(0.3)
+                    app.screen.fill_pq_summary(compare.per_question(rows), list(oks))
+                    await pilot.pause(0.3)
+                    t = app.screen.query_one("#pq-summary", DataTable)
+                    i = [str(c.label) for c in t.ordered_columns].index("Pass rate")
+                    print(str(t.ordered_columns[i - 1].label), [t.get_row_at(n)[i] for n in range(t.row_count)])
+            asyncio.run(go())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=dict(os.environ, TUIEVAL_HOME=self.ws, TUIEVAL_DETECT_PORTS=""), timeout=60)
+        # right after Passed; the best in bold green
+        self.assertEqual(out.stdout.strip(), "Passed ['[bold green]100%[/bold green]', '75%']", out.stderr[-2000:])
+
     def test_results_open_on_pta_index(self):
         tuieval(self.ws, "add", "my-model", "--server", "local")
         code = textwrap.dedent("""

@@ -420,7 +420,8 @@ def complete_models(rows, suite, test_ids=None):
 def compare_models(tests, models):
     """Per model over per_question entries that all `models` answered: passes, token and time
     totals/medians (totals add each question's median over repeats, so repeats don't inflate them), questions where it used the fewest tokens / was fastest (among passing
-    answers for tokens; ties count for each), answers cut off, mean score (partial credit)."""
+    answers for tokens; ties count for each), answers cut off, mean score (partial credit),
+    pass rate (answers right with repeats, each question weighing the same)."""
     out = []
     for m in models:
         cs = [t["cells"][m] for t in tests]
@@ -438,6 +439,7 @@ def compare_models(tests, models):
         rs = [r for c in cs for r in c["rows"]]
         out.append({"model": m, "n": len(cs), "passed": passed, "total_tokens": total,
                     "score": statistics.fmean(c["score"] for c in cs) if cs else None,
+                    "pass_rate": statistics.fmean(c["passed"] / c["n"] for c in cs) if cs else None,
                     "avg_pp_tps": _rate([(r.get("prompt_tokens"), r["prompt_tps"]) for r in rs]),
                     "avg_gen_tps": _rate([(r["tokens"], r["gen_tps"]) for r in rs]),
                     "med_tokens": median(c["tokens"] for c in cs), "med_secs": median(c["secs"] for c in cs),

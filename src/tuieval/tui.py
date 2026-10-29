@@ -3487,10 +3487,10 @@ class ResultsScreen(Screen):
         self.pq_summary_args = (tests, models)    # to refit on resize
         rows = compare.compare_models(shared, models)
         # short headings so every column fits; the line above the table says what each one is
-        header = ("Model", "Time", "Passed", "Med tok", "Tokens", "Tok/✓", "Med s", "Prompt t/s", "Gen t/s",
-                  "Fewest", "Fastest", "Cut off")
+        header = ("Model", "Time", "Passed", "Pass rate", "Med tok", "Tokens", "Tok/✓", "Med s", "Prompt t/s",
+                  "Gen t/s", "Fewest", "Fastest", "Cut off")
         best = {k: max((r[k] for r in rows if r[k] is not None), default=None)
-                for k in ("passed", "fewest", "fastest", "avg_pp_tps", "avg_gen_tps")}
+                for k in ("passed", "pass_rate", "fewest", "fastest", "avg_pp_tps", "avg_gen_tps")}
         low = {k: min(r[k] for r in rows if r[k] is not None) if any(r[k] is not None for r in rows) else None
                for k in ("med_tokens", "total_tokens", "tokens_per_pass", "med_secs", "total_secs")}
 
@@ -3505,6 +3505,7 @@ class ResultsScreen(Screen):
                           hi(tt, ("-" if not tt else f"{tt:.1f}s" if tt < 60 else fmt_secs(tt)), "total_secs", "min"),
                           hi(r["passed"], f"{r['passed']}/{r['n']}", "passed", "max")
                           + (f" [dim]{r['score']:.0%}[/dim]" if r["passed"] < r["n"] and r["score"] else ""),
+                          hi(r["pass_rate"], f"{r['pass_rate']:.0%}", "pass_rate", "max"),
                           hi(r["med_tokens"], f"{r['med_tokens']:,.0f}" if r["med_tokens"] else "-", "med_tokens", "min"),
                           hi(r["total_tokens"], f"{r['total_tokens']:,.0f}", "total_tokens", "min"),
                           hi(r["tokens_per_pass"], f"{r['tokens_per_pass']:,.0f}" if r["tokens_per_pass"] else "-",
@@ -3517,6 +3518,9 @@ class ResultsScreen(Screen):
                           hi(r["fastest"], str(r["fastest"]), "fastest", "max"),
                           (f"[red]{r['cut']}[/red]" if r["cut"] else "0")
                           + (f" [yellow]+{r['over']} over[/yellow]" if r.get("over") else "")])
+        if all(t["cells"][m]["n"] == 1 for t in shared for m in models):   # one answer each: Passed says it all
+            i = header.index("Pass rate")
+            header, cells = header[:i] + header[i + 1:], [c[:i] + c[i + 1:] for c in cells]
         table.add_columns(*header)
         tag_w = max(Text.from_markup(tag).cell_len + 1 for tag in tags.values())
         cells = fit_first_column(header, cells, (self.size.width or self.app.size.width) - 3 - tag_w,
@@ -3537,7 +3541,7 @@ class ResultsScreen(Screen):
                      "shared the machine's speed: compare their times with care.[/yellow]")
         title.update(line + "  [dim]Time / Tokens: each question's median, added up. Med tok / Med s: median "
                      "per answer. Tok/✓: tokens per answer right. Prompt t/s / Gen t/s: all tokens over all the time "
-                     "they took (cached prompts left out). Passed: questions right on every repeat, then the score (partial credit, e.g. checks passed) when some failed. Fewest / Fastest: questions won; ties count for both. "
+                     "they took (cached prompts left out). Passed: questions right on every repeat, then the score (partial credit, e.g. checks passed) when some failed. Pass rate (with repeats): answers right, repeats included (each question weighs the same). Fewest / Fastest: questions won; ties count for both. "
                      "Cut off: answers that hit max_tokens. ×n beside a name: answers per question.[/dim]")
 
     @staticmethod
