@@ -1691,7 +1691,7 @@ class PTAIndex(unittest.TestCase):
         rows = [row("fast", "q1", True, 2), row("fast", "q2", False, 2),
                 row("slow", "q1", True, 8), row("slow", "q2", True, 4), row("slow", "q2", True, 6, repeat=1),
                 row("slow", "q3", True, 100)]               # only slow answered q3: not compared
-        res = pta.index(rows)
+        res = pta.index(rows, min_score=0)    # fast scores 50%: kept
         self.assertEqual(res["questions"], 2)
         by = {x["model"]: x for x in res["models"]}
         self.assertEqual(by["fast"]["total_s"], 4)
@@ -1776,6 +1776,30 @@ class PTAIndex(unittest.TestCase):
         self.assertIn("only server errors: down", legend)
         picked = pta.index(rows, ["a", "few"])      # picked by hand: compared anyway
         self.assertEqual((picked["questions"], picked["left_out"]), (1, []))
+
+    def test_low_scores_left_out_by_default(self):
+        from tuieval import pta
+
+        def row(model, test, ok):
+            return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "score": 1.0 if ok else 0.0,
+                    "latency": 1000, "tokens": 10, "truncated": False, "gen_tps": None, "repeat": 0}
+        rows = ([row("good", f"q{i}", True) for i in range(10)]
+                + [row("ok", f"q{i}", i != 0) for i in range(10)]                # 90%
+                + [row("weak", f"q{i}", i < 5) for i in range(8)])               # 62.5%, skipped q8 and q9
+        res = pta.index(rows)
+        self.assertEqual([x["model"] for x in res["models"]], ["good", "ok"])
+        self.assertEqual(res["questions"], 10)        # compared again without it: q8 and q9 count now
+        self.assertEqual(res["low_score"], [("weak", 62.5)])
+        self.assertIn("scored below 85%", "\n".join(pta.left_out_lines(res)))
+        self.assertIn("weak (62.5%)", "\n".join(pta.left_out_lines(res)))
+        picked = pta.index(rows, ["good", "weak"])     # picked by hand: shown whatever the score
+        self.assertEqual(([x["model"] for x in picked["models"]], picked["low_score"]), (["good", "weak"], []))
+        low = [r for r in rows if r["model"] != "good"]
+        self.assertEqual(pta.index([r for r in low if r["model"] == "weak"])["low_score"], [])   # all low: kept
+        self.assertEqual([x["model"] for x in pta.index(low)["models"]], ["ok"])
+        self.assertEqual([x["model"] for x in pta.index(rows, min_score=0)["models"]], ["good", "ok", "weak"])
+        self.assertEqual([x["model"] for x in pta.index(rows, min_score=95)["models"]], ["good"])
+        self.assertIn("scored below 95%", "\n".join(pta.left_out_lines(pta.index(rows, min_score=95))))
 
     def test_results_sort_values(self):
         from tuieval.tui import diff_badge, sort_cell, sort_key, sort_value
@@ -1964,7 +1988,8 @@ class PTAIndex(unittest.TestCase):
             finally:
                 right.stop()
                 wrong.stop()
-            out = tuieval(ws, "pta").stdout
+            self.assertIn("scored below 85%", tuieval(ws, "pta").stdout)     # hosted (0%) left out by default
+            out = tuieval(ws, "pta", "--min-score", "0").stdout
             self.assertIn("Compared on the 4 questions all 2 model(s) answered", out)
             bars = {l.split()[0]: l for l in out.splitlines() if "█" in l}
             self.assertEqual((bars["good"].count("1.0×"), "100%" in bars["good"]), (2, True))
@@ -1983,6 +2008,7 @@ class PTAIndex(unittest.TestCase):
                     app = EvalsApp({})
                     async with app.run_test(size=(180, 60)) as pilot:
                         await pilot.pause()
+                        app.pta_min_score = 0                                   # hosted scores 0%
                         app.push_screen(ResultsScreen())
                         await pilot.pause(0.5)
                         t = app.screen.query_one("#pta", DataTable)

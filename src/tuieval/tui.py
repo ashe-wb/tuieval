@@ -2934,6 +2934,7 @@ class ResultsScreen(Screen):
         self.smoke_dir = smoke_dir
 
     def compose(self) -> ComposeResult:
+        from . import pta
         yield Header()
         with Horizontal(id="results-top"):
             yield Static(id="results-info")
@@ -2945,6 +2946,9 @@ class ResultsScreen(Screen):
                     yield Select([("All packs", "")], id="pta-pack", allow_blank=False, value="")
                     yield Select([("By accuracy", "accuracy"), ("By score", "score")], id="pta-sort",
                                  allow_blank=False, value="accuracy")
+                    yield Select([("Any score", 0)] + [(f"Score ≥ {n}%", n) for n in pta.MIN_SCORES if n],
+                                 id="pta-min-score", allow_blank=False,
+                                 value=getattr(self.app, "pta_min_score", pta.MIN_SCORE))
                     yield Button("Models: all", id="pta-models")
                 yield Static("[dim]P parsimony (tokens): tokens used, reasoning and answer. T time: total time. "
                              "A accuracy: answers right. Verdicts and critical failures are in Production "
@@ -3275,6 +3279,13 @@ class ResultsScreen(Screen):
         out = insights.panels(rows, models, e.packs, ref, bases, by, engine=e if main else None)
         body.update("\n\n".join(insights.render(p, i) for i, p in enumerate(out, 1)))
 
+    @on(Select.Changed, "#pta-min-score")
+    def pta_min_score_changed(self, event):
+        """The minimum score: models below it are left out of the PTA index unless picked (kept for the session)."""
+        self.app.pta_min_score = event.value
+        if getattr(self, "rows", None) is not None:
+            self.fill_pta()
+
     @on(Select.Changed, "#pta-sort")
     def pta_sort_changed(self):
         """The Sort dropdown orders the bars and the table, taking over from a column sorted by a click."""
@@ -3351,9 +3362,10 @@ class ResultsScreen(Screen):
             self.query_one("#pta-bars", Static).update("")
             self.query_one("#pta-left-out", Static).update("")
             return
-        # none picked: every model with enough answers (pta.index leaves out the rest, and says so)
+        # none picked: every model with enough answers and score (pta.index leaves out the rest, and says so)
         result = pta.index(rows, sorted(chosen) or None, pta.memory_gb(self.infos),
-                           self.query_one("#pta-sort", Select).value or "accuracy")
+                           self.query_one("#pta-sort", Select).value or "accuracy",
+                           self.query_one("#pta-min-score", Select).value or 0)
         self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
         self.pta_result = result
         removed = [m for m in self.pta_removed_now() if m in present]
@@ -3700,6 +3712,7 @@ class EvalsApp(App):
     #ins-body { height: 1fr; }
     #pta-controls Select { width: 28; margin-right: 1; }
     #pta-controls #pta-sort { width: 18; }
+    #pta-controls #pta-min-score { width: 18; }
     #pta-bars { height: auto; padding: 1 0 0 0; }
     #pta { width: 1fr; height: auto; margin-top: 1; }
     #pta-left-out { height: auto; padding: 1 0 0 0; }
