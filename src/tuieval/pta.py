@@ -21,7 +21,8 @@ it varies). A ×1 model's accuracy rests on one answer per question, so it is ro
 Models are compared on the questions all of them answered, so one that skipped some never looks
 faster. Server and connection errors aren't answers. By default a model with fewer than half as many
 answers as the most-answered model is left out (listed, so it can be picked), or it would shrink the
-shared questions for everyone. There's no combined number: the three stay side by side, and verdicts
+shared questions for everyone, and so is one that scores below MIN_SCORE (also listed), unless every
+model does. There's no combined number: the three stay side by side, and verdicts
 and critical failures stay where they are (verdict.py).
 """
 import math
@@ -31,6 +32,8 @@ from rich.markup import escape as rich_escape
 from . import compare
 
 MIN_SHARE = 0.5   # fewer answers than this share of the most-answered model's: left out by default
+MIN_SCORE = 85    # a score (partial credit, %) below this: left out by default, unless every model's is
+MIN_SCORES = (0, 50, 70, 80, 85, 90, 95)   # the choices offered (0: every score)
 POINTS_PER_DOUBLING = 15
 
 
@@ -55,13 +58,14 @@ def memory_gb(infos):
 SORTS = ("accuracy", "score")
 
 
-def index(rows, models=None, memory=None, sort="accuracy"):
+def index(rows, models=None, memory=None, sort="accuracy", min_score=MIN_SCORE):
     """{"questions": n shared, "models": [{model, P, T, A, S, cut, cut_pct, tokens, total_s, passed, answers, alongside,
     fewest, fastest, tps, ttft, memory_gb, repeats: (fewest, most) answers per question}],
-    "left_out": [(model, questions answered)], "no_answers": [model], "most": questions answered by the
-    most-answered model}, best accuracy (sort="accuracy") or score (sort="score") first. S: the mean
+    "left_out": [(model, questions answered)], "low_score": [(model, score %) left out below MIN_SCORE],
+    "no_answers": [model], "most": questions answered by the most-answered model}, best accuracy (sort="accuracy") or score (sort="score") first. S: the mean
 score (partial credit) in %. models: the ones to compare (default: every model in rows
-    with enough answers; models named here are compared whatever their count). memory: memory_gb()."""
+    with enough answers and a score of at least min_score, 0 for any; models named here are compared
+    whatever their count and score). memory: memory_gb()."""
     no_answers = sorted({r["model"] for r in rows} - {r["model"] for r in rows if not r.get("error")})
     rows = [r for r in rows if not r.get("error")]     # a server or connection error isn't an answer
     tests = compare.per_question(rows)
@@ -70,47 +74,70 @@ score (partial credit) in %. models: the ones to compare (default: every model i
         for m in t["cells"]:
             counts[m] = counts.get(m, 0) + 1
     most = max(counts.values(), default=0)
+    picked = models
     if models:
         no_answers = [m for m in no_answers if m in models]
         models, left_out = sorted(m for m in models if m in counts), []
     else:
         models = sorted(m for m in counts if counts[m] >= MIN_SHARE * most)
         left_out = sorted(((m, n) for m, n in counts.items() if m not in models), key=lambda x: (-x[1], x[0]))
-    shared = [t for t in tests if models and all(m in t["cells"] for m in models)]
-    out = []
-    for m in models:
-        cells = [t["cells"][m] for t in shared]
-        answers = sum(c["n"] for c in cells)
-        out.append({"model": m, "tokens": sum(c["tokens"] or 0 for c in cells),
-                    "total_s": sum(c["secs"] or 0 for c in cells),
-                    "passed": sum(c["passed"] for c in cells), "answers": answers,
-                    "A": 100 * sum(c["passed"] for c in cells) / answers if answers else None,
-                    "S": 100 * sum(c["score"] * c["n"] for c in cells) / answers if answers else None,
-                    # failed only because max_tokens ran out (overthinking, not wrong yet)
-                    "cut": sum(c["truncated"] for c in cells),
-                    "cut_pct": 100 * sum(c["truncated"] for c in cells) / answers if answers else None,
-                    # ran past the max_tokens sent: the provider didn't stop it, so it had more room than asked
-                    "over": sum(c.get("over", 0) for c in cells),
-                    # generation speed and time to first token over the same answers (medians)
-                    "tps": compare.median(r.get("gen_tps") for c in cells for r in c["rows"]),
-                    "ttft": compare.median(r.get("ttft") for c in cells for r in c["rows"]),
-                    "memory_gb": (memory or {}).get(m),
-                    "repeats": (min(c["n"] for c in cells), max(c["n"] for c in cells)) if cells else None,
-                    # answers that ran while other models were served shared the machine's speed
-                    "alongside": any(r.get("alongside") for c in cells for r in c["rows"])})
-    fastest = min((x["total_s"] for x in out if x["total_s"] > 0), default=None)
-    fewest = min((x["tokens"] for x in out if x["tokens"] > 0), default=None)
-    for x in out:
-        x["P"], x["T"] = score(x["tokens"], fewest), score(x["total_s"], fastest)
-        # shown on the bars: how many times the leanest / fastest model's total (1.0 = the best)
-        x["tokens_x"] = x["tokens"] / fewest if fewest and x["tokens"] else None
-        x["time_x"] = x["total_s"] / fastest if fastest and x["total_s"] else None
-        x["fewest"] = bool(fewest) and x["tokens"] == fewest
-        x["fastest"] = bool(fastest) and x["total_s"] == fastest
+
+    def compare_on(models):
+        shared = [t for t in tests if models and all(m in t["cells"] for m in models)]
+        out = []
+        for m in models:
+            cells = [t["cells"][m] for t in shared]
+            answers = sum(c["n"] for c in cells)
+            out.append({"model": m, "tokens": sum(c["tokens"] or 0 for c in cells),
+                        "total_s": sum(c["secs"] or 0 for c in cells),
+                        "passed": sum(c["passed"] for c in cells), "answers": answers,
+                        "A": 100 * sum(c["passed"] for c in cells) / answers if answers else None,
+                        "S": 100 * sum(c["score"] * c["n"] for c in cells) / answers if answers else None,
+                        # failed only because max_tokens ran out (overthinking, not wrong yet)
+                        "cut": sum(c["truncated"] for c in cells),
+                        "cut_pct": 100 * sum(c["truncated"] for c in cells) / answers if answers else None,
+                        # ran past the max_tokens sent: the provider didn't stop it, so it had more room than asked
+                        "over": sum(c.get("over", 0) for c in cells),
+                        # generation speed and time to first token over the same answers (medians)
+                        "tps": compare.median(r.get("gen_tps") for c in cells for r in c["rows"]),
+                        "ttft": compare.median(r.get("ttft") for c in cells for r in c["rows"]),
+                        "memory_gb": (memory or {}).get(m),
+                        "repeats": (min(c["n"] for c in cells), max(c["n"] for c in cells)) if cells else None,
+                        # answers that ran while other models were served shared the machine's speed
+                        "alongside": any(r.get("alongside") for c in cells for r in c["rows"])})
+        fastest = min((x["total_s"] for x in out if x["total_s"] > 0), default=None)
+        fewest = min((x["tokens"] for x in out if x["tokens"] > 0), default=None)
+        for x in out:
+            x["P"], x["T"] = score(x["tokens"], fewest), score(x["total_s"], fastest)
+            # shown on the bars: how many times the leanest / fastest model's total (1.0 = the best)
+            x["tokens_x"] = x["tokens"] / fewest if fewest and x["tokens"] else None
+            x["time_x"] = x["total_s"] / fastest if fastest and x["total_s"] else None
+            x["fewest"] = bool(fewest) and x["tokens"] == fewest
+            x["fastest"] = bool(fastest) and x["total_s"] == fastest
+        return shared, out
+
+    shared, out = compare_on(models)
+    low_score = []
+    if not picked and min_score:
+        # by default, models scoring below min_score are left out too (unless every model is), and the rest
+        # compared again: without them the shared questions can grow, and scores move, so until none is below
+        while True:
+            low = [x for x in out if _score(x) < min_score]
+            if not low or len(low) == len(out):
+                break
+            low_score += [(x["model"], _score(x)) for x in low]
+            models = [m for m in models if m not in {x["model"] for x in low}]
+            shared, out = compare_on(models)
+        low_score.sort(key=lambda x: (-x[1], x[0]))
     first, then = ("S", "A") if sort == "score" else ("A", "S")
     out.sort(key=lambda x: (-(x[first] or 0), -(x[then] or 0), -(x["T"] or 0), x["model"]))
-    return {"questions": len(shared), "models": out, "left_out": left_out, "no_answers": no_answers,
-            "most": most}
+    return {"questions": len(shared), "models": out, "left_out": left_out, "low_score": low_score,
+            "min_score": min_score, "no_answers": no_answers, "most": most}
+
+
+def _score(x):
+    """A model's score (partial credit, %), or its accuracy when there's none."""
+    return x["S"] if x.get("S") is not None else (x["A"] or 0)
 
 
 # (letter, name, which way is better, what the bar measures, the number beside it, colour). P and T bars
@@ -200,13 +227,17 @@ def bars(result, width=20, markup=True, click=None):
 
 
 def left_out_lines(result):
-    """Plain sentences on the models not compared (too few answers, or only server errors) and on
+    """Plain sentences on the models not compared (too few answers, a low score, or only server errors) and on
     answers that shared the machine with other models."""
     out = []
     if result["left_out"]:
         out.append("Left out (fewer than half as many answers as the most-answered model; pick them under "
                    "Models or --only to include them): "
                    + ", ".join(f"{m} ({n} of {result['most']})" for m, n in result["left_out"]))
+    if result.get("low_score"):
+        out.append(f"Left out (scored below {result.get('min_score', MIN_SCORE):g}%; lower the minimum score, or pick "
+                   "them under Models or --only, to include them): "
+                   + ", ".join(f"{m} ({compare.pct(v / 100)})" for m, v in result["low_score"]))
     if result["no_answers"]:
         out.append("No answers, only server errors: " + ", ".join(result["no_answers"]))
     shared = [x["model"] for x in result["models"] if x["alongside"]]
@@ -271,14 +302,14 @@ def scope_note(result, models):
                if any(x.get("over") for x in result["models"]) else ""))
 
 
-def for_engine(e, labels=None, packs=None, results_dir=None, sort="accuracy"):
+def for_engine(e, labels=None, packs=None, results_dir=None, sort="accuracy", min_score=MIN_SCORE):
     """(result, models) from a workspace's finished results (results on their way out excluded)."""
     paths = [p for p in compare.default_paths(results_dir or e.results_dir) if not e.superseded(p)]
     rows, infos = compare.load(paths) if paths else ([], [])
     if packs:
         rows = [r for r in rows if r["suite"] in packs]
     models = sorted({r["model"] for r in rows} & set(labels) if labels else {r["model"] for r in rows})
-    return index(rows, models if labels else None, memory_gb(infos), sort), models
+    return index(rows, models if labels else None, memory_gb(infos), sort, min_score), models
 
 
 def markdown(result, models):

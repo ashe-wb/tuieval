@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- PTA index: models scoring below 85% are left out by default (listed with their score), unless every model is. The **Score ≥** dropdown (`tuieval pta --min-score N`) sets the minimum, Any score shows all; picked models are always shown.
 - Per question → Comparison: a **Pass rate** column beside Passed, the share of answers right with repeats included (shown when some model has repeats).
 - Repeats (Setup, `tuieval run --repeat N`) add N rounds to the saved answers: ×1 run with 2 gives ×3, not ×2. Retest, a blank count and presets still mean the total.
 - Answers stuck in a loop (one short unit repeated over 2000 chars, in the reasoning or the answer) are stopped as they stream and failed as `LOOP`, instead of running to max_tokens. `[defaults] loop_stop_chars` sets the length; 0 turns it off.
