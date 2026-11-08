@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: the PTA index's Score ≥ filter did nothing once a pack was picked; it now filters the models that answered the pack (models picked by hand are still always shown).
 - PTA index: models scoring below 85% are left out by default (listed with their score), unless every model is. The **Score ≥** dropdown (`tuieval pta --min-score N`) sets the minimum, Any score shows all; picked models are always shown.
 - Per question → Comparison: a **Pass rate** column beside Passed, the share of answers right with repeats included (shown when some model has repeats).
 - Repeats (Setup, `tuieval run --repeat N`) add N rounds to the saved answers: ×1 run with 2 gives ×3, not ×2. Retest, a blank count and presets still mean the total.

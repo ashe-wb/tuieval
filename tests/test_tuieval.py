@@ -1794,6 +1794,8 @@ class PTAIndex(unittest.TestCase):
         self.assertIn("weak (62.5%)", "\n".join(pta.left_out_lines(res)))
         picked = pta.index(rows, ["good", "weak"])     # picked by hand: shown whatever the score
         self.assertEqual(([x["model"] for x in picked["models"]], picked["low_score"]), (["good", "weak"], []))
+        by_pack = pta.index(rows, ["good", "ok", "weak"], score_models=True)   # a pack's pick: filtered
+        self.assertEqual(([x["model"] for x in by_pack["models"]], by_pack["low_score"]), (["good", "ok"], [("weak", 62.5)]))
         low = [r for r in rows if r["model"] != "good"]
         self.assertEqual(pta.index([r for r in low if r["model"] == "weak"])["low_score"], [])   # all low: kept
         self.assertEqual([x["model"] for x in pta.index(low)["models"]], ["ok"])
