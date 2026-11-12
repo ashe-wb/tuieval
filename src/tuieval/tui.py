@@ -2938,6 +2938,9 @@ class ResultsScreen(Screen):
         yield Header()
         with Horizontal(id="results-top"):
             yield Static(id="results-info")
+            # which machine the answers ran on: shown once answers come from more than one (fill)
+            yield Select([("All machines", "")], id="results-machine", allow_blank=False, value="")
+            yield Checkbox("Hosted from any machine", True, id="results-hosted-any")
             if self.smoke_dir:
                 yield Button("Show this Smoke run's results", id="toggle-smoke")
         with TabbedContent(initial="tab-pta"):
@@ -3067,6 +3070,7 @@ class ResultsScreen(Screen):
             self.fill_pta()
             return
         rows, infos = compare.load(paths)
+        rows, self.partial_rows = self.machine_filter(rows, self.partial_rows)
         notes = compare.settings_notes(infos)
         smoke = os.path.abspath(results_dir) != os.path.abspath(self.app.engine.results_dir)
         info.update(f"{len(paths)} {'Smoke ' if smoke else ''}result files in {os.path.relpath(results_dir)}/" + banner
@@ -3080,6 +3084,42 @@ class ResultsScreen(Screen):
         if self.query_one(TabbedContent).active == "tab-insights":
             self.fill_insights()
         self.sort_tables()
+
+    def ran_on(self):
+        """(machine, hosted_any) picked under Machine, or None for every machine (kept for the session)."""
+        machine, hosted_any = getattr(self.app, "results_ran_on", ("", True))
+        return (machine, hosted_any) if machine else None
+
+    def machine_filter(self, rows, partial):
+        """The Machine dropdown (every machine these answers ran on; shown when there's more than one, or
+        one is picked) and the answers it keeps: (rows, partial rows)."""
+        known = compare.machines(rows + partial)
+        machine, hosted_any = getattr(self.app, "results_ran_on", ("", True))
+        if machine and machine not in known:   # no answers from it here (e.g. smoke results): every machine
+            machine = ""
+        sel, box = self.query_one("#results-machine", Select), self.query_one("#results-hosted-any", Checkbox)
+        options = [("All machines", "")] + [(f"{m} ({n:,} answers)", m) for m, n in known.items()]
+        with sel.prevent(Select.Changed):
+            if [v for _, v in options] != getattr(self, "machine_values", None):
+                self.machine_values = [v for _, v in options]
+                sel.set_options(options)
+            sel.value = machine
+        with box.prevent(Checkbox.Changed):
+            box.value = hosted_any
+        sel.display = len(known) > 1 or bool(machine)
+        box.display = bool(machine)
+        if not machine:
+            return rows, partial
+        return compare.ran_on(rows, machine, hosted_any), compare.ran_on(partial, machine, hosted_any)
+
+    @on(Select.Changed, "#results-machine")
+    @on(Checkbox.Changed, "#results-hosted-any")
+    def machine_changed(self):
+        """A machine picked (or All machines), or hosted models' answers kept or not: every tab follows."""
+        self.app.results_ran_on = (self.query_one("#results-machine", Select).value or "",
+                                   self.query_one("#results-hosted-any", Checkbox).value)
+        if getattr(self, "rows", None) is not None:
+            self.reload()
 
     def fill_failures(self):
         """Every wrong answer, of the models picked (Models: shared with the other tabs), of the kind picked
@@ -3276,7 +3316,8 @@ class ResultsScreen(Screen):
         main = os.path.abspath(self.results_dir or e.results_dir) == os.path.abspath(e.results_dir)
         bases = {m["label"]: m["base"] for m in e.cfg["models"] if m.get("base")}
         by = self.query_one("#ins-cost", Select).value or "tokens"
-        out = insights.panels(rows, models, e.packs, ref, bases, by, engine=e if main else None)
+        out = insights.panels(rows, models, e.packs, ref, bases, by, engine=e if main else None,
+                              ran_on=self.ran_on())
         body.update("\n\n".join(insights.render(p, i) for i, p in enumerate(out, 1)))
 
     @on(Select.Changed, "#pta-min-score")
@@ -3369,6 +3410,7 @@ class ResultsScreen(Screen):
         result = pta.index(rows, sorted(chosen) or None, pta.memory_gb(self.infos),
                            self.query_one("#pta-sort", Select).value or "accuracy",
                            self.query_one("#pta-min-score", Select).value or 0, score_models=by_pack)
+        result["ran_on"] = self.ran_on()
         self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
         self.pta_result = result
         removed = [m for m in self.pta_removed_now() if m in present]
@@ -3606,8 +3648,11 @@ class ResultsScreen(Screen):
             help_text.update("[yellow]These are smoke-test results; they don't count toward production readiness."
                              "[/yellow]")
             return
-        help_text.update(self.READINESS_HELP)
-        table = verdict.readiness(self.app.engine)
+        ran_on = self.ran_on()
+        help_text.update(self.READINESS_HELP + (f"\n[yellow]Verdicts from the answers{compare.ran_on_note(*ran_on)} "
+                                                "only: with fewer answers a verdict can differ from all machines'.[/yellow]"
+                                                if ran_on else ""))
+        table = verdict.readiness(self.app.engine, None, ran_on)
         short = ["[b]In short[/b]"]   # one line per model; what to run next is in the table below
         for label, sentence, todo in verdict.plain_summary(table):
             short.append(f"  [b]{rich_escape(label)}[/b]: {rich_escape(sentence)}")
@@ -3623,7 +3668,7 @@ class ResultsScreen(Screen):
         when = collections.defaultdict(list)
         for r in self.rows:
             when[(r["model"], r["suite"])].append(dates.answered_at(r.get("raw") or {}))
-        lat = verdict.latency_table(self.app.engine, None, table)
+        lat = verdict.latency_table(self.app.engine, None, table, ran_on)
         machine_ids = [mc.id for mc in self.app.engine.machines()]
         lt = self.query_one("#latency", DataTable)
         lt.add_columns("Model", "Use case", *[f"{mid}{' (here)' if i == 0 else ''}" for i, mid in enumerate(machine_ids)])
@@ -3706,6 +3751,8 @@ class EvalsApp(App):
     #tune-log { height: 1fr; }
     #results-top { height: auto; }
     #results-info { width: 1fr; height: auto; }
+    #results-top #results-machine { width: 40; }
+    #results-top #results-hosted-any { width: auto; }
     #toggle-smoke { width: auto; min-width: 32; }
     #pq-controls { height: 3; }
     #pta-controls { height: 3; }

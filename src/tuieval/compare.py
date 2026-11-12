@@ -4,6 +4,8 @@ Usage:
     tuieval compare                          # everything in results/<model>/<pack>.json
     tuieval compare --speed                  # speed & tokens table (TTFT, tok/s, tokens, memory)
     tuieval compare --machine m3max-64gb     # speed on another machine (measured there, or projected)
+    tuieval compare --ran-on m3max-64gb      # only the answers that ran there (hosted models: any machine;
+                                             # --ran-on-strict: those too)
     tuieval compare --pairwise --failures    # is each difference real? which tests failed?
     tuieval compare --reference MODEL        # every model paired against one: better, tie or worse
     tuieval compare --packs coding,rag       # only these packs (works with every option)
@@ -63,6 +65,7 @@ def _load_native(data):
             "severity": r.get("severity"), "group": r.get("group"), "repeat": r.get("repeat", 0),
             "difficulty": r.get("difficulty", "unrated"),
             "machine": r.get("machine") or run.get("machine"), "prompt_tokens": r.get("prompt_tokens"),
+            "hosted": info["hosted"],   # an API's answer: it doesn't depend on the machine tuieval ran on (ran_on)
             # other models served at the same time (parallel_models): its speed was shared with them
             "alongside": r.get("ran_alongside") or [],
             "agent": r.get("agent"),   # an agent pack's task: the agent's stats (see agents.py)
@@ -95,10 +98,39 @@ def load(paths):
     def local(along):
         return [l for l in along if l not in labels and not l.startswith(tuple(prefixes))]
     for row in rows:
+        row["hosted"] = row["hosted"] or row["model"] in labels or row["model"].startswith(tuple(prefixes) or ("\0",))
         row["alongside"] = [] if row["model"] in labels else local(row["alongside"])
     for i in infos:
         i["loaded_alongside"] = [] if i["label"] in labels else local(i["loaded_alongside"])
     return rows, infos
+
+
+UNKNOWN_MACHINE = "unknown"   # answers that recorded no machine
+
+
+def machine_of(r):
+    """The machine an answer (a row, or a stored record) ran on, or UNKNOWN_MACHINE."""
+    return r.get("machine") or UNKNOWN_MACHINE
+
+
+def machines(rows):
+    """{machine id: answers}, most answers first: the machines these answers ran on."""
+    return dict(collections.Counter(machine_of(r) for r in rows).most_common())
+
+
+def ran_on(rows, machine, hosted_any=True):
+    """The answers that ran on machine (None: all of them). hosted_any: hosted models' answers are kept
+    whatever machine tuieval ran on, since an API's answer doesn't depend on it."""
+    if not machine:
+        return rows
+    return [r for r in rows if machine_of(r) == machine or (hosted_any and r.get("hosted"))]
+
+
+def ran_on_note(machine, hosted_any=True):
+    """" on m3max-64gb" (hosted models from any machine) for a scope sentence, or "" for every machine."""
+    if not machine:
+        return ""
+    return f" on {machine}" + (" (hosted models: any machine)" if hosted_any else "")
 
 
 def _configs(paths):
@@ -663,13 +695,23 @@ def main(argv):
     machine_arg = argv[argv.index("--machine") + 1] if "--machine" in argv else None
     ref = argv[argv.index("--reference") + 1] if "--reference" in argv else None
     only_packs = argv[argv.index("--packs") + 1].split(",") if "--packs" in argv else None
-    values = (log_dir, machine_arg, ref, ",".join(only_packs) if only_packs else None)
+    ran = argv[argv.index("--ran-on") + 1] if "--ran-on" in argv else None
+    values = (log_dir, machine_arg, ref, ",".join(only_packs) if only_packs else None, ran)
     paths = [a for a in argv if not a.startswith("--") and a not in values] or default_paths()
     if only_packs:
         paths = [p for p in paths if os.path.basename(p)[:-len(".json")] in only_packs]
     if not paths:
         sys.exit(__doc__ + "\n(no results found in results/<model>/<pack>.json: run some evals first)")
     rows, infos = load(paths)
+    if "--ran-on-strict" in flags and not ran:
+        sys.exit("--ran-on-strict needs --ran-on MACHINE")
+    if ran:
+        known = machines(rows)
+        if ran not in known:
+            sys.exit(f"no answers ran on {ran!r}; machines with answers: "
+                     + ", ".join(f"{m} ({n})" for m, n in known.items()))
+        rows = ran_on(rows, ran, "--ran-on-strict" not in flags)
+        print(f"Only the answers{ran_on_note(ran, '--ran-on-strict' not in flags)}.")
     if ref:
         if ref not in {r["model"] for r in rows}:
             sys.exit(f"no results for reference model {ref!r}" + (f" in {', '.join(only_packs)}" if only_packs else ""))

@@ -1777,6 +1777,26 @@ class PTAIndex(unittest.TestCase):
         picked = pta.index(rows, ["a", "few"])      # picked by hand: compared anyway
         self.assertEqual((picked["questions"], picked["left_out"]), (1, []))
 
+    def test_ran_on_keeps_one_machines_answers(self):
+        from tuieval import compare, pta
+
+        def row(model, test, machine, hosted=False, ok=True):
+            return {"model": model, "suite": "p", "test": f"p: {test}", "ok": ok, "score": float(ok), "latency": 1000,
+                    "tokens": 10, "truncated": False, "gen_tps": None, "repeat": 0, "machine": machine, "hosted": hosted}
+        rows = ([row("here", f"q{i}", "mac") for i in range(4)] + [row("there", f"q{i}", "studio") for i in range(4)]
+                + [row("api", f"q{i}", "mac", hosted=True) for i in range(4)] + [row("old", "q0", None)])
+        self.assertEqual(compare.machines(rows), {"mac": 8, "studio": 4, "unknown": 1})
+        self.assertIs(compare.ran_on(rows, None), rows)
+        self.assertEqual({r["model"] for r in compare.ran_on(rows, "studio")}, {"there", "api"})   # hosted: any machine
+        self.assertEqual({r["model"] for r in compare.ran_on(rows, "studio", hosted_any=False)}, {"there"})
+        self.assertEqual({r["model"] for r in compare.ran_on(rows, "unknown", False)}, {"old"})
+        self.assertEqual(compare.ran_on_note("studio"), " on studio (hosted models: any machine)")
+        self.assertEqual((compare.ran_on_note("studio", False), compare.ran_on_note(None)), (" on studio", ""))
+        res = pta.index(compare.ran_on(rows, "studio"), min_score=0)
+        res["ran_on"] = ("studio", True)
+        self.assertEqual([x["model"] for x in res["models"]], ["api", "there"])
+        self.assertIn("all 2 model(s) answered on studio (hosted models: any machine).", pta.scope_note(res, []))
+
     def test_low_scores_left_out_by_default(self):
         from tuieval import pta
 
@@ -1999,6 +2019,13 @@ class PTAIndex(unittest.TestCase):
             self.assertIn(" 0%", bars["hosted"])
             self.assertIn("P parsimony", out)
             self.assertIn("4/4", tuieval(ws, "pta", "--only", "good").stdout)
+            bad = tuieval(ws, "pta", "--ran-on", "nope", check=False)   # names the machines that have answers
+            self.assertNotEqual(bad.returncode, 0)
+            here = re.search(r"machines with answers: (\S+) \(8\)", bad.stderr).group(1)
+            self.assertIn(f"answered on {here} (hosted", tuieval(ws, "pta", "--ran-on", here, "--min-score", "0").stdout)
+            self.assertIn(f"Verdicts from the answers on {here}", tuieval(ws, "verdict", "--ran-on", here).stdout)
+            self.assertIn(f"Only the answers on {here}.", tuieval(ws, "compare", "--ran-on", here, "--ran-on-strict").stdout)
+            self.assertIn("needs --ran-on", tuieval(ws, "pta", "--ran-on-strict", check=False).stderr)
             report = os.path.join(tmp, "r.md")
             tuieval(ws, "report", "-o", report)
             self.assertIn("## PTA index", read(report))
@@ -2124,6 +2151,42 @@ class PTAIndex(unittest.TestCase):
             self.assertEqual(fails["all"], [4, "4 failures"])
             self.assertEqual(fails["good"], [0, "0 failures of 1 model", "Models: 1 picked", []])
             self.assertEqual(fails["hosted"], [4, "4 failures of 1 model", "Models: 1 picked", ["hosted"]])
+            # answers from a second machine: the Machine dropdown shows, and every tab keeps that machine's
+            path = os.path.join(ws, "results", "hosted", "apps.json")
+            data = json.loads(read(path))
+            for r in data["results"]:
+                r["machine"] = "other-mac"
+            write(path, json.dumps(data))
+            code = textwrap.dedent("""
+                import asyncio, json
+                from tuieval.tui import EvalsApp, ResultsScreen
+                from textual.widgets import Checkbox, Select, Static
+                async def go():
+                    app = EvalsApp({})
+                    async with app.run_test(size=(180, 60)) as pilot:
+                        await pilot.pause()
+                        app.pta_min_score = 0
+                        app.push_screen(ResultsScreen())
+                        await pilot.pause(0.5)
+                        sel = app.screen.query_one("#results-machine", Select)
+                        box = app.screen.query_one("#results-hosted-any", Checkbox)
+                        got = {"shown": [sel.display, box.display], "options": [str(o[0]) for o in sel._options]}
+                        sel.value = "other-mac"
+                        await pilot.pause(0.5)
+                        got["note"] = str(app.screen.query_one("#pta-note", Static).render())
+                        got["fails"] = str(app.screen.query_one("#fail-count", Static).render())
+                        got["box"] = box.display
+                        print(json.dumps(got))
+                asyncio.run(go())
+            """)
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env=dict(os.environ, TUIEVAL_HOME=ws, TUIEVAL_DETECT_PORTS=""), timeout=60)
+            got = json.loads(out.stdout.strip().splitlines()[-1])
+            self.assertEqual(got["shown"], [True, False])          # the checkbox only once a machine is picked
+            self.assertEqual(got["options"][0], "All machines")
+            self.assertIn("other-mac (4 answers)", got["options"])
+            self.assertIn("all 1 model(s) answered on other-mac (hosted models: any machine)", got["note"])
+            self.assertEqual((got["fails"], got["box"]), ("4 failures", True))
 
 
 class Unavailable(unittest.TestCase):

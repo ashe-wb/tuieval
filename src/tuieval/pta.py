@@ -288,7 +288,8 @@ def scope_note(result, models):
     """What the scores compare, in a sentence."""
     if not result["questions"]:
         return "These models have no question in common yet, so there's nothing to compare."
-    return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered. "
+    return (f"Compared on the {result['questions']} questions all {len(result['models'])} model(s) answered"
+            f"{compare.ran_on_note(*(result.get('ran_on') or (None,)))}. "
             "P parsimony (tokens) and T time: bars as long as the tokens / time used (shorter is better), "
             "and how many times the leanest / fastest model's (1.0×, ★ in the table). A accuracy: answers right "
             "(longer is better); score: partial credit, e.g. 5 of 6 checks passed is 83% (shown when it differs)"
@@ -303,14 +304,19 @@ def scope_note(result, models):
                if any(x.get("over") for x in result["models"]) else ""))
 
 
-def for_engine(e, labels=None, packs=None, results_dir=None, sort="accuracy", min_score=MIN_SCORE):
-    """(result, models) from a workspace's finished results (results on their way out excluded)."""
+def for_engine(e, labels=None, packs=None, results_dir=None, sort="accuracy", min_score=MIN_SCORE, ran_on=None):
+    """(result, models) from a workspace's finished results (results on their way out excluded).
+    ran_on: (machine, hosted_any) to keep only the answers that ran on that machine (compare.ran_on)."""
     paths = [p for p in compare.default_paths(results_dir or e.results_dir) if not e.superseded(p)]
     rows, infos = compare.load(paths) if paths else ([], [])
     if packs:
         rows = [r for r in rows if r["suite"] in packs]
+    if ran_on:
+        rows = compare.ran_on(rows, *ran_on)
     models = sorted({r["model"] for r in rows} & set(labels) if labels else {r["model"] for r in rows})
-    return index(rows, models if labels else None, memory_gb(infos), sort, min_score), models
+    result = index(rows, models if labels else None, memory_gb(infos), sort, min_score)
+    result["ran_on"] = ran_on
+    return result, models
 
 
 def markdown(result, models):
