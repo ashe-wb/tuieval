@@ -3362,10 +3362,13 @@ class ResultsScreen(Screen):
             self.query_one("#pta-bars", Static).update("")
             self.query_one("#pta-left-out", Static).update("")
             return
-        # none picked: every model with enough answers and score (pta.index leaves out the rest, and says so)
+        # none picked: every model with enough answers and score (pta.index leaves out the rest, and says so).
+        # The models a pack picked (all that answered it) aren't a pick by hand: the minimum score applies to them
+        pick = self.app.pack_pick
+        by_pack = bool(chosen) and bool(pick) and chosen == {m for m in pick["models"] if m in present}
         result = pta.index(rows, sorted(chosen) or None, pta.memory_gb(self.infos),
                            self.query_one("#pta-sort", Select).value or "accuracy",
-                           self.query_one("#pta-min-score", Select).value or 0)
+                           self.query_one("#pta-min-score", Select).value or 0, score_models=by_pack)
         self.query_one("#pta-note", Static).update(pta.scope_note(result, sorted(present)))
         self.pta_result = result
         removed = [m for m in self.pta_removed_now() if m in present]

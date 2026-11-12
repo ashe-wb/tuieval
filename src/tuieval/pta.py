@@ -58,14 +58,15 @@ def memory_gb(infos):
 SORTS = ("accuracy", "score")
 
 
-def index(rows, models=None, memory=None, sort="accuracy", min_score=MIN_SCORE):
+def index(rows, models=None, memory=None, sort="accuracy", min_score=MIN_SCORE, score_models=False):
     """{"questions": n shared, "models": [{model, P, T, A, S, cut, cut_pct, tokens, total_s, passed, answers, alongside,
     fewest, fastest, tps, ttft, memory_gb, repeats: (fewest, most) answers per question}],
     "left_out": [(model, questions answered)], "low_score": [(model, score %) left out below MIN_SCORE],
     "no_answers": [model], "most": questions answered by the most-answered model}, best accuracy (sort="accuracy") or score (sort="score") first. S: the mean
 score (partial credit) in %. models: the ones to compare (default: every model in rows
     with enough answers and a score of at least min_score, 0 for any; models named here are compared
-    whatever their count and score). memory: memory_gb()."""
+    whatever their count and score, unless score_models: then min_score applies to them too, as when
+    a pack picks the models that answered all of it). memory: memory_gb()."""
     no_answers = sorted({r["model"] for r in rows} - {r["model"] for r in rows if not r.get("error")})
     rows = [r for r in rows if not r.get("error")]     # a server or connection error isn't an answer
     tests = compare.per_question(rows)
@@ -118,7 +119,7 @@ score (partial credit) in %. models: the ones to compare (default: every model i
 
     shared, out = compare_on(models)
     low_score = []
-    if not picked and min_score:
+    if (not picked or score_models) and min_score:
         # by default, models scoring below min_score are left out too (unless every model is), and the rest
         # compared again: without them the shared questions can grow, and scores move, so until none is below
         while True:
