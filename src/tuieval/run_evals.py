@@ -305,6 +305,30 @@ def cmd_regrade(argv):
         print(f"verdict changed: {h['model']} {h['use_case']}: {h.get('previous')} -> {h['status']}")
 
 
+def add_ran_on(p):
+    """--ran-on and --ran-on-strict on a results command."""
+    p.add_argument("--ran-on", metavar="MACHINE",
+                   help="only the answers that ran on this machine (its id, as tuieval machines shows it); "
+                        "hosted models' answers count from any machine")
+    p.add_argument("--ran-on-strict", action="store_true",
+                   help="with --ran-on: hosted models' answers must have run there too")
+
+
+def ran_on_arg(a, e):
+    """(machine, hosted_any) from --ran-on, or None. Exits naming the machines with answers when none ran there."""
+    if not a.ran_on:
+        if a.ran_on_strict:
+            sys.exit("--ran-on-strict needs --ran-on MACHINE")
+        return None
+    from . import compare
+    paths = compare.default_paths(e.results_dir)
+    known = compare.machines(compare.load(paths)[0] if paths else [])
+    if a.ran_on not in known:
+        sys.exit(f"no answers ran on {a.ran_on!r}; machines with answers: "
+                 + (", ".join(f"{m} ({n})" for m, n in known.items()) or "none yet"))
+    return a.ran_on, not a.ran_on_strict
+
+
 MARK = {"PASS": "\033[32mPASS\033[0m", "FAIL": "\033[31mFAIL\033[0m",
         "INCONCLUSIVE": "\033[33mINCONCLUSIVE\033[0m", "NO DATA": "-"}
 
@@ -312,14 +336,18 @@ MARK = {"PASS": "\033[32mPASS\033[0m", "FAIL": "\033[31mFAIL\033[0m",
 def cmd_verdict(argv):
     p = argparse.ArgumentParser(prog="tuieval verdict", description="Production readiness per model and use case.")
     p.add_argument("--only", help="comma-separated model labels")
+    add_ran_on(p)
     p.add_argument("--models")
     p.add_argument("--results-dir")
     a = p.parse_args(argv)
-    from . import verdict
+    from . import compare, verdict
     e = engine.Engine(models_path=a.models, results_dir=a.results_dir)
-    table = verdict.readiness(e, a.only.split(",") if a.only else None)
+    ran_on = ran_on_arg(a, e)
+    table = verdict.readiness(e, a.only.split(",") if a.only else None, ran_on)
     if not table:
-        sys.exit("no results yet: tuieval run first")
+        sys.exit("no results yet: tuieval run first" if not ran_on else f"no verdicts from answers on {a.ran_on}")
+    if ran_on:
+        print(f"{DIM}Verdicts from the answers{compare.ran_on_note(*ran_on)} only.{RESET}")
     summary = verdict.plain_summary(table)
     print(f"{BOLD}In short{RESET}")
     certify = {}
@@ -335,7 +363,7 @@ def cmd_verdict(argv):
           f"clears the pack's gate):{RESET}")
     for label, groups in table.items():
         print(f"\n{BOLD}{label}{RESET}")
-        lat = verdict.latency_table(e, [label], {label: groups}).get(label, {})
+        lat = verdict.latency_table(e, [label], {label: groups}, ran_on).get(label, {})
         for group, (v, packs) in groups.items():
             print(f"  {group:18s} {MARK[v.status]}")
             for name, pv in packs.items():
@@ -347,10 +375,11 @@ def cmd_verdict(argv):
                 print(f"      {DIM}speed on{RESET} {mid:18s} {color}{x.summary}{RESET}")
 
 
-def report_markdown(e, labels=None):
-    from . import verdict
-    table = verdict.readiness(e, labels)
-    lines = ["# Production readiness report", "", f"Generated {time.strftime('%Y-%m-%d %H:%M')}.", "",
+def report_markdown(e, labels=None, ran_on=None):
+    from . import compare, verdict
+    table = verdict.readiness(e, labels, ran_on)
+    lines = ["# Production readiness report", "", f"Generated {time.strftime('%Y-%m-%d %H:%M')}."
+             + (f" From the answers{compare.ran_on_note(*ran_on)} only." if ran_on else ""), "",
              "PASS needs a full certification run, zero critical failures across enough trials, and accuracy "
              "whose 95% lower bound clears the gate. See verdict.py for the rules and each pack.toml for its gate.", ""]
     lines += ["## In short", ""]
@@ -361,7 +390,7 @@ def report_markdown(e, labels=None):
     lines += ["| model | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
     for label, gs in table.items():
         lines.append(f"| {label} | " + " | ".join(gs[g][0].status if g in gs else "-" for g in groups) + " |")
-    lat = verdict.latency_table(e, labels, table)
+    lat = verdict.latency_table(e, labels, table, ran_on)
     for label, gs in table.items():
         lines += ["", f"## {label}"]
         for group, (v, packs) in gs.items():
@@ -380,7 +409,7 @@ def report_markdown(e, labels=None):
                              + (f"; p90 {ev['p90_s']:.1f}s" if ev.get("p90_s") is not None else "")
                              + f"; truncated {100 * ev['truncation']:.1f}%"
                              + (f"; consistency {100 * ev['consistency']:.0f}% of {ev['groups']} groups" if ev.get("consistency") is not None else ""))
-                recs = e.records(label, name)
+                recs = verdict.records(e, label, name, ran_on)
                 from .compare import pct
                 levels = []
                 for lvl in ("easy", "medium", "hard"):
@@ -392,7 +421,7 @@ def report_markdown(e, labels=None):
                 for ex in ev.get("critical_examples", []):
                     lines.append(f"  - critical: {ex}")
     from . import pta
-    lines += [""] + pta.markdown(*pta.for_engine(e, labels))
+    lines += [""] + pta.markdown(*pta.for_engine(e, labels, ran_on=ran_on))
     return "\n".join(lines) + "\n"
 
 
@@ -408,6 +437,7 @@ def cmd_pta(argv):
     p.add_argument("--min-score", type=float, default=None,
                    help="leave out models scoring below this %% (default 85; 0 shows every model; "
                         "models named with --only are always shown)")
+    add_ran_on(p)
     p.add_argument("--models")
     p.add_argument("--results-dir")
     a = p.parse_args(argv)
@@ -417,7 +447,8 @@ def cmd_pta(argv):
     labels = [x.strip() for x in a.only.split(",")] if a.only else None
     packs = [x.strip() for x in a.packs.split(",")] if a.packs else None
     result, models = pta.for_engine(e, labels, packs, sort=a.sort,
-                                    min_score=pta.MIN_SCORE if a.min_score is None else a.min_score)
+                                    min_score=pta.MIN_SCORE if a.min_score is None else a.min_score,
+                                    ran_on=ran_on_arg(a, e))
     out = Console(highlight=False)
     if not models:
         sys.exit("no finished results to compare" + (" for those models or packs" if labels or packs else ""))
@@ -450,6 +481,7 @@ def cmd_insights(argv):
                                        "most accurate)")
     p.add_argument("--packs", help="comma-separated packs (default: all)")
     p.add_argument("--cost", choices=("tokens", "time"), default="tokens", help="the cost axis of the accuracy chart")
+    add_ran_on(p)
     p.add_argument("--models")
     p.add_argument("--results-dir")
     a = p.parse_args(argv)
@@ -460,6 +492,9 @@ def cmd_insights(argv):
     rows, _ = compare.load(paths) if paths else ([], [])
     if a.packs:
         rows = [r for r in rows if r["suite"] in {x.strip() for x in a.packs.split(",")}]
+    ran_on = ran_on_arg(a, e)
+    if ran_on:
+        rows = compare.ran_on(rows, *ran_on)
     wanted = a.reference or e.cfg["defaults"].get("reference")
     picked = {x.strip() for x in a.only.split(",")} if a.only else None
     rows, models = insights.prepare(rows, picked, wanted)
@@ -470,7 +505,7 @@ def cmd_insights(argv):
     ref = insights.default_reference(rows, models, wanted)
     bases = {m["label"]: m["base"] for m in e.cfg["models"] if m.get("base")}
     out = Console(highlight=False)
-    for i, panel in enumerate(insights.panels(rows, models, e.packs, ref, bases, a.cost, engine=e), 1):
+    for i, panel in enumerate(insights.panels(rows, models, e.packs, ref, bases, a.cost, engine=e, ran_on=ran_on), 1):
         out.print(insights.render(panel, i), soft_wrap=True)
         out.print()
 
@@ -479,11 +514,12 @@ def cmd_report(argv):
     p = argparse.ArgumentParser(prog="tuieval report", description="Write the readiness report as markdown.")
     p.add_argument("-o", "--output", help="default: reports/readiness-<date>.md")
     p.add_argument("--only", help="comma-separated model labels")
+    add_ran_on(p)
     p.add_argument("--models")
     p.add_argument("--results-dir")
     a = p.parse_args(argv)
     e = engine.Engine(models_path=a.models, results_dir=a.results_dir)
-    text = report_markdown(e, a.only.split(",") if a.only else None)
+    text = report_markdown(e, a.only.split(",") if a.only else None, ran_on_arg(a, e))
     out = a.output or workspace.path("reports", time.strftime("readiness-%Y%m%d-%H%M.md"))
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "w") as f:

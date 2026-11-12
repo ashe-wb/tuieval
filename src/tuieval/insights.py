@@ -476,12 +476,12 @@ def _dur(secs):
 
 
 # ---------------------------------------------------------------- 7 next runs
-def next_runs(engine, models, ranking, limit=4, skip=()):
+def next_runs(engine, models, ranking, limit=4, skip=(), ran_on=None):
     """ranking: models best first (by the reference comparison, else accuracy). The Certify runs that
     would settle the open verdicts of the strongest `limit` models, with their time."""
     from . import verdict
     title = "Next runs"
-    table = verdict.readiness(engine, models)
+    table = verdict.readiness(engine, models, ran_on)
     times = engine.answer_times()
     med = {l: {p: statistics.median(ts) for p, ts in pp.items() if ts} for l, pp in times.items()}
     lines, actions, total = [], [], 0
@@ -525,7 +525,7 @@ def ranking(rows, models, ref):
     return sorted(acc, key=lambda m: (key(m), m))
 
 
-def panels(rows, models, packs, ref=None, bases=None, by="tokens", engine=None):
+def panels(rows, models, packs, ref=None, bases=None, by="tokens", engine=None, ran_on=None):
     """All seven (the last needs the engine: verdicts and answer times). Models are shown best first."""
     order = ranking(rows, models, ref)
     order += [m for m in models if m not in order]
@@ -533,7 +533,7 @@ def panels(rows, models, packs, ref=None, bases=None, by="tokens", engine=None):
     out = [vs_reference(rows, order, ref), use_cases(rows, order, packs), vs_base(rows, order, bases or {}, packs),
            failure_mix(rows, order), accuracy_cost(rows, order, by, hosted=hosted), question_health(rows, order)]
     if engine is not None:
-        out.append(next_runs(engine, order, order, skip={ref}))
+        out.append(next_runs(engine, order, order, skip={ref}, ran_on=ran_on))
     return out
 
 

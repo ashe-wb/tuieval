@@ -229,10 +229,23 @@ def machine_speeds(engine, m, machine):
     return speeds, (None if sv.fits else sv.fit_note)
 
 
-def latency_table(engine, labels=None, table=None):
+def records(engine, label, pack_name, ran_on=None):
+    """engine.records, keeping only the answers that ran on a machine when ran_on = (machine, hosted_any)
+    is given (a hosted model's answers stay, with hosted_any: they don't depend on the machine)."""
+    recs = engine.records(label, pack_name)
+    if not ran_on or not ran_on[0]:
+        return recs
+    from . import compare
+    machine, hosted_any = ran_on
+    if hosted_any and engine.hosted(engine.model(label)):
+        return recs
+    return [r for r in recs if compare.machine_of(r) == machine]
+
+
+def latency_table(engine, labels=None, table=None, ran_on=None):
     """{label: {use_case: {machine_id: Latency}}}: the worst pack with a time limit per use case
     (use cases whose packs have no limit report their slowest pack)."""
-    table = table if table is not None else readiness(engine, labels)
+    table = table if table is not None else readiness(engine, labels, ran_on)
     out = {}
     known = engine.machines()
     for label, groups in table.items():
@@ -243,7 +256,7 @@ def latency_table(engine, labels=None, table=None):
             row = {}
             for mc in known:
                 speeds, fit_note = per_machine[mc.id]
-                lats = [latency(engine.packs[name], engine.records(label, name), mc.id, speeds, fit_note)
+                lats = [latency(engine.packs[name], records(engine, label, name, ran_on), mc.id, speeds, fit_note)
                         for name, pv in packs.items() if pv.status != "NO DATA"]
                 limited = [x for x in lats if x.limit] or lats
                 if limited:
@@ -252,16 +265,17 @@ def latency_table(engine, labels=None, table=None):
     return out
 
 
-def readiness(engine, labels=None):
+def readiness(engine, labels=None, ran_on=None):
     """{label: {use_case: (verdict, {pack: verdict})}} for every model with results.
-    A use case is a pack group (pack.toml `group`), e.g. Coding = the coding and coding-advanced packs."""
+    A use case is a pack group (pack.toml `group`), e.g. Coding = the coding and coding-advanced packs.
+    ran_on: (machine, hosted_any) judges only the answers that ran on that machine (see records)."""
     out = {}
     for m in engine.cfg["models"]:
         if labels and m["label"] not in labels:
             continue
         by_group = {}
         for name, pack in engine.packs.items():
-            recs = engine.records(m["label"], name)
+            recs = records(engine, m["label"], name, ran_on)
             if engine.result_status(m["label"], name) not in ("certified", "screened"):
                 recs = []  # missing or outdated results don't count
             by_group.setdefault(pack.group, {})[name] = evaluate(pack, recs, engine.certify_repeat(pack))

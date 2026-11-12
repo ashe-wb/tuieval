@@ -137,6 +137,7 @@ tuieval report                                # the same with evidence, as a mar
 tuieval history                               # every verdict change over time
 tuieval compare --speed --pairwise --failures # scorecards
 tuieval compare --reference <model> --packs X # each model vs one: better, tie or worse
+tuieval pta --ran-on <machine>                # only the answers that ran on one machine
 tuieval selftest                              # check every test's reference and wrong answers
 tuieval items                                 # tests that don't separate models or look broken
 tuieval logs                                  # follow the server log of the model running now

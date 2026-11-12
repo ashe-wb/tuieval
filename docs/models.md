@@ -86,6 +86,12 @@ With `nvidia-smi` (Nvidia) or `amd-smi` / `rocm-smi` (AMD) installed, tuieval re
 
 Windows isn't supported (WSL2 works like Linux).
 
+### Results from one machine
+
+Results from several machines (a synced workspace) are shown together. Once answers come from more than one, Results has a **Machine** dropdown at the top: pick one, and every tab (PTA index, Insights, Production readiness, Per question, Failures) keeps only the answers that ran there. Hosted models' answers stay whatever machine tuieval ran on, since an API's answer doesn't depend on it; untick **Hosted from any machine** to keep only theirs from that machine too. Verdicts then come from that machine's answers alone, so they can differ from the all-machines ones (the tab says so). Answers that recorded no machine are listed as `unknown`.
+
+On the command line, `--ran-on <id>` does the same for `tuieval pta`, `compare`, `verdict`, `report` and `insights`, and `--ran-on-strict` drops hosted models' answers from other machines. It's not `compare --machine <id>`, which shows speeds as they'd be on that machine; the two combine.
+
 ## Several models at a time
 
 By default a run serves one model at a time. On a machine with room for more, set `parallel_models = 2` (or more) under `[machines.<id>]`, type a number in **Models at a time** on the TUI's setup screen (blank uses the machine's setting), or pass `tuieval run --parallel N`.
