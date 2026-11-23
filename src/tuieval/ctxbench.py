@@ -22,7 +22,8 @@ the measurement replaces those. Memory grows about linearly with the context, so
 passed predict the largest context that fits under the machine's limit; no probe goes above that
 prediction, and a failed probe is bisected against the largest that passed. A probe is stopped at
 once, while the server loads or works, when memory pressure rises, the machine starts swapping,
-or memory runs out. Typically 3 to 5 server starts.
+or memory runs out. The next probe waits until the machine has recovered (pressure back to normal,
+the memory given back), so one probe's pressure can't fail the next. Typically 3 to 5 server starts.
 
 Memory is read off the machine, not the server's processes: available memory before the server
 starts less the lowest it falls to. Resident memory would count files a server maps and reads on
@@ -35,6 +36,7 @@ model declares (max_context): one probe, nothing saved.
 import dataclasses
 import os
 import threading
+import time
 
 from . import engine as engine_mod
 from . import machines
@@ -52,6 +54,9 @@ REQUEST_LIMIT_S = 3600     # reading a few hundred thousand tokens takes a while
 PRESSURE_WARNING = 2       # macOS memory pressure level that stops a probe (1 is normal)
 SWAP_STOP_MB = 512         # swapped out while a probe ran: stop it
 AVAILABLE_STOP_GB = 1.0    # memory available under this stops a probe
+SETTLE_S = 120             # how long the machine may take to recover after a probe before the next one
+SETTLE_POLL_S = 1.0
+SETTLE_GB = 2.0            # recovered: available memory back within this of what it was before the first probe
 TOO_LITTLE = 0.5           # a reading under this share of the model's size on disk can't be right for a server
                            # that holds the model in memory: its resident memory is used instead
 SAMPLE_CHARS = 12000       # the request that measures the server's characters per token
@@ -234,6 +239,37 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
     return out
 
 
+class Halt(Exception):
+    """The search can't go on (the machine didn't recover); what passed so far stands."""
+
+
+def settle(eng, baseline_gb=None, emit=lambda *a, **k: None, limit_s=None):
+    """Wait until the machine has recovered from the last probe: memory pressure back to normal,
+    and the memory its server held given back. Without this, pressure a stopped server left behind
+    would fail the next probe within seconds, at a context that may well work. Raises Halt if
+    pressure stays elevated; memory that stays taken (another app grew) is only noted."""
+    limit_s = SETTLE_S if limit_s is None else limit_s
+    end, told = time.time() + limit_s, False
+    while True:
+        eng._check()
+        level = machines.memory_pressure_level()
+        free = None if baseline_gb is None or eng.machine().discrete else machines.available_memory_gb()
+        calm = level is None or level < PRESSURE_WARNING
+        back = free is None or free >= baseline_gb - SETTLE_GB
+        if calm and back:
+            return
+        if time.time() >= end:
+            if not calm:
+                raise Halt(f"macOS memory pressure stayed at level {level} for {limit_s:.0f}s after the last try")
+            emit("tune_progress", message=f"    {baseline_gb - free:.1f} GB less memory is available than at the start "
+                                          "(another app grew?); going on")
+            return
+        if not told:
+            told = True
+            emit("tune_progress", message="    waiting for the machine to recover from the last try…")
+        time.sleep(SETTLE_POLL_S)
+
+
 # ------------------------------------------------------------------ the search
 def memory_gb(eng, m, info, guard):
     """What the server took with its context full: VRAM on a discrete GPU, else how much less memory
@@ -276,7 +312,12 @@ def search(try_ctx, start, upper, limit_gb=None, step=STEP, floor=FLOOR, max_sta
     why = f"{max_starts} server starts used"
     while len(tried) < max_starts:
         emit("tune_step", message=f"[{len(tried) + 1}] context {c:,}", start=len(tried) + 1, max_starts=max_starts)
-        r = try_ctx(c)
+        try:
+            r = try_ctx(c)
+        except Halt as e:
+            why = str(e)
+            emit("tune_result", message=f"    not tried: {why}")
+            break
         tried.append(r)
         emit("tune_result", message="    " + r.summary(), result=r)
         if r.ok:
@@ -394,8 +435,11 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
     emit("tune_step", message=f"largest context up to {upper:,} ({source})"
                               + (f"; {room:.1f} GB of memory to work with" if room is not None else ""))
 
+    baseline = None if sv.machine.discrete else machines.available_memory_gb()
+
     def try_ctx(ctx):
         eng._check()
+        settle(eng, baseline, emit)
         return probe(eng, m, ctx, emit, limit_s)
 
     tried, why = search(try_ctx, first, upper, room, step, min(FLOOR, first), max_starts, emit)
