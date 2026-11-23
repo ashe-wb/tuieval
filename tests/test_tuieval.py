@@ -4155,6 +4155,33 @@ max_context = 8192
         self.assertEqual(fit, 196608)
         self.assertEqual(ctxbench.predict(passed[:1], 84.0), (None, None, None))
 
+    def test_available_memory_on_a_mac_comes_from_page_counts(self):
+        from tuieval import machines
+        text = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:    1000.\n"
+                "Pages wired down:    65536.\nAnonymous pages:    131072.\nFile-backed pages:    999999.\n"
+                "Pages occupied by compressor:    65536.\n")
+        # 16 GiB of RAM less (1 + 2 + 1) GiB held: the file cache counts as available
+        self.assertAlmostEqual(machines.vm_stat_available_gb(text, 16 * 2**30), 12.0)
+        self.assertIsNone(machines.vm_stat_available_gb("Pages free: 5.", 16 * 2**30))
+
+    def test_a_probe_measures_the_memory_the_machine_loses(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            readings = iter([64.0] + [57.5] * 1000)   # before the server starts, then while it runs
+            machines.available_memory_gb = lambda: next(readings)
+            r = ctxbench.probe(e, e.model("sized"), 8192)
+            self.assertEqual((r.ok, r.mem_gb), (True, 6.5))
+
+    def test_a_probe_stops_when_memory_runs_out(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            readings = iter([64.0] + [0.4] * 1000)
+            machines.available_memory_gb = lambda: next(readings)
+            r = ctxbench.probe(e, e.model("sized"), 8192)
+            self.assertEqual((r.ok, r.error), (False, "only 0.4 GB of memory was left"))
+
     def test_a_probe_stops_when_memory_pressure_rises(self):
         from tuieval import ctxbench, machines
         with tempfile.TemporaryDirectory() as tmp:

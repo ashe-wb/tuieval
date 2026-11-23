@@ -356,15 +356,31 @@ def swapped_out_bytes():
     return int(page.group(1)) * int(swaps.group(1)) if page and swaps else None
 
 
+def vm_stat_available_gb(text, ram_bytes):
+    """Memory available on a Mac from vm_stat's page counts: RAM less what is held and can't be
+    given back (anonymous pages, wired pages, the compressor's own pages). File cache and
+    memory-mapped files the system can drop count as available. None if the counts aren't there."""
+    page = re.search(r"page size of (\d+)", text)
+    held = [re.search(name + r":\s+(\d+)", text) for name in
+            ("Anonymous pages", "Pages wired down", "Pages occupied by compressor")]
+    if not page or not all(held) or not ram_bytes:
+        return None
+    return (ram_bytes - int(page.group(1)) * sum(int(h.group(1)) for h in held)) / GB
+
+
 def available_memory_gb():
     """Memory a new process could take now without pushing anything to swap: free plus what the
-    system gives back on demand (file cache). macOS: `memory_pressure`'s free percentage of RAM;
+    system gives back on demand (file cache). macOS: from vm_stat's page counts (`memory_pressure`'s
+    free percentage, which is rounded to 1% of RAM and reads higher, only if they are missing);
     Linux: MemAvailable. None where unknown."""
     try:
         if platform.system() == "Darwin":
+            ram = int(_sysctl("hw.memsize") or 0)
+            got = vm_stat_available_gb(subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout, ram)
+            if got is not None:
+                return got
             out = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10).stdout
             pct = re.search(r"free percentage:\s*(\d+)%", out)
-            ram = int(_sysctl("hw.memsize") or 0)
             return int(pct.group(1)) / 100 * ram / GB if pct and ram else None
         with open("/proc/meminfo") as f:
             kb = re.search(r"MemAvailable:\s+(\d+) kB", f.read())

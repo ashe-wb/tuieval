@@ -158,6 +158,8 @@ The fit check estimates the context from the model file, and only for servers th
 
 Expect 3 to 5 server starts; the largest ones take as long as the server needs to read that many tokens. It won't start when memory pressure is already elevated or the model is larger than the memory free now.
 
+Memory is read off the machine, not the server's processes: the memory available before the server starts, less the lowest it falls to while the context is full (VRAM on discrete GPUs). On a Mac, available memory is RAM less what is held and can't be given back (anonymous and wired pages and the compressor, from `vm_stat`), so files a server maps and reads on demand don't count against it, and the reading is in the same terms as the memory it is compared with.
+
 The upper bound is the model's own limit: `--max N`, else the context length in the model file, else the model's `max_context`. What `models.toml` caps the context at (`max_ctx`, a model's `ctx`, a context flag in `server_args`) doesn't bound the search. `--start N` sets the first context tried, `--step N` how close to the true maximum to get (default 8192).
 
 The result is saved in `tuning/<machine>/<model>.ctx.toml`: the context, the memory with it full, the memory per 1,000 tokens and every try. Runs on that machine then use it as the model's context, in place of the estimate and of the caps in `models.toml`: those were written without the measurement, so it governs them, also when it is larger. `tuieval machines` marks it *measured*. To hold a model below its maximum, lower the `max_ctx` line in that `.ctx.toml` file; delete the file to go back to the estimate and the caps. Also, a measurement made with another model file or KV type is ignored.

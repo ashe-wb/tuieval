@@ -7,8 +7,8 @@ It works the same for every server tuieval starts, because it only uses what the
 
   the context   set through {ctx} in the server's cmd, or its ctx_flag
   the API       one chat request per try, and the token counts the server reports
-  the machine   the server's memory (its processes' resident memory; VRAM on discrete GPUs),
-                macOS memory pressure and swapping, memory available on Linux
+  the machine   the memory the server takes (how much less is available while it runs; VRAM on
+                discrete GPUs), macOS memory pressure and swapping
 
 One try ("probe") at a context: start the server with it, send a document that fills it (sized
 from the server's own token counts, so any tokenizer works) with one fact near the start, and ask
@@ -22,7 +22,12 @@ the measurement replaces those. Memory grows about linearly with the context, so
 passed predict the largest context that fits under the machine's limit; no probe goes above that
 prediction, and a failed probe is bisected against the largest that passed. A probe is stopped at
 once, while the server loads or works, when memory pressure rises, the machine starts swapping,
-or (Linux) memory runs out. Typically 3 to 5 server starts.
+or memory runs out. Typically 3 to 5 server starts.
+
+Memory is read off the machine, not the server's processes: available memory before the server
+starts less the lowest it falls to. Resident memory would count files a server maps and reads on
+demand, which the system can drop again, and that reading is what is compared with the memory
+available, so both are in the same terms.
 
 A server tuieval doesn't start, or can't set the context of, is only verified at the context its
 model declares (max_context): one probe, nothing saved.
@@ -46,7 +51,9 @@ MAX_STARTS = 8
 REQUEST_LIMIT_S = 3600     # reading a few hundred thousand tokens takes a while ([tune] ctx_request_timeout_s)
 PRESSURE_WARNING = 2       # macOS memory pressure level that stops a probe (1 is normal)
 SWAP_STOP_MB = 512         # swapped out while a probe ran: stop it
-AVAILABLE_STOP_GB = 1.0    # Linux: memory available under this stops a probe
+AVAILABLE_STOP_GB = 1.0    # memory available under this stops a probe
+TOO_LITTLE = 0.5           # a reading under this share of the model's size on disk can't be right for a server
+                           # that holds the model in memory: its resident memory is used instead
 SAMPLE_CHARS = 12000       # the request that measures the server's characters per token
 UNKNOWN_CHARS_PER_TOKEN = 3.0   # for a server that reports no token counts: short of full rather than over
 NOT_ABOUT_CONTEXT = ("already in use", "isn't installed", "not found", "is not set", "skipped by user")
@@ -131,7 +138,8 @@ class Guard:
         self.eng, self.every_s, self.reason = eng, every_s, ""
         self.pressure, self._stop = machines.memory_pressure_level(), threading.Event()
         self._swap0 = machines.swapped_out_bytes()
-        self._linux = self.pressure is None and not eng.machine().discrete
+        self._own_memory = eng.machine().discrete   # VRAM: the machine's memory isn't what runs out
+        self.available0 = self.lowest = None if self._own_memory else machines.available_memory_gb()
 
     def __enter__(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -147,11 +155,19 @@ class Guard:
         swap = machines.swapped_out_bytes()
         if None not in (swap, self._swap0) and (swap - self._swap0) / 2**20 > SWAP_STOP_MB:
             return f"the machine swapped out {(swap - self._swap0) / 2**20:.0f} MB"
-        if self._linux:
+        if not self._own_memory:
             free = machines.available_memory_gb()
-            if free is not None and free < AVAILABLE_STOP_GB:
-                return f"only {free:.1f} GB of memory was left"
+            if free is not None:
+                self.lowest = free if self.lowest is None else min(self.lowest, free)
+                if free < AVAILABLE_STOP_GB:
+                    return f"only {free:.1f} GB of memory was left"
         return ""
+
+    def taken_gb(self):
+        """Memory the machine lost while the block ran (None where it can't be read)."""
+        if None in (self.available0, self.lowest):
+            return None
+        return max(self.available0 - self.lowest, 0.0)
 
     def _run(self):
         while not self._stop.wait(self.every_s):
@@ -194,9 +210,8 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
             met = client.metrics(res) if not res.get("error") else {}
             out.prompt_tokens, out.pp_tps, out.tg_tps = met.get("prompt_tokens"), met.get("prompt_tps"), met.get("gen_tps")
             out.total_s = round(res["total_s"], 1) if res.get("total_s") else None
-            peak = info.get("vram_peak_gb") if eng.machine().discrete else \
-                (info["peak_mb"]() or 0) / 1024 if info.get("peak_mb") else None
-            out.mem_gb = round(peak, 2) if peak else None
+            guard.check()
+            out.mem_gb = memory_gb(eng, m, info, guard)
             text = (res.get("answer") or "") + (res.get("reasoning") or "")
             if res.get("error"):
                 out.error = res["error"]
@@ -220,6 +235,19 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
 
 
 # ------------------------------------------------------------------ the search
+def memory_gb(eng, m, info, guard):
+    """What the server took with its context full: VRAM on a discrete GPU, else how much less memory
+    the machine had available, else (where that can't be read, or reads implausibly low for a model
+    of this size) the resident memory of the server's processes."""
+    if eng.machine().discrete:
+        return round(info["vram_peak_gb"], 2) if info.get("vram_peak_gb") else None
+    taken, size = guard.taken_gb(), model_gb(m)
+    resident = (info["peak_mb"]() or 0) / 1024 if info.get("peak_mb") else 0
+    if not taken or (size and taken < TOO_LITTLE * size <= resident):
+        taken = resident
+    return round(taken, 2) if taken else None
+
+
 def predict(passed, limit_gb):
     """(base_gb, gb_per_token, largest context predicted to fit) from the largest context that
     passed with a memory reading and the nearest one well below it (APART). The third is None when
