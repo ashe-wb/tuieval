@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: `tuieval tune --ctx` waits for the machine to recover after each try (memory pressure back to normal, memory given back). A try stopped for memory pressure could fail the next one within seconds, at a context that works.
 - `tuieval tune --ctx`: the measured context governs the caps in `models.toml` (`max_ctx`, a model's `ctx`, a context flag), not the other way around: the search runs up to the model's own limit, and runs use what was measured even above a cap. It starts at half the model's current context, and a try is also stopped while the server loads. Memory is measured as what the machine loses while the server runs (on a Mac from `vm_stat` page counts, not the rounded free percentage), so memory-mapped files a server reads on demand no longer count against it.
 - `tuieval tune <model> --ctx` measures the largest context a model can be served with on this machine, for any server tuieval starts: it fills each context it tries and checks the answer, the tokens the server read, memory pressure and swapping. Runs then use the measured context in place of the fit check's estimate (`tuning/<machine>/<model>.ctx.toml`; `tuieval machines` shows *measured*). See docs/models.md.
 - Results from more than one machine: a **Machine** dropdown in Results keeps only the answers that ran on one machine, in every tab (hosted models' answers count from any machine unless **Hosted from any machine** is unticked). `--ran-on <id>` (and `--ran-on-strict`) on `tuieval pta`, `compare`, `verdict`, `report` and `insights`.

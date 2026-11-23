@@ -4011,6 +4011,39 @@ class ContextBench(unittest.TestCase):
         self.assertEqual(best, 74752)
         self.assertTrue(why.startswith("memory:"), why)
 
+    def test_search_keeps_what_passed_when_the_machine_doesnt_recover(self):
+        from tuieval import ctxbench
+
+        def try_ctx(ctx):
+            if ctx > 65536:
+                raise ctxbench.Halt("macOS memory pressure stayed at level 2 for 120s after the last try")
+            return ctxbench.Probe(ctx, ok=True)
+        probes, why = ctxbench.search(try_ctx, start=32768, upper=262144)
+        self.assertEqual([p.ctx for p in probes], [32768, 65536])
+        self.assertIn("stayed at level 2", why)
+
+    def test_the_next_try_waits_for_the_machine_to_recover(self):
+        from tuieval import ctxbench, machines
+        eng = types.SimpleNamespace(_check=lambda: None, machine=lambda: types.SimpleNamespace(discrete=False))
+        for name in ("memory_pressure_level", "available_memory_gb"):
+            self.addCleanup(setattr, machines, name, getattr(machines, name))
+        self.addCleanup(setattr, ctxbench, "SETTLE_POLL_S", ctxbench.SETTLE_POLL_S)
+        ctxbench.SETTLE_POLL_S = 0.001
+        levels, free, said = iter([2, 2, 1, 1, 1]), iter([70.0, 70.0, 70.0, 84.0, 84.0]), []
+        machines.memory_pressure_level = lambda: next(levels)
+        machines.available_memory_gb = lambda: next(free)
+        ctxbench.settle(eng, 85.0, lambda kind, **d: said.append(d["message"]))
+        self.assertEqual(next(levels), 1)   # it read four times: pressure eased on the third, memory came back on the fourth
+        self.assertEqual(len(said), 1)
+        machines.memory_pressure_level = lambda: 2   # pressure that doesn't ease ends the search
+        machines.available_memory_gb = lambda: 84.0
+        with self.assertRaisesRegex(ctxbench.Halt, "stayed at level 2"):
+            ctxbench.settle(eng, 85.0, limit_s=0.01)
+        machines.memory_pressure_level = lambda: 1   # memory another app took doesn't
+        machines.available_memory_gb = lambda: 60.0
+        ctxbench.settle(eng, 85.0, lambda kind, **d: said.append(d["message"]), limit_s=0.01)
+        self.assertIn("25.0 GB less memory is available", said[-1])
+
     def test_search_halves_when_the_first_try_fails(self):
         best, tried, why = self._search(20000, start=65536, upper=131072)
         self.assertEqual(tried[:3], [65536, 32768, 16384])
