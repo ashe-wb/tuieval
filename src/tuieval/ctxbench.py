@@ -16,11 +16,13 @@ for that fact. The probe passes when the answer is right, the server read the wh
 server that cuts long prompts short reports fewer tokens, or loses the fact), and the machine
 stayed healthy. Filling matters: some servers only take memory as the context fills.
 
-The search starts small and doubles. Memory grows about linearly with the context, so two probes
-that passed predict the largest context that fits under the machine's limit; no probe goes above
-that prediction, and a failed probe is bisected against the largest that passed. A probe is
-stopped at once when memory pressure rises, the machine starts swapping, or (Linux) memory runs
-out. Typically 3 to 5 server starts.
+The search starts at half the context the model runs with now and doubles, up to the model's own
+limit: what models.toml caps the context at (max_ctx, ctx, a context flag) doesn't bound it, since
+the measurement replaces those. Memory grows about linearly with the context, so two probes that
+passed predict the largest context that fits under the machine's limit; no probe goes above that
+prediction, and a failed probe is bisected against the largest that passed. A probe is stopped at
+once, while the server loads or works, when memory pressure rises, the machine starts swapping,
+or (Linux) memory runs out. Typically 3 to 5 server starts.
 
 A server tuieval doesn't start, or can't set the context of, is only verified at the context its
 model declares (max_context): one probe, nothing saved.
@@ -37,6 +39,9 @@ from . import tune
 ANSWER_TOKENS = 1024       # room for the answer (and any thinking) in a probe
 STEP = 8192                # how close to the true maximum the search gets
 FLOOR = machines.MIN_CTX   # the smallest context tried
+FIRST = 32768              # the first context tried for a model whose usual context isn't known
+APART = 0.8                # memory per token is read off two probes at least this far apart (the lower one
+                           # at most this share of the higher): closer ones differ by less than the noise
 MAX_STARTS = 8
 REQUEST_LIMIT_S = 3600     # reading a few hundred thousand tokens takes a while ([tune] ctx_request_timeout_s)
 PRESSURE_WARNING = 2       # macOS memory pressure level that stops a probe (1 is normal)
@@ -119,7 +124,8 @@ def too_long(error):
 
 
 class Guard:
-    """Watches the machine while a probe runs and stops the request when it gets unhealthy."""
+    """Watches the machine while a probe's server loads and works. When it gets unhealthy, the
+    server is stopped: a load is abandoned and a request is cut off."""
 
     def __init__(self, eng, every_s=2.0):
         self.eng, self.every_s, self.reason = eng, every_s, ""
@@ -151,6 +157,7 @@ class Guard:
         while not self._stop.wait(self.every_s):
             self.reason = self.reason or self.check()
             if self.reason:
+                self.eng._stall = self.reason   # ends the wait for a server that is still loading
                 stream = getattr(self.eng, "_stream", None)
                 if stream is not None:
                     stream.close()
@@ -160,6 +167,7 @@ class Guard:
         self._stop.set()
         self._thread.join(self.every_s + 1)
         self.reason = self.reason or self.check()
+        self.eng._stall = None
 
 
 def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
@@ -171,18 +179,18 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
     if target < 1024:
         out.error = f"a context of {ctx:,} is too small to test"
         return out
+    guard = Guard(eng)
     try:
-        with eng.serve(m, log_name=f"{m['label']}.ctx", ctx=ctx) as (url, info):
+        with guard, eng.serve(m, log_name=f"{m['label']}.ctx", ctx=ctx) as (url, info):
             out.load_s = round(info["load_s"], 1) if info.get("load_s") else None
-            with Guard(eng) as guard:
-                ratio = chars_per_token(eng, m, url, emit, limit)
-                chars = int(target * (ratio or UNKNOWN_CHARS_PER_TOKEN) * 0.98)
-                emit("tune_progress", message=f"    filling the context: ~{target:,} tokens, {chars:,} characters"
-                                              + ("" if ratio else " (the server reports no token counts)"))
-                res = _ask(eng, m, url, chars, ANSWER_TOKENS, "fill", emit, limit)
-                if too_long(res.get("error")) and not guard.reason:
-                    emit("tune_progress", message="    the server found that too long; trying 7% shorter")
-                    res = _ask(eng, m, url, int(chars * 0.93), ANSWER_TOKENS, "fill", emit, limit)
+            ratio = chars_per_token(eng, m, url, emit, limit)
+            chars = int(target * (ratio or UNKNOWN_CHARS_PER_TOKEN) * 0.98)
+            emit("tune_progress", message=f"    filling the context: ~{target:,} tokens, {chars:,} characters"
+                                          + ("" if ratio else " (the server reports no token counts)"))
+            res = _ask(eng, m, url, chars, ANSWER_TOKENS, "fill", emit, limit)
+            if too_long(res.get("error")) and not guard.reason:
+                emit("tune_progress", message="    the server found that too long; trying 7% shorter")
+                res = _ask(eng, m, url, int(chars * 0.93), ANSWER_TOKENS, "fill", emit, limit)
             met = client.metrics(res) if not res.get("error") else {}
             out.prompt_tokens, out.pp_tps, out.tg_tps = met.get("prompt_tokens"), met.get("prompt_tps"), met.get("gen_tps")
             out.total_s = round(res["total_s"], 1) if res.get("total_s") else None
@@ -190,9 +198,7 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
                 (info["peak_mb"]() or 0) / 1024 if info.get("peak_mb") else None
             out.mem_gb = round(peak, 2) if peak else None
             text = (res.get("answer") or "") + (res.get("reasoning") or "")
-            if guard.reason:
-                out.error = guard.reason
-            elif res.get("error"):
+            if res.get("error"):
                 out.error = res["error"]
             elif not info["alive"]():
                 out.error = "the server stopped"
@@ -206,20 +212,23 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
                 out.filled = bool(ratio and out.prompt_tokens and out.prompt_tokens >= 0.85 * target)
     except engine_mod.ModelFailed as e:
         out.error = str(e).splitlines()[0]
-        if any(w in out.error for w in NOT_ABOUT_CONTEXT):
+        if not guard.reason and any(w in out.error for w in NOT_ABOUT_CONTEXT):
             raise   # a smaller context wouldn't help
+    if guard.reason:   # the machine got unhealthy: that is why, whatever the server said as it was stopped
+        out.ok, out.error = False, guard.reason
     return out
 
 
 # ------------------------------------------------------------------ the search
 def predict(passed, limit_gb):
-    """(base_gb, gb_per_token, largest context predicted to fit) from the two largest contexts that
-    passed with a memory reading. The third is None when memory doesn't grow with the context
-    (nothing to predict) or there aren't two readings."""
+    """(base_gb, gb_per_token, largest context predicted to fit) from the largest context that
+    passed with a memory reading and the nearest one well below it (APART). The third is None when
+    memory doesn't grow with the context (nothing to predict) or there aren't two such readings."""
     pts = sorted((p.ctx, p.mem_gb) for p in passed if p.mem_gb)
     if len(pts) < 2:
         return None, None, None
-    (c1, g1), (c2, g2) = pts[-2:]
+    c2, g2 = pts[-1]
+    c1, g1 = next(((c, g) for c, g in reversed(pts[:-1]) if c <= APART * c2), pts[0])
     per = (g2 - g1) / (c2 - c1)
     base = g2 - per * c2
     if per <= 0 or limit_gb is None:
@@ -303,20 +312,12 @@ def room_gb(eng):
     return (limit if free is None else min(limit, free - headroom)), ""
 
 
-def upper_bound(eng, m, server, how, asked=None):
-    """(the largest context worth trying, where that number comes from)."""
+def upper_bound(m, asked=None):
+    """(the largest context worth trying, where that number comes from): the model's own limit.
+    What models.toml caps the context at (max_ctx, ctx, a context flag) isn't one: the measurement
+    replaces those."""
     if asked:
         return asked, "--max"
-    caps = [(server.get("max_ctx"), f"max_ctx in [servers.{m['server']}]"), (m.get("ctx"), "the model's ctx"),
-            (m.get("max_context"), "the model's max_context")]
-    caps = [(v, src) for v, src in caps if v]
-    if how == "flag":
-        sv = eng.serving(m)
-        written = engine_mod.read_context(list(m.get("server_args", [])) + list(sv.perf_args), server["ctx_flag"])
-        if written:
-            caps.append((written, f"{server['ctx_flag']} in models.toml"))
-    if caps:
-        return min(caps)
     path = engine_mod.expand(str(m.get("model", "")))
     if os.path.isfile(path):
         try:
@@ -325,7 +326,9 @@ def upper_bound(eng, m, server, how, asked=None):
                 return n, "the model file"
         except (OSError, ValueError):
             pass
-    raise engine_mod.ModelFailed("no upper bound for its context is known: pass --max N (the model's own limit)")
+    if m.get("max_context"):
+        return m["max_context"], "the model's max_context"
+    raise engine_mod.ModelFailed("the model's own context limit isn't known: pass --max N")
 
 
 def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=STEP, max_starts=MAX_STARTS):
@@ -347,7 +350,7 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
         r = probe(eng, m, ctx, emit, limit_s)
         emit("tune_result", message="    " + r.summary(), result=r)
         return {"verified": r.ok, "ctx": ctx, "probe": r}
-    upper, source = upper_bound(eng, m, server, how, max_ctx)
+    upper, source = upper_bound(m, max_ctx)
     upper = max(upper, FLOOR)
     room, refuse = room_gb(eng)
     if refuse:
@@ -356,7 +359,10 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
     if room is not None and size is not None and size > room:
         raise engine_mod.ModelFailed(f"the model is {size:.1f} GB and {room:.1f} GB is free for it now: another "
                                      "model or app is holding memory")
-    first = min(upper, max(FLOOR, _grid(start or upper // 4)))
+    # Half of what it runs with now, so the second probe is a context expected to work and the two
+    # give the memory per token before anything larger is tried.
+    usual = sv.ctx if sv.fits and sv.ctx else None
+    first = min(upper, max(FLOOR, _grid(start or (usual // 2 if usual else FIRST))))
     emit("tune_step", message=f"largest context up to {upper:,} ({source})"
                               + (f"; {room:.1f} GB of memory to work with" if room is not None else ""))
 
