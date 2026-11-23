@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: `tuieval tune --ctx` stopped early ("predicted to need more memory") on servers that fill memory to their own budget whatever the context. When the smallest context that passed already took more than the memory set aside, the prediction no longer caps the search.
 - Fix: `tuieval tune --ctx` found no working context for servers that fill memory to their own budget and run with macOS memory pressure at the warning level. When the first try reaches that level with nothing swapped, tries are judged by swapping, memory running out and critical pressure instead.
 - Fix: `tuieval tune --ctx` refused models larger than the machine's memory ("another model or app is holding memory"), which servers that read the model from disk as needed run fine. Their size on disk is no longer checked against free memory.
 - Fix: `tuieval tune --ctx` waits for the machine to recover after each try (memory pressure back to normal, memory given back). A try stopped for memory pressure could fail the next one within seconds, at a context that works.

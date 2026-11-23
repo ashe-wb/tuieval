@@ -20,7 +20,9 @@ The search starts at half the context the model runs with now and doubles, up to
 limit: what models.toml caps the context at (max_ctx, ctx, a context flag) doesn't bound it, since
 the measurement replaces those. Memory grows about linearly with the context, so two probes that
 passed predict the largest context that fits under the machine's limit; no probe goes above that
-prediction, and a failed probe is bisected against the largest that passed. A probe is stopped at
+prediction, and a failed probe is bisected against the largest that passed. (A server that already
+takes more than that limit at the smallest context, and passes, sizes its own memory: the
+prediction doesn't cap it, and the probes and their guard decide.) A probe is stopped at
 once, while the server loads or works, when memory pressure rises, the machine starts swapping,
 or memory runs out. (A server that reaches the warning level at the smallest context, with nothing
 swapped, fills memory to a budget of its own: for it only critical pressure counts, besides
@@ -321,6 +323,7 @@ def search(try_ctx, start, upper, limit_gb=None, step=STEP, floor=FLOOR, max_sta
     Returns (probes in the order tried, why it stopped)."""
     tried, lo, hi, c = [], None, None, min(start, upper)
     why = f"{max_starts} server starts used"
+    budget = limit_gb   # None once the tries show it doesn't describe this server
     while len(tried) < max_starts:
         emit("tune_step", message=f"[{len(tried) + 1}] context {c:,}", start=len(tried) + 1, max_starts=max_starts)
         try:
@@ -347,12 +350,20 @@ def search(try_ctx, start, upper, limit_gb=None, step=STEP, floor=FLOOR, max_sta
         if hi is not None and hi - lo <= step:
             why = f"{hi:,} failed: {next(p.error for p in tried if p.ctx == hi)}"
             break
-        _, per, fit = predict([p for p in tried if p.ok], limit_gb)
+        smallest = min((p for p in tried if p.ok and p.mem_gb), key=lambda p: p.ctx, default=None)
+        if budget is not None and smallest and smallest.mem_gb >= budget:
+            # Over the budget at the smallest context that passed: the context isn't what takes the
+            # memory. The server fills memory to a budget of its own, so the prediction can't cap it.
+            emit("tune_step", message=f"    it took {smallest.mem_gb:.1f} GB at {smallest.ctx:,} already, more than the "
+                                      f"{budget:.1f} GB set aside, and passed: this server sizes its own memory, so "
+                                      "the search goes by the tries, not by predicted memory")
+            budget = None
+        _, per, fit = predict([p for p in tried if p.ok], budget)
         nxt = min(upper, lo * 2) if hi is None else lo + _grid((hi - lo) / 2)
         if fit is not None and fit < nxt:
             if _grid(fit) - lo < min(step, upper - lo):
                 at = min(upper, lo + step)
-                why = (f"memory: {at:,} is predicted to need more than the {limit_gb:.1f} GB this machine has "
+                why = (f"memory: {at:,} is predicted to need more than the {budget:.1f} GB this machine has "
                        f"for it ({per * 1000:.3f} GB per 1,000 tokens)")
                 break
             nxt = _grid(fit)
