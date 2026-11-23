@@ -29,6 +29,7 @@ Advanced
   tuieval scan                list GGUFs in model_dirs that aren't in models.toml yet
   tuieval machines            this machine, other recorded machines, and fit and tuning per model
   tuieval tune MODEL          find the fastest speed-only server flags for a model on this machine
+  tuieval tune MODEL --ctx    measure the largest context the model can be served with on this machine
   tuieval export pi MODEL     serve a model in the pi coding agent with its tuned flags
   tuieval watch               a proxy that shows the reasoning of any app using your server
   tuieval help · --version

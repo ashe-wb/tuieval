@@ -16,10 +16,16 @@ reason or [DONE], like a server that crashes mid-request.
 --loop TEXT: after the answer, TEXT 5000 times over (a model stuck in a loop).
 An answer longer than the request's max_tokens (one token per word) is cut off with finish
 "length". --max-output N also serves an OpenRouter-style endpoints list with that output limit.
+--context N: a prompt of more than N tokens (one per word) is refused with HTTP 400, like a server with
+that context size. --breaks-above M: with a context over M the process exits at once, like a server
+that runs out of memory while loading. --cuts-at K: only the last K words of a prompt are read, like a
+server that silently truncates. A prompt ending in "What is the archive room code? …" is answered with
+the code its text gives (or "I can't find it."), so a context benchmark can check the whole prompt was read.
 """
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import socketserver
@@ -58,6 +64,7 @@ class Handler(BaseHTTPRequestHandler):
     stall, stall_before, silent = 0.0, 0.0, False
     die_after, loop = None, None
     hold, answered = None, 0   # while the hold file exists, answers after the first wait (a run that stays going)
+    context, cuts_at = None, None
 
     def log_message(self, *a):
         pass
@@ -94,7 +101,16 @@ class Handler(BaseHTTPRequestHandler):
         test = self.answers.get(" ".join(str(content).split()))
         if self.mode == "unavailable":   # like OpenRouter with no provider serving the model
             return self._json({"error": {"message": f"No endpoints found for {self.model}.", "code": 404}}, 404)
+        words_in = str(content).split()
+        if self.context and len(words_in) > self.context:
+            return self._json({"error": {"message": f"the request exceeds the available context size "
+                                                    f"({len(words_in)} tokens, context {self.context})"}}, 400)
+        if self.cuts_at and len(words_in) > self.cuts_at:
+            words_in = words_in[-self.cuts_at:]
         text, calls = reply_for(test, self.mode)
+        if "What is the archive room code?" in str(content)[-200:]:
+            code = re.search(r"archive room code is (\d+)", " ".join(words_in))
+            text, calls = (code.group(1) if code else "I can't find it."), []
         if self.loop:
             text += self.loop * 5000
         finish = "tool_calls" if calls else "stop"
@@ -137,7 +153,7 @@ class Handler(BaseHTTPRequestHandler):
                 "name": c["name"], "arguments": json.dumps(c.get("arguments") or {})}}]}}]})
         words = max(1, len(text.split()) + 3)
         send({"choices": [{"delta": {}, "finish_reason": finish}],
-              "usage": {"prompt_tokens": len(str(content).split()), "completion_tokens": words},
+              "usage": {"prompt_tokens": len(words_in), "completion_tokens": words},
               "timings": {"predicted_n": words, "predicted_per_second": 50.0, "prompt_n": 10,
                           "prompt_per_second": 500.0, "cache_n": 0}})
         die_if_due()
@@ -166,11 +182,18 @@ def main(argv=None):
     p.add_argument("--die-after", type=int)
     p.add_argument("--hold", help="while this file exists, every answer after the first waits")
     p.add_argument("--loop")
+    p.add_argument("--context", type=int)
+    p.add_argument("--breaks-above", type=int)
+    p.add_argument("--cuts-at", type=int)
     a, _ = p.parse_known_args(argv)   # other flags (e.g. speed knobs under test) are accepted and ignored
     Handler.answers, Handler.mode, Handler.model, Handler.delay = load_answers(a.packs), a.mode, a.model, a.delay
     Handler.max_output = a.max_output
     Handler.stall, Handler.stall_before, Handler.silent = a.stall, a.stall_before, a.silent
     Handler.die_after, Handler.hold, Handler.loop = a.die_after, a.hold, a.loop
+    Handler.context, Handler.cuts_at = a.context, a.cuts_at
+    if a.breaks_above and (a.context or 0) > a.breaks_above:
+        print(f"out of memory: a context of {a.context} doesn't fit", flush=True)
+        return 3
     srv = Server(("127.0.0.1", a.port), Handler)
     print(f"mock server on 127.0.0.1:{a.port} ({a.mode}, {len(Handler.answers)} known questions)", flush=True)
     try:

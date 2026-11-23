@@ -356,6 +356,23 @@ def swapped_out_bytes():
     return int(page.group(1)) * int(swaps.group(1)) if page and swaps else None
 
 
+def available_memory_gb():
+    """Memory a new process could take now without pushing anything to swap: free plus what the
+    system gives back on demand (file cache). macOS: `memory_pressure`'s free percentage of RAM;
+    Linux: MemAvailable. None where unknown."""
+    try:
+        if platform.system() == "Darwin":
+            out = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10).stdout
+            pct = re.search(r"free percentage:\s*(\d+)%", out)
+            ram = int(_sysctl("hw.memsize") or 0)
+            return int(pct.group(1)) / 100 * ram / GB if pct and ram else None
+        with open("/proc/meminfo") as f:
+            kb = re.search(r"MemAvailable:\s+(\d+) kB", f.read())
+        return int(kb.group(1)) * 1024 / GB if kb else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------- GPU residency
 # On Apple Silicon Macs, once the system's GPU allocations exceed about half of RAM, the GPU driver evicts and re-maps memory on every command submission (70-95% of the
 # server's CPU in the kernel, GPU idle), whatever iogpu.wired_limit_mb says. Servers that submit

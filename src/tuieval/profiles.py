@@ -65,6 +65,43 @@ def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+# ---------------------------------------------------------------- measured context
+def context_path(machine_id, label, root=None):
+    return os.path.join(root or workspace.path("tuning"), machine_id, f"{label}.ctx.toml")
+
+
+def load_context(machine_id, label, root=None):
+    """The largest context measured for a model on a machine (tuieval tune --ctx), or None."""
+    p = context_path(machine_id, label, root)
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "rb") as f:
+            d = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    ok = isinstance(d.get("max_ctx"), int) and not isinstance(d.get("max_ctx"), bool) and d["max_ctx"] > 0
+    return d if ok else None
+
+
+def save_context(machine_id, label, measured, root=None):
+    """Write a measurement: {"max_ctx": n, "measured": {...}, "probes": {...}, "meta": {...}}."""
+    p = context_path(machine_id, label, root)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    lines = [f"# Largest context measured for {label} on {machine_id}. Written by tuieval tune --ctx; runs use it",
+             "# in place of the estimate. Delete this file to go back to the estimate.",
+             f"max_ctx = {int(measured['max_ctx'])}", ""]
+    for section in ("measured", "probes", "meta"):
+        lines.append(f"[{section}]")
+        for k, v in measured.get(section, {}).items():
+            if v is not None:
+                lines.append(f"{json.dumps(str(k)) if section == 'probes' else k} = {_toml_value(v)}")
+        lines.append("")
+    with open(p, "w") as f:
+        f.write("\n".join(lines))
+    return p
+
+
 # ---------------------------------------------------------------- known machines
 def save_machine(machine, root=None):
     """Record a machine's facts (tuning/<id>/machine.toml) so the others can check fit for it."""
