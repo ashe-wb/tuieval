@@ -650,6 +650,9 @@ def context_report(e, label, got):
     per = f", {at['gb_per_1k_tokens']} GB per 1,000 tokens" if at.get("gb_per_1k_tokens") else ""
     say(f"{label}: largest context {got['max_ctx']:,}{mem}{per}", GREEN)
     say(f"{label}: stopped there because: {at['stopped']}")
+    if got["meta"].get("stops_at_pressure") == "critical":
+        say(f"{label}: this server runs with memory pressure at the warning level, so tries were judged by swapping, "
+            "memory running out and critical pressure", YELLOW)
     if not got["meta"].get("fill_confirmed"):
         say(f"{label}: the server reports no token counts, so how full the context was isn't confirmed", YELLOW)
     if sv.ctx_source == "measured":
