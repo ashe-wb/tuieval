@@ -4267,6 +4267,37 @@ max_context = 8192
             self.assertEqual(got["max_ctx"], 18432)
             self.assertTrue(any("more than this machine's memory" in s for s in said))
 
+    def test_a_server_that_runs_at_the_warning_level_is_judged_by_swapping(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            machines.memory_pressure_level = lambda: 2 if e._procs else 1   # warning whenever its server is up
+            r = ctxbench.probe(e, e.model("sized"), 8192)
+            self.assertEqual((r.ok, r.stopped_for), (False, "pressure"))
+            said = []
+            got = ctxbench.bench(e, "sized", lambda kind, **d: said.append(d.get("message", "")), max_ctx=65536, step=2048)
+            self.assertEqual(got["max_ctx"], 18432)
+            self.assertEqual((got["meta"]["stops_at_pressure"], got["meta"]["pressure_seen"]), ("critical", 2))
+            self.assertEqual(sum("that is how this server runs" in s for s in said), 1)   # decided once, on the first try
+            # swapping still stops a try under that rule
+            swapped = iter([0] + [2**30] * 1000)
+            machines.swapped_out_bytes = lambda: next(swapped)
+            r = ctxbench.probe(e, e.model("sized"), 8192, stop_level=ctxbench.PRESSURE_CRITICAL)
+            self.assertEqual((r.ok, r.stopped_for), (False, ""))
+            self.assertIn("swapped out 1024 MB", r.error)
+
+    def test_pressure_after_a_try_has_passed_is_the_edge(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+
+            def level():   # normal up to a context of 16384, warning above: the context is what does it
+                cmd = [a for p in e._procs for a in p.args]
+                return 2 if "--context" in cmd and int(cmd[cmd.index("--context") + 1]) > 16384 else 1
+            machines.memory_pressure_level = level
+            got = ctxbench.bench(e, "sized", max_ctx=65536, step=2048)
+            self.assertEqual((got["max_ctx"], got["meta"]["stops_at_pressure"]), (16384, "warning"))
+
     def test_a_probe_stops_when_the_machine_starts_swapping(self):
         from tuieval import ctxbench, machines
         with tempfile.TemporaryDirectory() as tmp:

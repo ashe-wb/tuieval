@@ -22,7 +22,9 @@ the measurement replaces those. Memory grows about linearly with the context, so
 passed predict the largest context that fits under the machine's limit; no probe goes above that
 prediction, and a failed probe is bisected against the largest that passed. A probe is stopped at
 once, while the server loads or works, when memory pressure rises, the machine starts swapping,
-or memory runs out. The next probe waits until the machine has recovered (pressure back to normal,
+or memory runs out. (A server that reaches the warning level at the smallest context, with nothing
+swapped, fills memory to a budget of its own: for it only critical pressure counts, besides
+swapping and memory running out.) The next probe waits until the machine has recovered (pressure back to normal,
 the memory given back), so one probe's pressure can't fail the next. Typically 3 to 5 server starts.
 
 Memory is read off the machine, not the server's processes: available memory before the server
@@ -52,6 +54,7 @@ APART = 0.8                # memory per token is read off two probes at least th
 MAX_STARTS = 8
 REQUEST_LIMIT_S = 3600     # reading a few hundred thousand tokens takes a while ([tune] ctx_request_timeout_s)
 PRESSURE_WARNING = 2       # macOS memory pressure level that stops a probe (1 is normal)
+PRESSURE_CRITICAL = 4      # the level that stops one for a server whose normal state is the warning level
 SWAP_STOP_MB = 512         # swapped out while a probe ran: stop it
 AVAILABLE_STOP_GB = 1.0    # memory available under this stops a probe
 SETTLE_S = 120             # how long the machine may take to recover after a probe before the next one
@@ -79,6 +82,8 @@ class Probe:
     total_s: float | None = None
     load_s: float | None = None
     filled: bool = False              # the server's token count confirms the context was full
+    pressure: int | None = None       # highest macOS memory pressure level while it ran
+    stopped_for: str = ""             # "pressure" when memory pressure alone stopped it (nothing was swapped)
 
     def summary(self):
         if not self.ok:
@@ -139,8 +144,9 @@ class Guard:
     """Watches the machine while a probe's server loads and works. When it gets unhealthy, the
     server is stopped: a load is abandoned and a request is cut off."""
 
-    def __init__(self, eng, every_s=2.0):
-        self.eng, self.every_s, self.reason = eng, every_s, ""
+    def __init__(self, eng, every_s=2.0, stop_level=PRESSURE_WARNING):
+        self.eng, self.every_s, self.reason, self.stop_level = eng, every_s, "", stop_level
+        self.pressure_only = False   # stopped for memory pressure, with nothing swapped out
         self.pressure, self._stop = machines.memory_pressure_level(), threading.Event()
         self._swap0 = machines.swapped_out_bytes()
         self._own_memory = eng.machine().discrete   # VRAM: the machine's memory isn't what runs out
@@ -155,7 +161,9 @@ class Guard:
         lvl = machines.memory_pressure_level()
         if lvl is not None:
             self.pressure = max(self.pressure or 0, lvl)
-            if lvl >= PRESSURE_WARNING:
+            if lvl >= self.stop_level:
+                swap = machines.swapped_out_bytes()
+                self.pressure_only = None in (swap, self._swap0) or swap - self._swap0 < 2**20
                 return f"macOS memory pressure rose to level {lvl}"
         swap = machines.swapped_out_bytes()
         if None not in (swap, self._swap0) and (swap - self._swap0) / 2**20 > SWAP_STOP_MB:
@@ -191,8 +199,9 @@ class Guard:
         self.eng._stall = None
 
 
-def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
-    """Serve the model with this context, fill it and ask for the fact. Returns a Probe."""
+def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S, stop_level=PRESSURE_WARNING):
+    """Serve the model with this context, fill it and ask for the fact. Returns a Probe.
+    stop_level: the macOS memory pressure level that stops it."""
     from . import client
     out = Probe(ctx)
     reserve = ANSWER_TOKENS + max(256, ctx // 50)
@@ -200,7 +209,7 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
     if target < 1024:
         out.error = f"a context of {ctx:,} is too small to test"
         return out
-    guard = Guard(eng)
+    guard = Guard(eng, stop_level=stop_level)
     try:
         with guard, eng.serve(m, log_name=f"{m['label']}.ctx", ctx=ctx) as (url, info):
             out.load_s = round(info["load_s"], 1) if info.get("load_s") else None
@@ -215,8 +224,8 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
             met = client.metrics(res) if not res.get("error") else {}
             out.prompt_tokens, out.pp_tps, out.tg_tps = met.get("prompt_tokens"), met.get("prompt_tps"), met.get("gen_tps")
             out.total_s = round(res["total_s"], 1) if res.get("total_s") else None
-            guard.check()
-            out.mem_gb = memory_gb(eng, m, info, guard)
+            guard.reason = guard.reason or guard.check()   # with the server still up: a short probe may end
+            out.mem_gb = memory_gb(eng, m, info, guard)     # between the guard's own readings
             text = (res.get("answer") or "") + (res.get("reasoning") or "")
             if res.get("error"):
                 out.error = res["error"]
@@ -234,8 +243,10 @@ def probe(eng, m, ctx, emit=lambda *a, **k: None, limit=REQUEST_LIMIT_S):
         out.error = str(e).splitlines()[0]
         if not guard.reason and any(w in out.error for w in NOT_ABOUT_CONTEXT):
             raise   # a smaller context wouldn't help
+    out.pressure = guard.pressure
     if guard.reason:   # the machine got unhealthy: that is why, whatever the server said as it was stopped
         out.ok, out.error = False, guard.reason
+        out.stopped_for = "pressure" if guard.pressure_only else ""
     return out
 
 
@@ -443,10 +454,24 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
 
     baseline = None if sv.machine.discrete else machines.available_memory_gb()
 
+    rule = {"level": PRESSURE_WARNING, "passed": False}
+
     def try_ctx(ctx):
         eng._check()
         settle(eng, baseline, emit)
-        return probe(eng, m, ctx, emit, limit_s)
+        r = probe(eng, m, ctx, emit, limit_s, rule["level"])
+        if r.stopped_for == "pressure" and not rule["passed"] and rule["level"] < PRESSURE_CRITICAL:
+            # Before anything has passed, at the smallest contexts: this isn't the context being too
+            # large. The server fills memory to a budget of its own and runs at the warning level.
+            rule["level"] = PRESSURE_CRITICAL
+            emit("tune_result", message="    " + r.summary())
+            emit("tune_step", message=f"    memory pressure reaches the warning level at {ctx:,} already, with nothing "
+                                      "swapped: that is how this server runs. From here a try is stopped for swapping, "
+                                      "memory running out or critical pressure only; trying this context again")
+            settle(eng, baseline, emit)
+            r = probe(eng, m, ctx, emit, limit_s, rule["level"])
+        rule["passed"] = rule["passed"] or r.ok
+        return r
 
     tried, why = search(try_ctx, first, upper, room, step, min(FLOOR, first), max_starts, emit)
     passed = [p for p in tried if p.ok]
@@ -465,7 +490,9 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
         "meta": {"date": profiles.now(), "machine": sv.machine.summary, "server_version": eng.server_version(m),
                  "model_file": os.path.basename(str(m.get("model", ""))), "model_bytes": sv.identity.get("model_bytes"),
                  "kv_type": sv.kv_type, "upper_bound": upper, "upper_bound_from": source,
-                 "fill_confirmed": best.filled, "server_starts": len(tried)},
+                 "fill_confirmed": best.filled, "server_starts": len(tried),
+                 "stops_at_pressure": "critical" if rule["level"] >= PRESSURE_CRITICAL else "warning",
+                 "pressure_seen": max((p.pressure or 0 for p in passed), default=0) or None},
     }
     path = profiles.save_context(sv.machine.id, label, measured, eng.tuning_dir)
     eng._serving.clear()
