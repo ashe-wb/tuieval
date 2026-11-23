@@ -424,10 +424,16 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
     room, refuse = room_gb(eng)
     if refuse:
         raise engine_mod.ModelFailed(refuse)
-    size = model_gb(m)
-    if room is not None and size is not None and size > room:
+    # A model that could be held in memory whole needs that much free before the first load (another
+    # model may be loaded). One larger than the machine's memory can't be: its server reads it from
+    # disk as needed, so its size says nothing about what it takes, and the probes' guard decides.
+    size, whole = model_gb(m), sv.machine.gpu_limit_gb if sv.machine.discrete else sv.machine.ram_gb
+    if room is not None and size is not None and room < size <= whole:
         raise engine_mod.ModelFailed(f"the model is {size:.1f} GB and {room:.1f} GB is free for it now: another "
                                      "model or app is holding memory")
+    if size is not None and size > whole:
+        emit("tune_step", message=f"the model is {size:.0f} GB on disk, more than this machine's memory: its server "
+                                  "reads it from disk as needed, so its size isn't checked against free memory")
     # Half of what it runs with now, so the second probe is a context expected to work and the two
     # give the memory per token before anything larger is tried.
     usual = sv.ctx if sv.fits and sv.ctx else None

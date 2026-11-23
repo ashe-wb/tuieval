@@ -4253,6 +4253,20 @@ max_context = 8192
                 ctxbench.bench(e, "sized", max_ctx=65536)
             self.assertFalse(os.path.isdir(os.path.join(e.log_dir, "server")))   # no server was started
 
+    def test_model_size_is_checked_against_free_memory_only_when_it_could_be_held_whole(self):
+        from tuieval import ctxbench, engine
+        self.addCleanup(setattr, ctxbench, "model_gb", ctxbench.model_gb)
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            ram, said = e.machine().ram_gb, []
+            ctxbench.model_gb = lambda m: ram - 0.1   # fits the machine, but not what is free now
+            with self.assertRaisesRegex(engine.ModelFailed, "another model or app is holding memory"):
+                ctxbench.bench(e, "sized", max_ctx=65536)
+            ctxbench.model_gb = lambda m: ram * 3     # can't be held in memory: its server reads it from disk
+            got = ctxbench.bench(e, "sized", lambda kind, **d: said.append(d.get("message", "")), max_ctx=65536, step=2048)
+            self.assertEqual(got["max_ctx"], 18432)
+            self.assertTrue(any("more than this machine's memory" in s for s in said))
+
     def test_a_probe_stops_when_the_machine_starts_swapping(self):
         from tuieval import ctxbench, machines
         with tempfile.TemporaryDirectory() as tmp:
