@@ -3965,5 +3965,212 @@ class AgentPacks(unittest.TestCase):
         self.assertIn("agent pack is graded by its tests when it runs", p.stdout)
 
 
+class ContextBench(unittest.TestCase):
+    """tuieval tune --ctx: the largest context a server can be started with, found by filling it."""
+
+    def test_context_flag_is_read_and_set_in_both_spellings(self):
+        from tuieval import engine
+        self.assertEqual(engine.read_context(["srv", "--ctx", "4096", "-x"], "--ctx"), 4096)
+        self.assertEqual(engine.read_context(["srv", "--ctx=8192"], "--ctx"), 8192)
+        self.assertIsNone(engine.read_context(["srv", "--ctx"], "--ctx"))
+        self.assertEqual(engine.set_context(["srv", "--ctx", "4096", "-x"], "--ctx", 1024), ["srv", "--ctx", "1024", "-x"])
+        self.assertEqual(engine.set_context(["srv", "--ctx=4096"], "--ctx", 1024), ["srv", "--ctx=1024"])
+        self.assertEqual(engine.set_context(["srv"], "--ctx", 1024), ["srv", "--ctx", "1024"])
+        self.assertEqual(engine.takes_context({"cmd": ["s", "-c", "{ctx}"], "ctx_flag": "--ctx"}), "placeholder")
+        self.assertEqual(engine.takes_context({"cmd": ["s"], "ctx_flag": "--ctx"}), "flag")
+        self.assertEqual(engine.takes_context({"cmd": ["s"]}), "")
+        self.assertEqual(engine.takes_context({"url": "http://x", "ctx_flag": "--ctx"}), "")
+
+    def _search(self, works_up_to, gb=None, **kw):
+        from tuieval import ctxbench
+        tried = []
+
+        def try_ctx(ctx):
+            tried.append(ctx)
+            ok = ctx <= works_up_to
+            return ctxbench.Probe(ctx, ok=ok, error="" if ok else "the server stopped", mem_gb=gb(ctx) if gb and ok else None)
+        probes, why = ctxbench.search(try_ctx, **kw)
+        best = max((p.ctx for p in probes if p.ok), default=None)
+        return best, tried, why
+
+    def test_search_doubles_then_bisects_a_failure(self):
+        best, tried, why = self._search(90000, start=32768, upper=131072)
+        self.assertEqual(tried, [32768, 65536, 131072, 98304, 81920, 90112])
+        self.assertEqual(best, 81920)
+        self.assertIn("90,112 failed: the server stopped", why)
+
+    def test_search_stops_at_the_upper_bound(self):
+        best, tried, why = self._search(10**9, start=32768, upper=117760)
+        self.assertEqual((best, tried), (117760, [32768, 65536, 117760]))
+        self.assertIn("upper bound", why)
+
+    def test_search_never_probes_past_what_memory_predicts(self):
+        # 20 GB + 0.4 GB per 1,000 tokens against a 50 GB limit: 75,000 tokens fit
+        best, tried, why = self._search(10**9, gb=lambda c: 20 + 0.0004 * c, start=32768, upper=131072, limit_gb=50)
+        self.assertEqual(tried, [32768, 65536, 74752])
+        self.assertEqual(best, 74752)
+        self.assertTrue(why.startswith("memory:"), why)
+
+    def test_search_halves_when_the_first_try_fails(self):
+        best, tried, why = self._search(20000, start=65536, upper=131072)
+        self.assertEqual(tried[:3], [65536, 32768, 16384])
+        self.assertEqual(best, 16384)
+        best, tried, why = self._search(0, start=32768, upper=131072)
+        self.assertEqual((best, tried), (None, [32768, 16384, 8192]))
+        self.assertIn("nothing", why)
+
+    def test_measurement_round_trips(self):
+        from tuieval import profiles
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(profiles.load_context("mac", "m", tmp))
+            profiles.save_context("mac", "m", {"max_ctx": 65536, "measured": {"memory_gb": 41.5, "stopped": 'a "why"'},
+                                               "probes": {"32768": "ok", "131072": "failed: x"},
+                                               "meta": {"kv_type": "f16", "model_bytes": None}}, tmp)
+            got = profiles.load_context("mac", "m", tmp)
+            self.assertEqual((got["max_ctx"], got["measured"]["memory_gb"], got["probes"]["131072"]),
+                             (65536, 41.5, "failed: x"))
+            self.assertIsNone(profiles.load("mac", "m", tmp))   # not a speed profile
+            write(profiles.context_path("mac", "m", tmp), "max_ctx = 'lots'\n")
+            self.assertIsNone(profiles.load_context("mac", "m", tmp))
+
+    def _workspace(self, tmp, extra=""):
+        ws = os.path.join(tmp, "ws")
+        tuieval(tmp, "init", ws)
+        os.makedirs(os.path.join(ws, "packs"), exist_ok=True)
+        mock = json.dumps([sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                           os.path.join(ws, "packs"), "--mode", "fixed", "--model", "{served_name}"])[1:-1]
+        with open(os.path.join(ws, "models.toml"), "a") as f:
+            f.write(f"""
+[servers.placeholder]
+cmd = [{mock}, "--context", "{{ctx}}", "--breaks-above", "20000"]
+port = {free_port()}
+max_ctx = 32768
+
+[servers.flag]
+cmd = [{mock}, "--cuts-at", "12000"]
+port = {free_port()}
+ctx_flag = "--context"
+
+[servers.fixed]
+cmd = [{mock}, "--context", "9000"]
+port = {free_port()}
+
+[[models]]
+label = "sized"
+server = "placeholder"
+model = "mock-sized"
+
+[[models]]
+label = "flagged"
+server = "flag"
+model = "mock-flagged"
+
+[[models]]
+label = "capped"
+server = "flag"
+model = "mock-capped"
+server_args = ["--context=10240"]
+
+[[models]]
+label = "own"
+server = "fixed"
+model = "mock-own"
+max_context = 8192
+{extra}""")
+        return ws
+
+    def _engine(self, ws):
+        """An engine on a machine that is healthy and has memory to spare, whatever the test machine is doing."""
+        from tuieval import engine, machines
+        for name, value in (("memory_pressure_level", lambda: 1), ("swapped_out_bytes", lambda: 0),
+                            ("available_memory_gb", lambda: 64.0)):
+            self.addCleanup(setattr, machines, name, getattr(machines, name))
+            setattr(machines, name, value)
+        return engine.Engine(root=ws)
+
+    def test_bench_finds_where_the_server_stops_loading(self):
+        from tuieval import ctxbench, profiles
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            m = e.model("sized")
+            self.assertEqual(e.serving(m).ctx, 32768)
+            got = ctxbench.bench(e, "sized", step=2048)
+            self.assertEqual(got["max_ctx"], 18432)   # the mock stops loading above 20000; 20480 failed
+            self.assertIn("20,480 failed", got["measured"]["stopped"])
+            self.assertTrue(got["meta"]["fill_confirmed"])
+            self.assertGreater(got["measured"]["prompt_tokens"], 0.85 * 16500)
+            saved = profiles.load_context(e.machine().id, "sized", e.tuning_dir)
+            self.assertEqual(saved["max_ctx"], 18432)
+            sv = e.serving(m)   # runs use it from now on
+            self.assertEqual((sv.ctx, sv.ctx_source, sv.fits), (18432, "measured", True))
+            cmd = e.server_command(m)[0]
+            self.assertEqual(cmd[cmd.index("--context") + 1], "18432")
+            p = tuieval(e.root, "machines")
+            self.assertRegex(p.stdout, r"sized\s+ctx 18k measured")
+
+    def test_bench_catches_a_server_that_cuts_prompts_short(self):
+        from tuieval import ctxbench
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            got = ctxbench.bench(e, "flagged", max_ctx=32768, step=2048)
+            self.assertEqual(got["max_ctx"], 12288)   # the mock reads only the last 12000 words
+            self.assertIn("16384", got["probes"])
+            self.assertIn("didn't find a fact near the start", got["probes"]["16384"])
+            cmd = e.server_command(e.model("flagged"))[0]
+            self.assertEqual(cmd[-2:], ["--context", "12288"])   # the flag is added for runs
+            # a context written in models.toml stays the cap, and is lowered when less was measured
+            cmd = e.server_command(e.model("capped"))[0]
+            self.assertIn("--context=10240", cmd)
+            ctxbench.bench(e, "capped", step=2048)
+            self.assertEqual(e.serving(e.model("capped")).ctx, 10240)
+            self.assertIn("--context=10240", e.server_command(e.model("capped"))[0])
+
+    def test_a_server_whose_context_cant_be_set_is_only_verified(self):
+        from tuieval import ctxbench, profiles
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            got = ctxbench.bench(e, "own")
+            self.assertTrue(got["verified"], got["probe"].error)
+            self.assertEqual(got["ctx"], 8192)
+            self.assertIsNone(profiles.load_context(e.machine().id, "own", e.tuning_dir))
+
+    def test_a_stale_measurement_isnt_used(self):
+        from tuieval import profiles
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            profiles.save_context(e.machine().id, "sized", {"max_ctx": 16384, "meta": {"kv_type": "q8_0"}}, e.tuning_dir)
+            e.cfg["servers"]["placeholder"]["kv_type"] = "f16"
+            sv = e.serving(e.model("sized"))
+            self.assertEqual((sv.ctx, sv.ctx_source), (32768, ""))
+            self.assertIn("tuieval tune --ctx again", sv.ctx_note)
+
+    def test_bench_wont_start_on_a_machine_short_of_memory(self):
+        from tuieval import ctxbench, engine, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            machines.memory_pressure_level = lambda: 2
+            with self.assertRaisesRegex(engine.ModelFailed, "memory pressure is already elevated"):
+                ctxbench.bench(e, "sized")
+            self.assertFalse(os.path.isdir(os.path.join(e.log_dir, "server")))   # no server was started
+
+    def test_a_probe_stops_when_the_machine_starts_swapping(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            swapped = iter([0] + [2**30] * 1000)
+            machines.swapped_out_bytes = lambda: next(swapped)
+            r = ctxbench.probe(e, e.model("sized"), 8192)
+            self.assertFalse(r.ok)
+            self.assertIn("swapped out 1024 MB", r.error)
+
+    def test_tune_ctx_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = self._workspace(tmp)
+            p = tuieval(ws, "tune", "own", "--ctx", check=False)
+            self.assertIn("own: the 8,192 context it declares works", p.stdout + p.stderr)
+            p = tuieval(ws, "tune", "--ctx", "--untuned", check=False)
+            self.assertIn("--ctx needs the models named", p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

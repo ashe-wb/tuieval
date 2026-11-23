@@ -147,6 +147,7 @@ tuieval regrade                               # re-score stored answers after ch
 tuieval regrade --only <model> --packs X      # just one model's results (and packs)
 tuieval machines                              # this machine and others, fit and tuning per model
 tuieval tune <model>                          # fastest speed flags for a model on this machine
+tuieval tune <model> --ctx                    # largest context it can be served with on this machine, measured
 tuieval export pi <model>                     # serve it in the pi coding agent with those flags
 tuieval watch --upstream http://localhost:8080   # show the reasoning of any app using your server
 tuieval help

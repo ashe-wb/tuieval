@@ -162,6 +162,43 @@ def effective_sampling(cfg, m):
 CONTEXT_FLAGS = {"--max-context", "--max-context-tokens", "--ctx-size", "-c", "--context-length", "--max-model-len"}
 
 
+def read_context(args, flag):
+    """The context a command line sets with the server's context flag ("--flag N" or "--flag=N"), or None."""
+    args = [str(a) for a in args]
+    for i, a in enumerate(args):
+        value = args[i + 1] if a == flag and i + 1 < len(args) else a[len(flag) + 1:] if a.startswith(flag + "=") else ""
+        if value.isdigit():
+            return int(value)
+    return None
+
+
+def set_context(args, flag, ctx):
+    """The command line with the server's context flag set to ctx: its value replaced where the flag
+    is there ("--flag N" or "--flag=N"), the flag added where it isn't."""
+    out, i, done = [], 0, False
+    while i < len(args):
+        a = str(args[i])
+        if a == flag and i + 1 < len(args):
+            out += [a, str(ctx)]
+            i, done = i + 2, True
+            continue
+        if a.startswith(flag + "="):
+            a, done = f"{flag}={ctx}", True
+        out.append(a)
+        i += 1
+    return out if done else out + [flag, str(ctx)]
+
+
+def takes_context(server):
+    """How tuieval can set this server's context: "placeholder" ({ctx} in its cmd), "flag" (its
+    ctx_flag), or "" when it can't (a server it doesn't start, or one with neither)."""
+    if not server.get("cmd"):
+        return ""
+    if any("{ctx}" in str(a) for a in server["cmd"]):
+        return "placeholder"
+    return "flag" if server.get("ctx_flag") else ""
+
+
 def strip_context(args):
     """A command line without its context-size flags (and their values)."""
     out, skip = [], False
@@ -254,6 +291,9 @@ class Serving:
     profile: dict | None = None
     mtp_layers: int = 0
     need_gb: float | None = None   # estimated GPU memory at ctx (from the fit check); None when unknown
+    ctx_source: str = ""           # "measured" when ctx comes from tuieval tune --ctx on this machine
+    ctx_measured: dict | None = None   # that measurement (profiles.load_context), also when it's out of date
+    ctx_note: str = ""             # why a measurement isn't used
 
 
 def infer_server(cfg, model):
@@ -1420,33 +1460,46 @@ class Engine:
                     ctx, fits, note, need = f.max_ctx, f.fits, f.note, f.need_gb
             except (OSError, ValueError) as e:
                 note = f"couldn't read the GGUF header ({e}); context not checked"
-        profile, perf, source = None, [], "n/a"
+        profile, perf, perf_source = None, [], "n/a"
         if server.get("cmd") and (server.get("perf") or server.get("tune")):
             perf = list(server.get("perf", []))
             profile = profiles.load(mc.id, m["label"], self.tuning_dir)
             if profile:
                 perf += list(profile["args"])
                 why = profiles.stale(profile, self.server_version(m), size)
-                source = f"outdated: {why}" if why else \
+                perf_source = f"outdated: {why}" if why else \
                     ("seeded" if profile.get("meta", {}).get("method") == "seeded" else "tuned")
             else:
                 perf += self.default_knob_args(server, mc)
-                source = "untuned"
+                perf_source = "untuned"
         flag = server.get("ctx_flag")      # e.g. --max-context-tokens, when the server takes one
         if flag and ctx is None:
-            args = list(m.get("server_args", [])) + perf
-            if flag in args[:-1]:
-                try:
-                    ctx = int(args[args.index(flag) + 1])
-                except ValueError:
-                    pass
+            ctx = read_context(list(m.get("server_args", [])) + perf, flag)
+        # The largest context measured here (tuieval tune --ctx) replaces the estimate. Your own caps
+        # (max_ctx, ctx, max_context, a context flag you wrote) still apply.
+        how, source, ctx_note = takes_context(server), "", ""
+        measured = profiles.load_context(mc.id, m["label"], self.tuning_dir) if how else None
+        if measured:
+            meta = measured.get("meta", {})
+            if meta.get("model_bytes") and size and meta["model_bytes"] != size:
+                ctx_note = "the model file changed since its context was measured; run tuieval tune --ctx again"
+            elif meta.get("kv_type") and kv and meta["kv_type"] != kv:
+                ctx_note = f"its context was measured with {meta['kv_type']} KV, not {kv}; run tuieval tune --ctx again"
+            else:
+                cap = want if how == "placeholder" else ctx
+                ctx, fits, source = min(cap, measured["max_ctx"]) if cap else measured["max_ctx"], True, "measured"
+                note = f"measured on {mc.id}: up to {measured['max_ctx'] // 1024}k context"
+                at = measured.get("measured", {})
+                if at.get("base_gb") is not None and at.get("gb_per_1k_tokens") is not None:
+                    need = round(at["base_gb"] + at["gb_per_1k_tokens"] * ctx / 1000, 1)
         identity = self._identity(m, server, kv, size)
         if server.get("outputs_depend_on_machine"):
             # Answers depend on the machine and on its memory settings (e.g. which experts stay
             # resident), so both are part of what a result is valid for.
             identity["machine"] = mc.id
             identity["perf"] = perf
-        sv = Serving(mc, ctx, kv, fits, note, perf, source, identity, profile, mtp, need)
+        sv = Serving(mc, ctx, kv, fits, note, perf, perf_source, identity, profile, mtp, need,
+                     ctx_source=source, ctx_measured=measured, ctx_note=ctx_note)
         self._serving[key] = sv
         return sv
 
@@ -1477,22 +1530,26 @@ class Engine:
             out["agent"] = agents.identity(self.cfg, pack)
         return out
 
-    def server_command(self, m, perf_args=None, port=None):
+    def server_command(self, m, perf_args=None, port=None, ctx=None):
         """(cmd or None, cwd, base_url) for a model. cmd is None for an already-running server.
-        perf_args replaces the speed flags (the tuner uses this); port overrides the server's."""
+        perf_args replaces the speed flags (the tuner uses this); port overrides the server's; ctx
+        the context (tuieval tune --ctx tries several)."""
         server = self.cfg["servers"][m["server"]]
         if not server.get("cmd"):
             return None, None, server["url"].rstrip("/").removesuffix("/v1")
         sv = self.serving(m)
         port = port or server["port"]
         values = {"model": expand(m["model"]), "served_name": m["served_name"], "port": port,
-                  "mmproj": expand(m.get("mmproj", "")), "ctx": sv.ctx or "", "kv_type": sv.kv_type or "",
+                  "mmproj": expand(m.get("mmproj", "")), "ctx": ctx or sv.ctx or "", "kv_type": sv.kv_type or "",
                   "root": self.root, **self.knob_values(sv.machine)}
         cmd = [expand(a, **values) for a in server["cmd"]]
         cmd += [expand(a, **values) for a in (sv.perf_args if perf_args is None else perf_args)]
         if m.get("mmproj"):
             cmd += [expand(a, **values) for a in server.get("vision_args", [])]
         cmd += [expand(a, **values) for a in m.get("server_args", [])]
+        use = ctx or (sv.ctx if sv.ctx_source == "measured" else None)
+        if use and takes_context(server) == "flag":
+            cmd = set_context(cmd, server["ctx_flag"], use)
         cmd, env = split_env(cmd)
         env = [f"{k}={expand(str(v), **values)}" for k, v in server.get("env", {}).items()] + env
         if env:   # env(1) keeps the command one copy-pasteable line and one process group
@@ -1970,12 +2027,13 @@ class Engine:
                 return free
 
     @contextlib.contextmanager
-    def serve(self, m, perf_args=None, port=None, log_name=None):
+    def serve(self, m, perf_args=None, port=None, log_name=None, ctx=None):
         """Start a model's server (or use the running one), wait until it serves the expected name,
-        yield (base_url, info), and stop it afterwards. info: load_s, command, alive(), peak_mb()."""
+        yield (base_url, info), and stop it afterwards. info: load_s, command, alive(), peak_mb().
+        ctx: serve with this context instead of the model's usual one."""
         defaults = self.cfg["defaults"]
         server = self.cfg["servers"][m["server"]]
-        cmd, cwd, base_url = self.server_command(m, perf_args=perf_args, port=port)
+        cmd, cwd, base_url = self.server_command(m, perf_args=perf_args, port=port, ctx=ctx)
         port = port or server.get("port")
         srv, stop, peak = None, threading.Event(), [0.0]
         info = {"load_s": None, "command": cmd, "alive": lambda: srv is None or srv.poll() is None,

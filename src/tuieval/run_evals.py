@@ -616,19 +616,47 @@ def cmd_machines(argv):
               f"~{e.gpu_residency_gb(mc):.0f} GB resident{RESET}")
         for m in e.cfg["models"]:
             sv = e.serving(m, mc)
-            if sv.perf_source == "n/a":
+            if sv.perf_source == "n/a" and sv.ctx_source != "measured":
                 print(f"  {m['label']:24s} {DIM}{m['server']} picks its own context and speed settings{RESET}")
+                if sv.ctx_note:
+                    print(f"  {'':24s} {DIM}{sv.ctx_note}{RESET}")
                 continue
             fit = f"{RED}doesn't fit{RESET}" if not sv.fits else (f"ctx {sv.ctx // 1024}k" if sv.ctx else "ctx default")
-            src = {"tuned": GREEN + "tuned" + RESET, "seeded": "seeded (hand-tuned flags)"}.get(
-                sv.perf_source, f"{DIM}{sv.perf_source}{RESET}")
+            if sv.fits and sv.ctx_source == "measured":
+                fit += " measured"
+            src = {"tuned": GREEN + "tuned" + RESET, "seeded": "seeded (hand-tuned flags)",
+                   "n/a": f"{DIM}no speed flags to tune{RESET}"}.get(sv.perf_source, f"{DIM}{sv.perf_source}{RESET}")
             speed = (sv.profile or {}).get("measured", {})
             sp = f"  gen {speed['tg_tps']} tok/s, prompt {speed['pp_tps']} tok/s" if speed.get("tg_tps") else ""
             print(f"  {m['label']:24s} {fit:12s} {src}{sp}")
             if not sv.fits:
                 print(f"  {'':24s} {DIM}{sv.fit_note}{RESET}")
+            if sv.ctx_note:
+                print(f"  {'':24s} {DIM}{sv.ctx_note}{RESET}")
     print(f"\n{DIM}Machines appear here after tuieval has run on them once (tuning/<id>/machine.toml; sync the"
           f" workspace to share it). Set EVALS_MACHINE to rename this one.{RESET}")
+
+
+def context_report(e, label, got):
+    """Print what tuieval tune --ctx found for a model. False if a declared context didn't hold."""
+    if "verified" in got:
+        if got["verified"]:
+            say(f"{label}: the {got['ctx']:,} context it declares works ({got['probe'].summary()})", GREEN)
+        else:
+            say(f"{label}: the {got['ctx']:,} context it declares doesn't work: {got['probe'].error}", RED)
+        return got["verified"]
+    at, sv = got["measured"], e.serving(e.model(label))
+    mem = f", {at['memory_gb']:.1f} GB with it full" if at.get("memory_gb") else ""
+    per = f", {at['gb_per_1k_tokens']} GB per 1,000 tokens" if at.get("gb_per_1k_tokens") else ""
+    say(f"{label}: largest context {got['max_ctx']:,}{mem}{per}", GREEN)
+    say(f"{label}: stopped there because: {at['stopped']}")
+    if not got["meta"].get("fill_confirmed"):
+        say(f"{label}: the server reports no token counts, so how full the context was isn't confirmed", YELLOW)
+    if sv.ctx and sv.ctx < got["max_ctx"]:
+        say(f"{label}: runs use {sv.ctx:,}, the cap set in models.toml")
+    elif sv.ctx_source == "measured":
+        say(f"{label}: runs use {sv.ctx:,} from now on")
+    return True
 
 
 class TunePrinter:
@@ -665,17 +693,29 @@ def cmd_tune(argv):
                                             "same architecture is already tuned here (its flags are the starting point).")
     p.add_argument("labels", nargs="*", help="models to tune")
     p.add_argument("--untuned", action="store_true", help="every local model without a current profile here")
-    p.add_argument("--max-starts", type=int, default=16, help="server starts per model (default 16)")
+    p.add_argument("--max-starts", type=int, default=None, help="server starts per model (default 16; 8 with --ctx)")
     p.add_argument("--no-bench", action="store_true", help="skip llama-bench even if it is installed")
     p.add_argument("--export-pi", action="store_true",
                    help="after tuning, export each model's serving settings to the pi coding agent (asks first)")
     p.add_argument("--cold", action="store_true",
                    help="tune every knob from the defaults, even if a model of the same architecture is tuned here")
+    p.add_argument("--ctx", action="store_true",
+                   help="instead of speed flags, measure the largest context each model can be served with on this "
+                        "machine (ctxbench.py): a few server starts, each filling the context it tries. Runs then "
+                        "use it in place of the estimate")
+    p.add_argument("--max", type=int, default=None, metavar="N",
+                   help="with --ctx: the largest context to try (default: the model's or server's own cap)")
+    p.add_argument("--start", type=int, default=None, metavar="N",
+                   help="with --ctx: the first context to try (default: a quarter of the largest)")
+    p.add_argument("--step", type=int, default=None, metavar="N",
+                   help="with --ctx: how close to the true maximum to get (default 8192)")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
     a = p.parse_args(argv)
-    from . import tune
+    from . import ctxbench, tune
     e = engine.Engine(TunePrinter(), models_path=a.models)
     labels = a.labels
+    if a.ctx and a.untuned:
+        sys.exit("--ctx needs the models named")
     if a.untuned:
         labels += [m["label"] for m in e.cfg["models"] if m["label"] not in labels
                    and e.cfg["servers"][m["server"]].get("cmd") and e.serving(m).perf_source not in ("tuned",)]
@@ -683,10 +723,10 @@ def cmd_tune(argv):
     if bad or not labels:
         sys.exit(f"unknown model(s) {bad}; see tuieval list" if bad else "name models to tune, or --untuned")
     signal.signal(signal.SIGINT, lambda *_: (say("stopping…", RED), e.cancel()))
-    say(f"tuning on {e.machine().id}: {e.machine().summary}")
+    say(f"{'measuring context' if a.ctx else 'tuning'} on {e.machine().id}: {e.machine().summary}")
     failed = 0
     try:
-        lock = e.machine_lock(f"tune: {', '.join(labels)}")
+        lock = e.machine_lock(f"{'context' if a.ctx else 'tune'}: {', '.join(labels)}")
         lock.__enter__()   # held until this process exits
     except engine.Cancelled:
         sys.exit(1)
@@ -696,7 +736,12 @@ def cmd_tune(argv):
 
         def work(label=label, result=result):
             try:
-                result["profile"] = tune.tune(e, label, e.on_event, max_starts=a.max_starts, use_bench=not a.no_bench,
+                if a.ctx:
+                    result["context"] = ctxbench.bench(
+                        e, label, e.on_event, max_ctx=a.max, start=a.start, step=a.step or ctxbench.STEP,
+                        max_starts=a.max_starts or ctxbench.MAX_STARTS)
+                    return
+                result["profile"] = tune.tune(e, label, e.on_event, max_starts=a.max_starts or 16, use_bench=not a.no_bench,
                                                  warm=not a.cold)
             except (engine.ModelFailed, engine.Cancelled) as ex:
                 result["error"] = str(ex) or "cancelled"
@@ -706,9 +751,12 @@ def cmd_tune(argv):
             t.join(0.5)
         if "error" in result:
             failed += 1
-            say(f"{label}: not tuned: {result['error']}", RED)
+            say(f"{label}: not {'measured' if a.ctx else 'tuned'}: {result['error']}", RED)
             if e._cancel.is_set():
                 break
+            continue
+        if a.ctx:
+            failed += not context_report(e, label, result["context"])
             continue
         pr = result["profile"]
         ms = pr["measured"]

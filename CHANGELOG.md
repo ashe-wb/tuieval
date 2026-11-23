@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `tuieval tune <model> --ctx` measures the largest context a model can be served with on this machine, for any server tuieval starts: it fills each context it tries and checks the answer, the tokens the server read, memory pressure and swapping. Runs then use the measured context in place of the fit check's estimate (`tuning/<machine>/<model>.ctx.toml`; `tuieval machines` shows *measured*). See docs/models.md.
 - Results from more than one machine: a **Machine** dropdown in Results keeps only the answers that ran on one machine, in every tab (hosted models' answers count from any machine unless **Hosted from any machine** is unticked). `--ran-on <id>` (and `--ran-on-strict`) on `tuieval pta`, `compare`, `verdict`, `report` and `insights`.
 - Fix: the PTA index's Score ≥ filter did nothing once a pack was picked; it now filters the models that answered the pack (models picked by hand are still always shown).
 - PTA index: models scoring below 85% are left out by default (listed with their score), unless every model is. The **Score ≥** dropdown (`tuieval pta --min-score N`) sets the minimum, Any score shows all; picked models are always shown.

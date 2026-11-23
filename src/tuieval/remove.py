@@ -78,6 +78,9 @@ def plan(eng, label):
         f = profiles.path(machine, label, eng.tuning_dir)
         if os.path.isfile(f):
             p.moves.append((f, os.path.join("tuning", machine, label + ".toml")))
+        f = profiles.context_path(machine, label, eng.tuning_dir)
+        if os.path.isfile(f):
+            p.moves.append((f, os.path.join("tuning", machine, label + ".ctx.toml")))
     with open(eng.models_path) as f:
         old = f.read()
     new = without_block(old, label)
