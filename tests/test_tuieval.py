@@ -4044,6 +4044,21 @@ class ContextBench(unittest.TestCase):
         ctxbench.settle(eng, 85.0, lambda kind, **d: said.append(d["message"]), limit_s=0.01)
         self.assertIn("25.0 GB less memory is available", said[-1])
 
+    def test_search_isnt_capped_by_memory_a_server_sizes_itself(self):
+        said = []
+        # about 84 GB whatever the context, against 82.9 GB set aside: over it from the smallest try on
+        best, tried, why = self._search(300000, gb=lambda c: 84.0 + c * 4e-6, start=32768, upper=1048576,
+                                        limit_gb=82.9, max_starts=12,
+                                        emit=lambda kind, **d: said.append(d.get("message", "")))
+        self.assertEqual(tried[:5], [32768, 65536, 131072, 262144, 524288])
+        self.assertGreaterEqual(best, 262144)
+        self.assertIn("failed", why)
+        self.assertEqual(sum("sizes its own memory" in s for s in said), 1)
+        # one whose memory grows with the context past the budget is still capped
+        best, tried, why = self._search(10**9, gb=lambda c: 70 + 0.0001 * c, start=32768, upper=1048576, limit_gb=82.9)
+        self.assertTrue(why.startswith("memory:"), why)
+        self.assertLess(max(tried), 131072)
+
     def test_search_halves_when_the_first_try_fails(self):
         best, tried, why = self._search(20000, start=65536, upper=131072)
         self.assertEqual(tried[:3], [65536, 32768, 16384])
