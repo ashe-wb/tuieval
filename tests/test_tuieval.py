@@ -4094,8 +4094,9 @@ max_context = 8192
             e = self._engine(self._workspace(tmp))
             m = e.model("sized")
             self.assertEqual(e.serving(m).ctx, 32768)
-            got = ctxbench.bench(e, "sized", step=2048)
+            got = ctxbench.bench(e, "sized", max_ctx=65536, step=2048)
             self.assertEqual(got["max_ctx"], 18432)   # the mock stops loading above 20000; 20480 failed
+            self.assertEqual(list(got["probes"])[:2], ["16384", "32768"])   # half its usual context, then that
             self.assertIn("20,480 failed", got["measured"]["stopped"])
             self.assertTrue(got["meta"]["fill_confirmed"])
             self.assertGreater(got["measured"]["prompt_tokens"], 0.85 * 16500)
@@ -4109,7 +4110,7 @@ max_context = 8192
             self.assertRegex(p.stdout, r"sized\s+ctx 18k measured")
 
     def test_bench_catches_a_server_that_cuts_prompts_short(self):
-        from tuieval import ctxbench
+        from tuieval import ctxbench, engine
         with tempfile.TemporaryDirectory() as tmp:
             e = self._engine(self._workspace(tmp))
             got = ctxbench.bench(e, "flagged", max_ctx=32768, step=2048)
@@ -4118,12 +4119,78 @@ max_context = 8192
             self.assertIn("didn't find a fact near the start", got["probes"]["16384"])
             cmd = e.server_command(e.model("flagged"))[0]
             self.assertEqual(cmd[-2:], ["--context", "12288"])   # the flag is added for runs
-            # a context written in models.toml stays the cap, and is lowered when less was measured
+            # a context written in models.toml doesn't bound the search, and the measurement replaces it
             cmd = e.server_command(e.model("capped"))[0]
             self.assertIn("--context=10240", cmd)
-            ctxbench.bench(e, "capped", step=2048)
-            self.assertEqual(e.serving(e.model("capped")).ctx, 10240)
-            self.assertIn("--context=10240", e.server_command(e.model("capped"))[0])
+            with self.assertRaisesRegex(engine.ModelFailed, "own context limit isn't known: pass --max"):
+                ctxbench.bench(e, "capped", step=2048)
+            got = ctxbench.bench(e, "capped", max_ctx=32768, step=2048)
+            self.assertEqual(got["max_ctx"], 12288)
+            self.assertEqual(e.serving(e.model("capped")).ctx, 12288)
+            cmd = e.server_command(e.model("capped"))[0]
+            self.assertIn("--context=12288", cmd)
+            self.assertNotIn("--context=10240", cmd)
+
+    def test_a_measurement_governs_the_caps_in_models_toml(self):
+        from tuieval import profiles
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            m = e.model("sized")
+            self.assertEqual(e.serving(m).ctx, 32768)   # max_ctx, while nothing is measured
+            profiles.save_context(e.machine().id, "sized", {"max_ctx": 49152}, e.tuning_dir)
+            e._serving.clear()
+            sv = e.serving(m)
+            self.assertEqual((sv.ctx, sv.ctx_source), (49152, "measured"))   # above max_ctx = 32768
+            cmd = e.server_command(m)[0]
+            self.assertEqual(cmd[cmd.index("--context") + 1], "49152")
+
+    def test_memory_per_token_comes_from_probes_well_apart(self):
+        from tuieval import ctxbench
+        P = ctxbench.Probe
+        # 125952 and 131072 are too close to tell memory growth from noise: 65536 is the other point
+        passed = [P(32768, True, mem_gb=80.0), P(65536, True, mem_gb=82.0), P(125952, True, mem_gb=82.9),
+                  P(131072, True, mem_gb=83.0)]
+        base, per, fit = ctxbench.predict(passed, 84.0)
+        self.assertAlmostEqual(per, 1.0 / 65536)
+        self.assertEqual(fit, 196608)
+        self.assertEqual(ctxbench.predict(passed[:1], 84.0), (None, None, None))
+
+    def test_available_memory_on_a_mac_comes_from_page_counts(self):
+        from tuieval import machines
+        text = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:    1000.\n"
+                "Pages wired down:    65536.\nAnonymous pages:    131072.\nFile-backed pages:    999999.\n"
+                "Pages occupied by compressor:    65536.\n")
+        # 16 GiB of RAM less (1 + 2 + 1) GiB held: the file cache counts as available
+        self.assertAlmostEqual(machines.vm_stat_available_gb(text, 16 * 2**30), 12.0)
+        self.assertIsNone(machines.vm_stat_available_gb("Pages free: 5.", 16 * 2**30))
+
+    def test_a_probe_measures_the_memory_the_machine_loses(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            readings = iter([64.0] + [57.5] * 1000)   # before the server starts, then while it runs
+            machines.available_memory_gb = lambda: next(readings)
+            r = ctxbench.probe(e, e.model("sized"), 8192)
+            self.assertEqual((r.ok, r.mem_gb), (True, 6.5))
+
+    def test_a_probe_stops_when_memory_runs_out(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            readings = iter([64.0] + [0.4] * 1000)
+            machines.available_memory_gb = lambda: next(readings)
+            r = ctxbench.probe(e, e.model("sized"), 8192)
+            self.assertEqual((r.ok, r.error), (False, "only 0.4 GB of memory was left"))
+
+    def test_a_probe_stops_when_memory_pressure_rises(self):
+        from tuieval import ctxbench, machines
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self._engine(self._workspace(tmp))
+            levels = iter([1] + [2] * 1000)
+            machines.memory_pressure_level = lambda: next(levels)
+            r = ctxbench.probe(e, e.model("sized"), 8192)
+            self.assertEqual((r.ok, r.error), (False, "macOS memory pressure rose to level 2"))
+            self.assertIsNone(e._stall)   # the next server can load
 
     def test_a_server_whose_context_cant_be_set_is_only_verified(self):
         from tuieval import ctxbench, profiles
@@ -4150,7 +4217,7 @@ max_context = 8192
             e = self._engine(self._workspace(tmp))
             machines.memory_pressure_level = lambda: 2
             with self.assertRaisesRegex(engine.ModelFailed, "memory pressure is already elevated"):
-                ctxbench.bench(e, "sized")
+                ctxbench.bench(e, "sized", max_ctx=65536)
             self.assertFalse(os.path.isdir(os.path.join(e.log_dir, "server")))   # no server was started
 
     def test_a_probe_stops_when_the_machine_starts_swapping(self):

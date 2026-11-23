@@ -1475,8 +1475,9 @@ class Engine:
         flag = server.get("ctx_flag")      # e.g. --max-context-tokens, when the server takes one
         if flag and ctx is None:
             ctx = read_context(list(m.get("server_args", [])) + perf, flag)
-        # The largest context measured here (tuieval tune --ctx) replaces the estimate. Your own caps
-        # (max_ctx, ctx, max_context, a context flag you wrote) still apply.
+        # The largest context measured here (tuieval tune --ctx) is the context: it replaces the estimate
+        # and whatever models.toml caps it at (max_ctx, ctx, max_context, a context flag), which were
+        # written without knowing it.
         how, source, ctx_note = takes_context(server), "", ""
         measured = profiles.load_context(mc.id, m["label"], self.tuning_dir) if how else None
         if measured:
@@ -1486,8 +1487,7 @@ class Engine:
             elif meta.get("kv_type") and kv and meta["kv_type"] != kv:
                 ctx_note = f"its context was measured with {meta['kv_type']} KV, not {kv}; run tuieval tune --ctx again"
             else:
-                cap = want if how == "placeholder" else ctx
-                ctx, fits, source = min(cap, measured["max_ctx"]) if cap else measured["max_ctx"], True, "measured"
+                ctx, fits, source = measured["max_ctx"], True, "measured"
                 note = f"measured on {mc.id}: up to {measured['max_ctx'] // 1024}k context"
                 at = measured.get("measured", {})
                 if at.get("base_gb") is not None and at.get("gb_per_1k_tokens") is not None:

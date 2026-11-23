@@ -153,14 +153,16 @@ The knobs are `[servers.<name>.tune]` in `models.toml`: each knob is a list of o
 The fit check estimates the context from the model file, and only for servers that use memory the way llama.cpp does. `tuieval tune <model> --ctx` measures it instead, the same way for any server tuieval starts:
 
 1. It starts the server with a context, sends a built-in document that fills it (sized from the token counts the server reports, so any tokenizer works) with one fact near the start, and asks for that fact.
-2. The try passes when the answer is right, the server read the whole document (a server that cuts long prompts short fails here), and the machine stayed healthy: no macOS memory pressure, no swapping, memory left on Linux. A try is stopped the moment one of those turns bad.
-3. It starts at a quarter of the upper bound and doubles. Memory grows about linearly with the context, so two tries that passed predict the largest context that fits in the machine's memory (less `memory_headroom_gb`, and less whatever other apps hold now); no try goes above the prediction, and a failed try is bisected against the largest that passed.
+2. The try passes when the answer is right, the server read the whole document (a server that cuts long prompts short fails here), and the machine stayed healthy: no macOS memory pressure, no swapping, memory left on Linux. A try is stopped the moment one of those turns bad, also while the server is still loading.
+3. It starts at half the context the model runs with now (32768 when that isn't known) and doubles. Memory grows about linearly with the context, so two tries that passed predict the largest context that fits in the machine's memory (less `memory_headroom_gb`, and less whatever other apps hold now); no try goes above the prediction, and a failed try is bisected against the largest that passed.
 
 Expect 3 to 5 server starts; the largest ones take as long as the server needs to read that many tokens. It won't start when memory pressure is already elevated or the model is larger than the memory free now.
 
-The upper bound is `--max N`, else the smallest of the server's `max_ctx`, the model's `ctx` or `max_context` and a context flag written in `models.toml`, else the model file's own limit. `--start N` sets the first context tried, `--step N` how close to the true maximum to get (default 8192).
+Memory is read off the machine, not the server's processes: the memory available before the server starts, less the lowest it falls to while the context is full (VRAM on discrete GPUs). On a Mac, available memory is RAM less what is held and can't be given back (anonymous and wired pages and the compressor, from `vm_stat`), so files a server maps and reads on demand don't count against it, and the reading is in the same terms as the memory it is compared with.
 
-The result is saved in `tuning/<machine>/<model>.ctx.toml`: the context, the memory with it full, the memory per 1,000 tokens and every try. Runs on that machine then use it in place of the estimate; your own caps still apply, so raise `max_ctx` if the measured context is above it. `tuieval machines` marks it *measured*. Delete the file to go back to the estimate; a measurement made with another model file or KV type is ignored.
+The upper bound is the model's own limit: `--max N`, else the context length in the model file, else the model's `max_context`. What `models.toml` caps the context at (`max_ctx`, a model's `ctx`, a context flag in `server_args`) doesn't bound the search. `--start N` sets the first context tried, `--step N` how close to the true maximum to get (default 8192).
+
+The result is saved in `tuning/<machine>/<model>.ctx.toml`: the context, the memory with it full, the memory per 1,000 tokens and every try. Runs on that machine then use it as the model's context, in place of the estimate and of the caps in `models.toml`: those were written without the measurement, so it governs them, also when it is larger. `tuieval machines` marks it *measured*. To hold a model below its maximum, lower the `max_ctx` line in that `.ctx.toml` file; delete the file to go back to the estimate and the caps. Also, a measurement made with another model file or KV type is ignored.
 
 tuieval sets the context through `{ctx}` in the server's `cmd`, or through its `ctx_flag`. For a server with neither (one already running, or one that sizes itself), `--ctx` only checks the `max_context` its model declares, with one try, and saves nothing.
 
@@ -201,7 +203,7 @@ On Apple Silicon Macs, once the system's GPU allocations pass about half of RAM,
 | `model_is_path` | `model` is a file or folder: check it exists before starting |
 | `fit_check` | size the context from the GGUF header and skip models that don't fit (the fit check; it assumes llama.cpp's memory use). Default: on for servers whose `cmd` takes `{ctx}`, off for others, whose context is the model's `max_context` |
 | `vision_args` | flags appended for models with `mmproj` |
-| `kv_type`, `max_ctx` | llama defaults: KV-cache type, upper bound on context |
+| `kv_type`, `max_ctx` | llama defaults: KV-cache type, upper bound on context (until a model's context is measured with `tuieval tune --ctx`) |
 | `ctx_flag` | the server's context flag (e.g. `--max-context`), for servers whose `cmd` doesn't take `{ctx}`: long packs are skipped if a configured context is too small, and `tuieval tune --ctx` sets it to measure the largest context |
 | `request` | fields added to every request (e.g. `{ cache_prompt = false }`) |
 | `perf` | speed-only flags always applied |

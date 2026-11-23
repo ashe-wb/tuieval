@@ -652,10 +652,8 @@ def context_report(e, label, got):
     say(f"{label}: stopped there because: {at['stopped']}")
     if not got["meta"].get("fill_confirmed"):
         say(f"{label}: the server reports no token counts, so how full the context was isn't confirmed", YELLOW)
-    if sv.ctx and sv.ctx < got["max_ctx"]:
-        say(f"{label}: runs use {sv.ctx:,}, the cap set in models.toml")
-    elif sv.ctx_source == "measured":
-        say(f"{label}: runs use {sv.ctx:,} from now on")
+    if sv.ctx_source == "measured":
+        say(f"{label}: runs use {sv.ctx:,} from now on, whatever models.toml caps it at")
     return True
 
 
@@ -704,9 +702,9 @@ def cmd_tune(argv):
                         "machine (ctxbench.py): a few server starts, each filling the context it tries. Runs then "
                         "use it in place of the estimate")
     p.add_argument("--max", type=int, default=None, metavar="N",
-                   help="with --ctx: the largest context to try (default: the model's or server's own cap)")
+                   help="with --ctx: the largest context to try (default: the model's own limit)")
     p.add_argument("--start", type=int, default=None, metavar="N",
-                   help="with --ctx: the first context to try (default: a quarter of the largest)")
+                   help="with --ctx: the first context to try (default: half of what the model runs with now)")
     p.add_argument("--step", type=int, default=None, metavar="N",
                    help="with --ctx: how close to the true maximum to get (default 8192)")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
