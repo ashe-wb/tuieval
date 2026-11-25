@@ -43,6 +43,7 @@ import shutil
 import signal
 import socket
 import statistics
+import string
 import subprocess
 import tempfile
 import threading
@@ -133,7 +134,51 @@ def load_config(path):
         m.setdefault("served_name", m["label"] if server.get("model_is_path") else m["model"])
         m["vision"] = bool(m.get("vision") or m.get("mmproj"))
         m.setdefault("tags", [])
+    for name, server in cfg["servers"].items():
+        check_drafts(path, name, server)
     return cfg
+
+
+DRAFT_KIND_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def draft_names(server):
+    """The drafter placeholders a server's flags can use: {draft} (the model's `draft` file,
+    whatever it is) and {draft_<kind>} for each kind in the server's `drafts` table."""
+    return ["draft"] + [f"draft_{k}" for k in server.get("drafts", {})]
+
+
+def draft_fields(args):
+    """The drafter placeholders a list of arguments uses."""
+    return {name for a in args for _, name, _, _ in string.Formatter().parse(str(a))
+            if name and (name == "draft" or name.startswith("draft_"))}
+
+
+def draft_literals(server):
+    """Format values that leave the drafter placeholders in place: tune options and profiles keep
+    them, and the path is filled in when the server starts."""
+    return {n: "{" + n + "}" for n in draft_names(server)}
+
+
+def check_drafts(path, name, server):
+    """A server's `drafts` table and the drafter placeholders in its tune options."""
+    kinds = server.get("drafts", {})
+    if not isinstance(kinds, dict) or not all(isinstance(v, dict) for v in kinds.values()):
+        raise ConfigError(f"{path}: [servers.{name}.drafts] must map each kind to the GGUF metadata "
+                          f"that identifies it, e.g. kind = {{\"general.architecture\" = \"...\"}}")
+    for kind in kinds:
+        if not DRAFT_KIND_RE.match(kind):
+            raise ConfigError(f"{path}: [servers.{name}.drafts] kind {kind!r} must be lowercase letters, digits or '_'")
+    known = set(draft_names(server))
+    for knob, options in server.get("tune", {}).items():
+        for i, o in enumerate(options):
+            used = draft_fields(o)
+            if used - known:
+                raise ConfigError(f"{path}: [servers.{name}.tune] {knob} uses {{{sorted(used - known)[0]}}}, "
+                                  f"but [servers.{name}.drafts] has no such kind")
+            if used and i == 0:
+                raise ConfigError(f"{path}: [servers.{name}.tune] {knob}: the first option is the default for "
+                                  f"every model, so it can't need a drafter file")
 
 
 def fit_check(server):
@@ -290,6 +335,7 @@ class Serving:
     identity: dict             # output-affecting settings, part of the results fingerprint
     profile: dict | None = None
     mtp_layers: int = 0
+    drafts: tuple = ()             # drafter placeholders this model's `draft` file fills ({draft}, {draft_<kind>})
     need_gb: float | None = None   # estimated GPU memory at ctx (from the fit check); None when unknown
     ctx_source: str = ""           # "measured" when ctx comes from tuieval tune --ctx on this machine
     ctx_measured: dict | None = None   # that measurement (profiles.load_context), also when it's out of date
@@ -1435,6 +1481,21 @@ class Engine:
         vals = self.knob_values(machine)
         return [a.format(**vals) for opts in server.get("tune", {}).values() if opts for a in opts[0]]
 
+    def drafts(self, m):
+        """The drafter placeholders a model's `draft` file fills: {draft} when the file exists, and
+        {draft_<kind>} for each kind of its server whose GGUF metadata the file has."""
+        path = expand(m.get("draft", ""))
+        if not path or not os.path.isfile(path):
+            return ()
+        names = ["draft"]
+        for kind, want in self.cfg["servers"][m["server"]].get("drafts", {}).items():
+            try:
+                if machines.gguf_matches(path, want):
+                    names.append(f"draft_{kind}")
+            except (OSError, ValueError):
+                break   # not a readable GGUF: no kind
+        return tuple(names)
+
     def serving(self, m, machine=None):
         """Serving for a model on this machine: context from the fit check, speed flags from its
         tuned profile (or the defaults), and the output-affecting identity."""
@@ -1455,16 +1516,23 @@ class Engine:
                 if fit_check(server):
                     mmproj = expand(m.get("mmproj", ""))
                     extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
+                    draft = expand(m.get("draft", ""))   # counted whether or not the tuned flags use it
+                    extra += os.path.getsize(draft) if draft and os.path.isfile(draft) else 0
                     f = machines.fit(path, mc, kv_type=kv or "f16", headroom_gb=self.headroom_gb(mc), extra_bytes=extra,
                                      want_ctx=want)
                     ctx, fits, note, need = f.max_ctx, f.fits, f.note, f.need_gb
             except (OSError, ValueError) as e:
                 note = f"couldn't read the GGUF header ({e}); context not checked"
         profile, perf, perf_source = None, [], "n/a"
+        drafts = self.drafts(m)
         if server.get("cmd") and (server.get("perf") or server.get("tune")):
             perf = list(server.get("perf", []))
             profile = profiles.load(mc.id, m["label"], self.tuning_dir)
-            if profile:
+            if profile and draft_fields(profile["args"]) - set(drafts):
+                # tuned with a drafter file that is gone or is another kind now: its flags can't run
+                perf += self.default_knob_args(server, mc)
+                perf_source = "outdated: the drafter file it was tuned with is missing or changed"
+            elif profile:
                 perf += list(profile["args"])
                 why = profiles.stale(profile, self.server_version(m), size)
                 perf_source = f"outdated: {why}" if why else \
@@ -1498,7 +1566,7 @@ class Engine:
             # resident), so both are part of what a result is valid for.
             identity["machine"] = mc.id
             identity["perf"] = perf
-        sv = Serving(mc, ctx, kv, fits, note, perf, perf_source, identity, profile, mtp, need,
+        sv = Serving(mc, ctx, kv, fits, note, perf, perf_source, identity, profile, mtp, drafts, need,
                      ctx_source=source, ctx_measured=measured, ctx_note=ctx_note)
         self._serving[key] = sv
         return sv
@@ -1515,7 +1583,8 @@ class Engine:
                 ident["endpoint"], ident["quantization"] = ep.get("tag"), ep.get("quantization")
             return ident
         values = {"model": os.path.basename(m["model"]), "served_name": "<name>", "port": "<port>", "ctx": "<ctx>",
-                  "kv_type": kv or "", "mmproj": os.path.basename(m.get("mmproj", ""))}
+                  "kv_type": kv or "", "mmproj": os.path.basename(m.get("mmproj", "")),
+                  **{n: os.path.basename(m.get("draft", "")) for n in draft_names(server)}}
         cmd = [a.format(**values) for a in server["cmd"]]
         if m.get("mmproj"):
             cmd += [a.format(**values) for a in server.get("vision_args", [])]
@@ -1541,7 +1610,8 @@ class Engine:
         port = port or server["port"]
         values = {"model": expand(m["model"]), "served_name": m["served_name"], "port": port,
                   "mmproj": expand(m.get("mmproj", "")), "ctx": ctx or sv.ctx or "", "kv_type": sv.kv_type or "",
-                  "root": self.root, **self.knob_values(sv.machine)}
+                  "root": self.root, **self.knob_values(sv.machine),
+                  **{n: expand(m.get("draft", "")) for n in draft_names(server)}}
         cmd = [expand(a, **values) for a in server["cmd"]]
         cmd += [expand(a, **values) for a in (sv.perf_args if perf_args is None else perf_args)]
         if m.get("mmproj"):
@@ -2046,6 +2116,8 @@ class Engine:
                     raise ModelFailed(f"model not found: {model_path}")
                 if m.get("mmproj") and not os.path.isfile(expand(m["mmproj"])):
                     raise ModelFailed(f"mmproj file not found: {expand(m['mmproj'])}")
+                if m.get("draft") and not os.path.isfile(expand(m["draft"])):
+                    raise ModelFailed(f"draft file not found: {expand(m['draft'])}")
                 if cwd and not os.path.isdir(cwd):
                     raise ModelFailed(f"server directory not found: {cwd}")
                 missing = missing_program(cmd, cwd)

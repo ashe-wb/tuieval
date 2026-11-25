@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Drafter files: a model can name a separate drafter file (`draft = "…gguf"`), and tune options that use `{draft}` are offered only to models that have one. A server's `[servers.<name>.drafts]` table names kinds of drafter by GGUF metadata, for options that use `{draft_<kind>}`. See docs/models.md.
 - Fix: `tuieval tune --ctx` stopped early ("predicted to need more memory") on servers that fill memory to their own budget whatever the context. When the smallest context that passed already took more than the memory set aside, the prediction no longer caps the search.
 - Fix: `tuieval tune --ctx` found no working context for servers that fill memory to their own budget and run with macOS memory pressure at the warning level. When the first try reaches that level with nothing swapped, tries are judged by swapping, memory running out and critical pressure instead.
 - Fix: `tuieval tune --ctx` refused models larger than the machine's memory ("another model or app is holding memory"), which servers that read the model from disk as needed run fine. Their size on disk is no longer checked against free memory.

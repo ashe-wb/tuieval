@@ -2870,16 +2870,17 @@ class PackMaxTokens(unittest.TestCase):
         self.assertIsNotNone(self.result("h", "plain"))
 
 
-def fake_gguf(path, embedding=5120, size=0, kv_heads=4):
+def fake_gguf(path, embedding=5120, size=0, kv_heads=4, extra=()):
     """A GGUF header with just the keys machines.read_gguf reads, padded to size bytes. kv_heads: a
-    number, or one per layer (a list, as some GGUFs store it)."""
+    number, or one per layer (a list, as some GGUFs store it). extra: more (key, type, value) pairs
+    (type 8 a string, 7 a bool, 4 a uint32)."""
     import struct
     s = lambda t: struct.pack("<Q", len(t)) + t.encode()  # noqa: E731
     kv = [("general.architecture", 8, "qwen35"), ("qwen35.block_count", 4, 64),
           ("qwen35.embedding_length", 4, embedding), ("qwen35.attention.head_count", 4, 24),
           ("qwen35.attention.head_count_kv", 9 if isinstance(kv_heads, list) else 4, kv_heads),
           ("qwen35.attention.key_length", 4, 256),
-          ("qwen35.full_attention_interval", 4, 4), ("qwen35.nextn_predict_layers", 4, 1)]
+          ("qwen35.full_attention_interval", 4, 4), ("qwen35.nextn_predict_layers", 4, 1), *extra]
     out = b"GGUF" + struct.pack("<IQQ", 3, 0, len(kv))
     for key, t, v in kv:
         out += s(key) + struct.pack("<I", t)
@@ -2887,6 +2888,8 @@ def fake_gguf(path, embedding=5120, size=0, kv_heads=4):
             out += s(v)
         elif t == 9:   # an array of uint32
             out += struct.pack("<IQ", 4, len(v)) + b"".join(struct.pack("<I", x) for x in v)
+        elif t == 7:
+            out += struct.pack("<?", v)
         else:
             out += struct.pack("<I", v)
     with open(path, "wb") as f:
@@ -2993,6 +2996,95 @@ class FitCheck(unittest.TestCase):
             self.assertEqual(out, ["131072", "True"])   # own server: its max_context; llama: fit-checked
 
 
+class DraftFiles(unittest.TestCase):
+    """A model's `draft` file: tune options that take it ({draft}, {draft_<kind>}) are offered only
+    to models whose file exists and, for a kind, has the kind's GGUF metadata."""
+    SERVER = """
+[servers.d]
+cmd = ["srv", "-m", "{model}", "-c", "{ctx}"]
+port = 18600
+model_is_path = true
+[servers.d.drafts]
+block = {"general.architecture" = "qwen35", "qwen35.block" = true}
+head = {"general.architecture" = "qwen35", "qwen35.block" = false}
+[servers.d.tune]
+spec = [[], ["--spec", "block", "-md", "{draft_block}"], ["--spec", "head", "-md", "{draft_head}"],
+        ["--spec", "any", "-md", "{draft}"]]
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = self.tmp.name
+        self.ws = os.path.join(d, "ws")
+        tuieval(d, "init", self.ws)
+        fake_gguf(f"{d}/m.gguf", size=1000)
+        fake_gguf(f"{d}/block.gguf", size=500, extra=[("qwen35.block", 7, True)])
+        fake_gguf(f"{d}/head.gguf", size=500)   # no "block" key: counts as false
+        with open(f"{d}/junk.gguf", "w") as f:
+            f.write("not a GGUF")
+        models = "".join(f'\n[[models]]\nlabel = "{label}"\nserver = "d"\nmodel = "{d}/m.gguf"\n{draft}'
+                         for label, draft in (("plain", ""), ("block", f'draft = "{d}/block.gguf"\n'),
+                                              ("head", f'draft = "{d}/head.gguf"\n'),
+                                              ("junk", f'draft = "{d}/junk.gguf"\n'),
+                                              ("missing", f'draft = "{d}/gone.gguf"\n')))
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write(self.SERVER + models)
+
+    def run_code(self, code):
+        p = subprocess.run([sys.executable, "-c", "import json; from tuieval import engine, tune, profiles; "
+                            "e = engine.Engine(); " + code], capture_output=True, text=True,
+                           env=dict(os.environ, TUIEVAL_HOME=self.ws))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_options_follow_the_draft_file(self):
+        out = self.run_code("print(json.dumps({l: tune.knobs(e, e.model(l)).get('spec') for l in "
+                            "('plain', 'block', 'head', 'junk', 'missing')}))")
+        block, head, any_ = (["--spec", "block", "-md", "{draft_block}"], ["--spec", "head", "-md", "{draft_head}"],
+                             ["--spec", "any", "-md", "{draft}"])
+        self.assertEqual(out["plain"], [[]])
+        self.assertEqual(out["block"], [[], block, any_])
+        self.assertEqual(out["head"], [[], head, any_])
+        self.assertEqual(out["junk"], [[], any_])      # not a GGUF: no kind
+        self.assertEqual(out["missing"], [[]])
+
+    def test_the_path_is_filled_in_when_the_server_starts(self):
+        out = self.run_code("m = e.model('block'); "
+                            "print(json.dumps(e.server_command(m, perf_args=['-md', '{draft_block}'])[0]))")
+        self.assertEqual(out[-2:], ["-md", f"{self.tmp.name}/block.gguf"])
+
+    def test_draft_file_is_not_part_of_the_fingerprint(self):
+        out = self.run_code("a, b = (e.serving(e.model(l)) for l in ('plain', 'block')); "
+                            "print(json.dumps([a.identity == b.identity, "
+                            "list(a.drafts), list(b.drafts)]))")
+        self.assertEqual(out, [True, [], ["draft", "draft_block"]])
+
+    def test_a_profile_whose_draft_file_is_gone_falls_back_to_the_defaults(self):
+        code = ("mc = e.machine().id; "
+                "[profiles.save(mc, l, {'choices': {'spec': 1}, 'args': ['--spec', 'block', '-md', '{draft_block}'], "
+                "'measured': {}, 'meta': {}}, e.tuning_dir) for l in ('block', 'head')]; "
+                "a, b = (e.serving(e.model(l)) for l in ('block', 'head')); "
+                "print(json.dumps([a.perf_args, a.perf_source, b.perf_args, b.perf_source]))")
+        args, source, other_args, other_source = self.run_code(code)
+        self.assertEqual((args, source), (["--spec", "block", "-md", "{draft_block}"], "tuned"))
+        self.assertEqual(other_args, [])
+        self.assertIn("outdated: the drafter file", other_source)
+
+    def test_config_errors(self):
+        from tuieval import engine
+        path = os.path.join(self.ws, "models.toml")
+        with open(path) as f:
+            base = f.read()
+        for change, error in ((('spec = [[],', 'spec = [["-md", "{draft}"], [],'), "the first option is the default"),
+                              (('{draft_head}', '{draft_other}'), "no such kind"),
+                              (('block = {', 'Block = {'), "must be lowercase")):
+            with open(path, "w") as f:
+                f.write(base.replace(*change))
+            with self.assertRaisesRegex(engine.ConfigError, error):
+                engine.load_config(path)
+
+
 class WarmTune(unittest.TestCase):
     """tune.tune starting from a tuned model of the same family, on a fake engine whose speed is a
     function of the flags."""
@@ -3016,7 +3108,7 @@ class WarmTune(unittest.TestCase):
                  "defaults": {"request_timeout_ms": 1000}},
             tuning_dir=f"{d}/tuning", root=d, _serving={}, starts=[])
         eng.model = lambda label: {**next(m for m in eng.cfg["models"] if m["label"] == label), "served_name": label}
-        eng.serving = lambda m: types.SimpleNamespace(fits=True, ctx=8192, machine=machine, mtp_layers=1,
+        eng.serving = lambda m: types.SimpleNamespace(fits=True, ctx=8192, machine=machine, mtp_layers=1, drafts=(),
                                                       identity={"model_bytes": 1000})
         eng.knob_values = lambda mc: {}
         eng.machine = lambda: machine

@@ -32,6 +32,7 @@ In the TUI, `a` adds a model and `m` scans your model folders. Each model is one
 | `label` | names `results/<label>/`; default: the file or repo name, lowercased. Never rename a label that has results. |
 | `served_name` | the model name sent with each request (default: the label for llama, the model id elsewhere) |
 | `vision`, `mmproj` | the model reads images; `mmproj` is llama's vision projector and implies `vision` |
+| `draft` | a separate drafter file for speculative decoding. Tune options that take one are offered to this model (see [Tuning](#tuning)) |
 | `thinking = false` | run with thinking off |
 | `tags = [...]` | filter by them in the TUI and with `--tags` |
 | `sampling = {...}` | override `[sampling]` for this model |
@@ -146,6 +147,18 @@ Expect 8–15 server starts, about 20–30 minutes for a 27B model, once per mod
 **Fine-tunes start warm.** When another model on the same server is already tuned on this machine and its GGUF has the same architecture and tensor shapes (a fine-tune or another quant of the same base model), its flags are the starting point. After the defaults (still timed, as the answer guard's reference), the tuner checks the inherited flags and then re-tries only the knobs that depend on the weights: speculative decoding (a fine-tune may have retrained or dropped its MTP layers) and micro-batch (the quant mix shifts it). Expect ~4–6 server starts. The closest file size wins when several models qualify. If the inherited flags fail, change answers or are slower than the defaults, it tunes in full. The profile records which model it started from (`meta.warm_start`). `tuieval tune --cold` always tunes in full; in `models.toml`, `[tune] warm_start = false` turns warm starts off and `[tune] warm_retest = ["spec", "ubatch"]` names the knobs a warm start re-tries.
 
 The knobs are `[servers.<name>.tune]` in `models.toml`: each knob is a list of options, each option a list of flags. Placeholders: `{p}` P-cores, `{p_minus_2}`, `{all}` all cores, `{gpu_safe_gb}` (the GPU residency limit minus 2 GB; also `_minus_1`, `_minus_2`, `_plus_1`).
+
+**Drafter files.** A model whose speculative decoding needs a separate file names it with `draft = "~/models/…gguf"`. An option that uses `{draft}` is offered only to models whose file exists. When the flag depends on what kind of drafter the file is, name the kinds on the server by the GGUF metadata that identifies them, and use `{draft_<kind>}`: the option is offered only when the file's header has those values (a key the file doesn't have counts as `false`).
+
+```toml
+[servers.llama.drafts]
+block = {"general.architecture" = "my-drafter", "my-drafter.block" = true}
+
+[servers.llama.tune]
+spec = [[], ["--spec-type", "<the type for block drafters>", "-md", "{draft_block}"]]
+```
+
+The first option of a knob can't take a drafter file (it's every model's default). The file's size counts in the fit check. Like the other tune flags, drafting is treated as speed-only: it isn't part of a result's fingerprint, and the tuner's answer guard drops an option that changes greedy answers too much.
 
 
 ## Measuring the largest context
