@@ -354,14 +354,18 @@ def similarity(texts, reference, chars=600):
 # ------------------------------------------------------------------ knobs
 def knobs(eng, m, sv=None):
     """{knob: [resolved option args, …]} for this model on this machine, with options that can't
-    apply removed (draft-mtp on a model without MTP layers) and duplicates merged."""
+    apply removed (draft-mtp on a model without MTP layers, an option that takes a drafter file the
+    model doesn't have) and duplicates merged. Drafter placeholders stay as written: the profile
+    keeps them and the path is filled in when the server starts."""
     server = eng.cfg["servers"][m["server"]]
     sv = sv or eng.serving(m)
-    vals = eng.knob_values(sv.machine)
+    vals = {**eng.knob_values(sv.machine), **engine_mod.draft_literals(server)}
     out = {}
     for name, options in server.get("tune", {}).items():
         seen, opts = set(), []
         for o in options:
+            if engine_mod.draft_fields(o) - set(sv.drafts):
+                continue  # needs a drafter file (of a kind) this model doesn't have
             args = [a.format(**vals) for a in o]
             if sv.mtp_layers == 0 and any("draft-mtp" in a for a in args) and sv.identity.get("model_bytes"):
                 continue  # the GGUF was read and has no MTP layers

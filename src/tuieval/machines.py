@@ -252,9 +252,9 @@ def _value(f, vtype, keep_arrays):
 
 
 @functools.lru_cache(maxsize=64)
-def read_gguf(path):
-    """Metadata from a GGUF file's header (no tensors are read). Arrays are kept only for the
-    per-layer attention keys; tokenizer arrays are skipped."""
+def gguf_metadata(path):
+    """The key-value pairs of a GGUF file's header (no tensors are read). Arrays are kept only for
+    the per-layer attention keys; other arrays (the tokenizer's) are skipped."""
     path = os.path.expanduser(path)
     with open(path, "rb") as f:
         if f.read(4) != b"GGUF":
@@ -272,6 +272,20 @@ def read_gguf(path):
             val = _value(f, vtype, keep)
             if val is not None:
                 kv[key] = val
+    return kv
+
+
+def gguf_matches(path, want):
+    """Whether a GGUF file's header has these values: {"key": value, …}. A key the file doesn't
+    have counts as false."""
+    kv = gguf_metadata(path)
+    return all(kv.get(k, False) == v for k, v in want.items())
+
+
+def read_gguf(path):
+    """What tuieval needs to know about a model, from its GGUF header."""
+    path = os.path.expanduser(path)
+    kv = gguf_metadata(path)
     arch = kv.get("general.architecture", "")
     get = lambda k, d=None: kv.get(f"{arch}.{k}", d)  # noqa: E731
     layers = int(get("block_count", 0) or 0)
