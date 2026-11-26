@@ -16,18 +16,24 @@ for that fact. The probe passes when the answer is right, the server read the wh
 server that cuts long prompts short reports fewer tokens, or loses the fact), and the machine
 stayed healthy. Filling matters: some servers only take memory as the context fills.
 
-The search starts at half the context the model runs with now and doubles, up to the model's own
-limit: what models.toml caps the context at (max_ctx, ctx, a context flag) doesn't bound it, since
-the measurement replaces those. Memory grows about linearly with the context, so two probes that
-passed predict the largest context that fits under the machine's limit; no probe goes above that
-prediction, and a failed probe is bisected against the largest that passed. (A server that already
+The search runs up to the model's own limit: what models.toml caps the context at (max_ctx, ctx,
+a context flag) doesn't bound it, since the measurement replaces those. It starts where the model
+file says the limit is (estimate: the weights, buffers and the KV cache per token, on llama.cpp's
+terms, against the memory free now), so the first try usually settles it: a try that passes
+predicts from its memory reading whether a larger one fits, and one that fails is halved. Without
+an estimate (a server that sizes its own memory, MLA, a model larger than memory, --start) it
+starts at half the context the model runs with now and doubles. Memory grows about linearly with
+the context, so two probes that passed predict the largest context that fits under the machine's
+limit; no probe goes above that prediction, and a failed probe is bisected against the largest that
+passed. (A server that already
 takes more than that limit at the smallest context, and passes, sizes its own memory: the
 prediction doesn't cap it, and the probes and their guard decide.) A probe is stopped at
 once, while the server loads or works, when memory pressure rises, the machine starts swapping,
 or memory runs out. (A server that reaches the warning level at the smallest context, with nothing
 swapped, fills memory to a budget of its own: for it only critical pressure counts, besides
 swapping and memory running out.) The next probe waits until the machine has recovered (pressure back to normal,
-the memory given back), so one probe's pressure can't fail the next. Typically 3 to 5 server starts.
+the memory given back), so one probe's pressure can't fail the next. Typically 1 or 2 server starts
+from an estimate, 3 to 5 without one.
 
 Memory is read off the machine, not the server's processes: available memory before the server
 starts less the lowest it falls to. Resident memory would count files a server maps and reads on
@@ -38,7 +44,9 @@ A server tuieval doesn't start, or can't set the context of, is only verified at
 model declares (max_context): one probe, nothing saved.
 """
 import dataclasses
+import glob
 import os
+import re
 import threading
 import time
 
@@ -50,7 +58,13 @@ from . import tune
 ANSWER_TOKENS = 1024       # room for the answer (and any thinking) in a probe
 STEP = 8192                # how close to the true maximum the search gets
 FLOOR = machines.MIN_CTX   # the smallest context tried
-FIRST = 32768              # the first context tried for a model whose usual context isn't known
+FIRST = 32768              # the first context tried for a model whose usual context isn't known (and no
+                           # estimate); also the largest at which pressure before a pass says how a server runs
+ESTIMATE_BUFFERS_GB = 1.0      # the estimate's buffers: this, plus this share of the weights. Gemma 4 31B Q8_0 with
+ESTIMATE_BUFFERS_SHARE = 0.15  # its mmproj (31.5 GB) took 38.2 GB on llama.cpp before its context: 6.7 GB more,
+                               # 1.2 of them sliding windows; this allows 5.7 GB besides those
+ESTIMATE_OFF = 0.25            # a reading further than this share from the estimate means it doesn't apply
+ESTIMATE_BACKOFF = 0.85        # a first try at the estimate that fails: the next is this share of it
 APART = 0.8                # memory per token is read off two probes at least this far apart (the lower one
                            # at most this share of the higher): closer ones differ by less than the noise
 MAX_STARTS = 8
@@ -297,16 +311,25 @@ def memory_gb(eng, m, info, guard):
     return round(taken, 2) if taken else None
 
 
-def predict(passed, limit_gb):
+def predict(passed, limit_gb, per_gb=None):
     """(base_gb, gb_per_token, largest context predicted to fit) from the largest context that
     passed with a memory reading and the nearest one well below it (APART). The third is None when
-    memory doesn't grow with the context (nothing to predict) or there aren't two such readings."""
+    memory doesn't grow with the context (nothing to predict) or there aren't two such readings.
+    per_gb: the memory per token estimated from the model file. With it, one reading is enough
+    (and it stands in for two readings too close together to tell growth from noise), unless that
+    reading is less than the cache alone would take: then the estimate doesn't describe this server."""
     pts = sorted((p.ctx, p.mem_gb) for p in passed if p.mem_gb)
-    if len(pts) < 2:
+    if not pts:
         return None, None, None
     c2, g2 = pts[-1]
-    c1, g1 = next(((c, g) for c, g in reversed(pts[:-1]) if c <= APART * c2), pts[0])
-    per = (g2 - g1) / (c2 - c1)
+    lower = [(c, g) for c, g in pts[:-1] if c <= APART * c2]
+    if lower or (len(pts) >= 2 and not per_gb):
+        c1, g1 = lower[-1] if lower else pts[0]
+        per = (g2 - g1) / (c2 - c1)
+    elif per_gb and g2 > per_gb * c2:
+        per = per_gb
+    else:
+        return None, None, None
     base = g2 - per * c2
     if per <= 0 or limit_gb is None:
         return base, max(per, 0.0), None
@@ -318,10 +341,14 @@ def _grid(n):
 
 
 def search(try_ctx, start, upper, limit_gb=None, step=STEP, floor=FLOOR, max_starts=MAX_STARTS,
-           emit=lambda *a, **k: None):
+           emit=lambda *a, **k: None, estimated=None):
     """Probe contexts until the largest that works is known to within `step`. try_ctx(ctx) -> Probe.
-    Returns (probes in the order tried, why it stopped)."""
+    estimated: (fixed GB, GB per token) from the model file (see estimate), so that the first try that
+    passes already predicts the largest context that fits. A try whose memory reading is off the
+    estimate by more than ESTIMATE_OFF drops it: the search goes by the tries from there. Returns
+    (probes in the order tried, why it stopped)."""
     tried, lo, hi, c = [], None, None, min(start, upper)
+    per_gb = estimated[1] if estimated else None
     why = f"{max_starts} server starts used"
     budget = limit_gb   # None once the tries show it doesn't describe this server
     while len(tried) < max_starts:
@@ -334,12 +361,19 @@ def search(try_ctx, start, upper, limit_gb=None, step=STEP, floor=FLOOR, max_sta
             break
         tried.append(r)
         emit("tune_result", message="    " + r.summary(), result=r)
+        if per_gb and r.ok and r.mem_gb:
+            expected = estimated[0] + estimated[1] * c
+            if abs(r.mem_gb - expected) > ESTIMATE_OFF * expected:
+                per_gb = None
+                emit("tune_step", message=f"    it took {r.mem_gb:.1f} GB where the estimate said {expected:.1f} GB: the "
+                                          "model file doesn't describe this server's memory, so the search goes by the "
+                                          "tries from here")
         if r.ok:
             lo = max(lo or 0, c)
         else:
             hi = min(hi or c, c)
-        if lo is None:   # nothing has worked yet: halve
-            c = _grid(hi // 2)
+        if lo is None:   # nothing has worked yet: halve (a first try at the estimate: a little below it)
+            c = _grid(hi * ESTIMATE_BACKOFF) if estimated and len(tried) == 1 else _grid(hi // 2)
             if c < floor:
                 why = f"nothing from {floor:,} up worked"
                 break
@@ -358,7 +392,7 @@ def search(try_ctx, start, upper, limit_gb=None, step=STEP, floor=FLOOR, max_sta
                                       f"{budget:.1f} GB set aside, and passed: this server sizes its own memory, so "
                                       "the search goes by the tries, not by predicted memory")
             budget = None
-        _, per, fit = predict([p for p in tried if p.ok], budget)
+        _, per, fit = predict([p for p in tried if p.ok], budget, per_gb)
         nxt = min(upper, lo * 2) if hi is None else lo + _grid((hi - lo) / 2)
         if fit is not None and fit < nxt:
             if _grid(fit) - lo < min(step, upper - lo):
@@ -367,6 +401,8 @@ def search(try_ctx, start, upper, limit_gb=None, step=STEP, floor=FLOOR, max_sta
                        f"for it ({per * 1000:.3f} GB per 1,000 tokens)")
                 break
             nxt = _grid(fit)
+        elif per_gb and fit is not None and hi is not None and lo < _grid(fit) < hi:
+            nxt = _grid(fit)   # the estimate's memory per token, from a reading it matched: no need to bisect
         if nxt <= lo:
             why = f"{hi:,} failed: {next(p.error for p in tried if p.ctx == hi)}" if hi else why
             break
@@ -401,6 +437,48 @@ def room_gb(eng):
     free = machines.available_memory_gb()
     limit = mc.gpu_limit_gb - headroom
     return (limit if free is None else min(limit, free - headroom)), ""
+
+
+def _file_gb(path):
+    """A file's size with the other shards of a split GGUF (-00001-of-00003), or 0 if it is missing."""
+    match = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", path)
+    paths = glob.glob(path[:match.start()] + f"-*-of-{match.group(2)}.gguf") if match else [path]
+    return sum(os.path.getsize(p) for p in paths if os.path.isfile(p)) / machines.GB
+
+
+def estimate(eng, m, room, kv_type=None):
+    """(the largest context the model file says fits in `room` GB, (fixed GB, GB per token), the
+    arithmetic as text), or (None, None, why not). For servers tuieval sizes from the model file (machines.fit, on
+    llama.cpp's terms): the weights with an mmproj and drafter, buffers (ESTIMATE_BUFFERS_GB and
+    ESTIMATE_BUFFERS_SHARE of the weights) and sliding windows' fixed cache, then the KV cache per token
+    (machines.kv_cache_split). Errs a little large on the buffers, so a first try at the estimate
+    usually passes and its memory reading corrects the rest."""
+    server = eng.cfg["servers"][m["server"]]
+    path = engine_mod.expand(str(m.get("model", "")))
+    if room is None:
+        return None, None, "the memory this machine has free can't be read"
+    if not (server.get("model_is_path") and os.path.isfile(path) and path.endswith(".gguf")):
+        return None, None, "the model isn't a GGUF file"
+    if not engine_mod.fit_check(server):
+        return None, None, "its server sizes its own memory"
+    try:
+        info = machines.read_gguf(path)
+    except (OSError, ValueError) as e:
+        return None, None, f"couldn't read the GGUF header ({e})"
+    split = machines.kv_cache_split(info, kv_type or m.get("kv_type") or server.get("kv_type") or "f16")
+    if not split or not split[0]:
+        return None, None, "the model file doesn't describe its KV cache well enough (MLA, or sliding windows without a layer pattern)"
+    weights = _file_gb(path) + sum(_file_gb(engine_mod.expand(m[k])) for k in ("mmproj", "draft") if m.get(k))
+    whole = eng.machine().gpu_limit_gb if eng.machine().discrete else eng.machine().ram_gb
+    if weights > whole:
+        return None, None, "the model is larger than this machine's memory: its server reads it from disk as needed"
+    fixed = weights * (1 + ESTIMATE_BUFFERS_SHARE) + ESTIMATE_BUFFERS_GB + split[1] / machines.GB
+    per = split[0] / machines.GB
+    ctx = int((room - fixed) / per)
+    how = (f"{weights:.1f} GB of weights, ~{fixed - weights:.1f} GB of buffers"
+           + (" and sliding windows" if split[1] else "") + f", {per * 1000:.3f} GB per 1,000 tokens of context: "
+           f"about {max(ctx, 0):,} fit in {room:.1f} GB")
+    return ctx, (fixed, per), how
 
 
 def upper_bound(m, asked=None):
@@ -456,12 +534,24 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
     if size is not None and size > whole:
         emit("tune_step", message=f"the model is {size:.0f} GB on disk, more than this machine's memory: its server "
                                   "reads it from disk as needed, so its size isn't checked against free memory")
-    # Half of what it runs with now, so the second probe is a context expected to work and the two
-    # give the memory per token before anything larger is tried.
-    usual = sv.ctx if sv.fits and sv.ctx else None
-    first = min(upper, max(FLOOR, _grid(start or (usual // 2 if usual else FIRST))))
     emit("tune_step", message=f"largest context up to {upper:,} ({source})"
                               + (f"; {room:.1f} GB of memory to work with" if room is not None else ""))
+    # Start where the model file says the limit is, and check it there. Without an estimate: half of
+    # what it runs with now, so the second probe is a context expected to work and the two give the
+    # memory per token before anything larger is tried.
+    est, est_mem, how_est = estimate(eng, m, room, sv.kv_type)
+    if start:
+        first, began = _grid(start), "--start"
+    elif est is not None:
+        first, began = _grid(est), "estimate"
+        emit("tune_step", message=f"estimate: {how_est}; "
+                                  + ("the model's own limit fits, so that is the first try" if first >= upper else
+                                     "the first try is there" if first >= FLOOR else f"the first try is {FLOOR:,}"))
+    else:
+        usual = sv.ctx if sv.fits and sv.ctx else None
+        first, began = _grid(usual // 2 if usual else FIRST), "half the usual context"
+        emit("tune_step", message=f"no estimate ({how_est}): starting at {min(upper, max(FLOOR, first)):,} and doubling")
+    first = min(upper, max(FLOOR, first))
 
     baseline = None if sv.machine.discrete else machines.available_memory_gb()
 
@@ -471,9 +561,10 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
         eng._check()
         settle(eng, baseline, emit)
         r = probe(eng, m, ctx, emit, limit_s, rule["level"])
-        if r.stopped_for == "pressure" and not rule["passed"] and rule["level"] < PRESSURE_CRITICAL:
+        if r.stopped_for == "pressure" and not rule["passed"] and rule["level"] < PRESSURE_CRITICAL and ctx <= FIRST:
             # Before anything has passed, at the smallest contexts: this isn't the context being too
             # large. The server fills memory to a budget of its own and runs at the warning level.
+            # (A first try at a large estimate that reaches it is treated as too large, and halved.)
             rule["level"] = PRESSURE_CRITICAL
             emit("tune_result", message="    " + r.summary())
             emit("tune_step", message=f"    memory pressure reaches the warning level at {ctx:,} already, with nothing "
@@ -484,7 +575,8 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
         rule["passed"] = rule["passed"] or r.ok
         return r
 
-    tried, why = search(try_ctx, first, upper, room, step, min(FLOOR, first), max_starts, emit)
+    tried, why = search(try_ctx, first, upper, room, step, min(FLOOR, first), max_starts, emit,
+                        est_mem if began == "estimate" else None)
     passed = [p for p in tried if p.ok]
     if not passed:
         raise engine_mod.ModelFailed(f"no context worked ({why}); the last try: {tried[-1].error}")
@@ -501,6 +593,7 @@ def bench(eng, label, emit=lambda *a, **k: None, max_ctx=None, start=None, step=
         "meta": {"date": profiles.now(), "machine": sv.machine.summary, "server_version": eng.server_version(m),
                  "model_file": os.path.basename(str(m.get("model", ""))), "model_bytes": sv.identity.get("model_bytes"),
                  "kv_type": sv.kv_type, "upper_bound": upper, "upper_bound_from": source,
+                 "started_at": first, "started_from": began, "estimated_ctx": est,
                  "fill_confirmed": best.filled, "server_starts": len(tried),
                  "stops_at_pressure": "critical" if rule["level"] >= PRESSURE_CRITICAL else "warning",
                  "pressure_seen": max((p.pressure or 0 for p in passed), default=0) or None},

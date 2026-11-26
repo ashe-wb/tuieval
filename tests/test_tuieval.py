@@ -2873,16 +2873,21 @@ class PackMaxTokens(unittest.TestCase):
 def fake_gguf(path, embedding=5120, size=0, kv_heads=4, extra=()):
     """A GGUF header with just the keys machines.read_gguf reads, padded to size bytes. kv_heads: a
     number, or one per layer (a list, as some GGUFs store it). extra: more (key, type, value) pairs
-    (type 8 a string, 7 a bool, 4 a uint32)."""
+    (type 8 a string, 7 a bool, 4 a uint32, "bools" an array of bools). A key in extra replaces the
+    default one of that name."""
     import struct
     s = lambda t: struct.pack("<Q", len(t)) + t.encode()  # noqa: E731
     kv = [("general.architecture", 8, "qwen35"), ("qwen35.block_count", 4, 64),
           ("qwen35.embedding_length", 4, embedding), ("qwen35.attention.head_count", 4, 24),
           ("qwen35.attention.head_count_kv", 9 if isinstance(kv_heads, list) else 4, kv_heads),
           ("qwen35.attention.key_length", 4, 256),
-          ("qwen35.full_attention_interval", 4, 4), ("qwen35.nextn_predict_layers", 4, 1), *extra]
+          ("qwen35.full_attention_interval", 4, 4), ("qwen35.nextn_predict_layers", 4, 1)]
+    kv = [k for k in kv if k[0] not in {e[0] for e in extra}] + list(extra)
     out = b"GGUF" + struct.pack("<IQQ", 3, 0, len(kv))
     for key, t, v in kv:
+        if t == "bools":
+            out += s(key) + struct.pack("<IIQ", 9, 7, len(v)) + b"".join(struct.pack("<?", x) for x in v)
+            continue
         out += s(key) + struct.pack("<I", t)
         if t == 8:
             out += s(v)
@@ -4414,6 +4419,105 @@ max_context = 8192
             r = ctxbench.probe(e, e.model("sized"), 8192)
             self.assertFalse(r.ok)
             self.assertIn("swapped out 1024 MB", r.error)
+
+    def test_kv_cache_grows_only_in_full_attention_layers(self):
+        from tuieval import machines
+        # Gemma 4 31B's shape: 60 layers, every sixth full attention (4 KV heads of 512), the rest
+        # sliding windows of 1024 (16 KV heads of 256)
+        swa = [(i + 1) % 6 != 0 for i in range(60)]
+        info = {"kv_heads_per_layer": [16 if s else 4 for s in swa], "head_dim_k": 512, "head_dim_v": 512,
+                "head_dim_k_swa": 256, "head_dim_v_swa": 256, "sliding_window": 1024, "swa_layers": swa,
+                "kv_lora_rank": 0}
+        grows, fixed = machines.kv_cache_split(info)
+        self.assertEqual(grows, 10 * 4 * 1024 * 2)               # 0.076 GB per 1,000 tokens; 0.078 measured
+        self.assertEqual(fixed, 50 * 16 * 512 * 2 * (1024 + 512))
+        self.assertGreater(machines.kv_bytes_per_token(info), 15 * grows)   # the fit check's safe overestimate
+        self.assertIsNone(machines.kv_cache_split(dict(info, swa_layers=None)))   # a window, no pattern
+        self.assertIsNone(machines.kv_cache_split(dict(info, kv_lora_rank=512)))  # MLA
+        plain = dict(info, sliding_window=0, swa_layers=None)
+        self.assertEqual(machines.kv_cache_split(plain), (machines.kv_bytes_per_token(plain), 0.0))
+
+    def test_the_sliding_window_pattern_is_read_in_both_spellings(self):
+        from tuieval import machines
+        with tempfile.TemporaryDirectory() as tmp:
+            flags = [(i + 1) % 4 != 0 for i in range(64)]
+            fake_gguf(f"{tmp}/listed.gguf", extra=[("qwen35.attention.sliding_window", 4, 1024),
+                                                   ("qwen35.attention.sliding_window_pattern", "bools", flags),
+                                                   ("qwen35.attention.key_length_swa", 4, 128)])
+            info = machines.read_gguf(f"{tmp}/listed.gguf")
+            self.assertEqual((info["swa_layers"], info["head_dim_k_swa"], info["head_dim_v_swa"]), (flags, 128, 256))
+            fake_gguf(f"{tmp}/every.gguf", extra=[("qwen35.attention.sliding_window", 4, 1024),
+                                                  ("qwen35.attention.sliding_window_pattern", 4, 4)])
+            self.assertEqual(machines.read_gguf(f"{tmp}/every.gguf")["swa_layers"], flags)
+            fake_gguf(f"{tmp}/none.gguf")
+            self.assertIsNone(machines.read_gguf(f"{tmp}/none.gguf")["swa_layers"])
+
+    def test_search_from_an_estimate_settles_in_one_or_two_tries(self):
+        # truth: 38.7 GB + 0.198 GB per 1,000 tokens against 85.3 GB, so 234,848 fit
+        truth = lambda base: (lambda c: base + 0.000198 * c)   # noqa: E731
+        best, tried, why = self._search(234848, gb=truth(38.7), start=234496, upper=524288, limit_gb=85.3,
+                                        estimated=(38.7, 0.000198))
+        self.assertEqual((best, tried), (234496, [234496]))   # the estimate was right: one try
+        self.assertTrue(why.startswith("memory:"), why)
+        # a cautious estimate: the first try's reading says more fits, and the second goes straight there
+        best, tried, why = self._search(250880, gb=truth(35.5), start=234496, upper=524288, limit_gb=85.3,
+                                        estimated=(38.7, 0.000198))
+        self.assertEqual(tried, [234496, 250880])
+        # an optimistic one: a little below it, then straight to what that reading predicts
+        works = int((85.3 - 41.0) / 0.000198)
+        best, tried, why = self._search(works, gb=truth(41.0), start=234496, upper=524288, limit_gb=85.3,
+                                        estimated=(38.7, 0.000198))
+        self.assertEqual(tried, [234496, 198656, 223232])
+        self.assertEqual(best, 223232)
+        # the model's own limit fits: one try
+        best, tried, why = self._search(10**9, gb=truth(38.7), start=262144, upper=262144, limit_gb=85.3,
+                                        estimated=(38.7, 0.000198))
+        self.assertEqual((tried, why), ([262144], "reached the upper bound (262,144)"))
+
+    def test_an_estimate_the_readings_dont_match_is_dropped(self):
+        said = []
+        # the file says 0.015 GB per 1,000 tokens; this server takes 0.23 (a looped model)
+        best, tried, why = self._search(276000, gb=lambda c: 21.8 + 0.00023 * c, start=1048576, upper=1048576,
+                                        limit_gb=85.3, estimated=(26.2, 0.0000153), max_starts=12,
+                                        emit=lambda kind, **d: said.append(d.get("message", "")))
+        self.assertEqual(tried[:4], [1048576, 890880, 445440, 222208])
+        self.assertEqual(sum("the model file doesn't describe this server's memory" in s for s in said), 1)
+        self.assertGreaterEqual(best, 270336)
+
+    def test_bench_starts_at_the_estimate(self):
+        from tuieval import ctxbench
+        self.addCleanup(setattr, ctxbench, "room_gb", ctxbench.room_gb)
+        with tempfile.TemporaryDirectory() as tmp:
+            gguf = os.path.join(tmp, "m.gguf")
+            fake_gguf(gguf, size=1000)   # 16 full-attention layers of 4 KV heads of 256: 64 KiB per token
+            mock = json.dumps([sys.executable, os.path.join(HERE, "mock_server.py"), "--port", "{port}", "--packs",
+                               os.path.join(tmp, "ws", "packs"), "--mode", "fixed", "--model", "{served_name}"])[1:-1]
+            ws = self._workspace(tmp, f"""
+[servers.files]
+cmd = [{mock}, "--context", "{{ctx}}", "--breaks-above", "20000"]
+port = {free_port()}
+model_is_path = true
+
+[[models]]
+label = "file"
+server = "files"
+model = "{gguf}"
+""")
+            e = self._engine(ws)
+            ctxbench.room_gb = lambda eng: (2.13, "")   # 1 GB of buffers, then room for 18,432 tokens
+            said = []
+            got = ctxbench.bench(e, "file", lambda kind, **d: said.append(d.get("message", "")), max_ctx=65536, step=2048)
+            self.assertEqual(list(got["probes"])[0], "18432")
+            self.assertEqual((got["meta"]["started_from"], got["meta"]["estimated_ctx"]), ("estimate", 18513))
+            self.assertTrue(any(s.startswith("estimate: ") and "about 18,513 fit in 2.1 GB" in s for s in said), said)
+            self.assertEqual(got["max_ctx"], 18432)
+            # --start still decides where it starts
+            got = ctxbench.bench(e, "file", max_ctx=65536, start=16384, step=2048)
+            self.assertEqual((list(got["probes"])[0], got["meta"]["started_from"]), ("16384", "--start"))
+            # a server that isn't sized from the model file keeps the old start
+            got = ctxbench.bench(e, "sized", lambda kind, **d: said.append(d.get("message", "")), max_ctx=65536, step=2048)
+            self.assertEqual(got["meta"]["started_from"], "half the usual context")
+            self.assertTrue(any(s.startswith("no estimate (the model isn't a GGUF file)") for s in said))
 
     def test_tune_ctx_command(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `tuieval tune --ctx` starts where the model file says the limit is, instead of climbing from a small context: for a GGUF on a llama.cpp-style server it estimates the largest context that fits (weights, buffers, and the KV cache per token with sliding-window layers counted as llama.cpp keeps them), tries that first, and lets the first reading predict whether more fits. Typically 1 or 2 server starts, down from 3 to 6 (Gemma 4 31B: one, at its 262,144 limit, where it took five). The estimate is dropped when a try's memory is more than 25% off it; MLA models, models larger than memory and servers that size their own memory keep the doubling search. The saved measurement records where it started (`started_from`, `estimated_ctx`).
+
 - Drafter files: a model can name a separate drafter file (`draft = "…gguf"`), and tune options that use `{draft}` are offered only to models that have one. A server's `[servers.<name>.drafts]` table names kinds of drafter by GGUF metadata, for options that use `{draft_<kind>}`. See docs/models.md.
 - Fix: `tuieval tune --ctx` stopped early ("predicted to need more memory") on servers that fill memory to their own budget whatever the context. When the smallest context that passed already took more than the memory set aside, the prediction no longer caps the search.
 - Fix: `tuieval tune --ctx` found no working context for servers that fill memory to their own budget and run with macOS memory pressure at the warning level. When the first try reaches that level with nothing swapped, tries are judged by swapping, memory running out and critical pressure instead.

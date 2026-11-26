@@ -307,12 +307,25 @@ def read_gguf(path):
         per_layer = [0 if r else h for h, r in zip(per_layer, recurrent)]
     elif interval > 1:
         per_layer = [h if (i + 1) % interval == 0 else 0 for i, h in enumerate(per_layer)]
+    # Which layers use the sliding window: a flag per layer, or (llama.cpp's other spelling) a
+    # number n, where the last layer of every n is full attention. None when the file doesn't say.
+    pattern = get("attention.sliding_window_pattern")
+    if isinstance(pattern, list) and len(pattern) == len(per_layer):
+        swa_layers = [bool(x) for x in pattern]
+    elif isinstance(pattern, int) and not isinstance(pattern, bool) and pattern > 1:
+        swa_layers = [i % pattern < pattern - 1 for i in range(len(per_layer))]
+    else:
+        swa_layers = None
     return {
         "path": path, "bytes": os.path.getsize(path), "architecture": arch, "name": kv.get("general.name", ""),
         "layers": layers, "context_length": int(get("context_length", 0) or 0), "embedding": embd,
         "kv_heads_per_layer": per_layer, "head_dim_k": head_dim_k, "head_dim_v": head_dim_v,
         "experts": int(get("expert_count", 0) or 0), "experts_used": int(get("expert_used_count", 0) or 0),
         "sliding_window": int(get("attention.sliding_window", 0) or 0),
+        "swa_layers": swa_layers,
+        "head_dim_k_swa": int(get("attention.key_length_swa", 0) or head_dim_k),
+        "head_dim_v_swa": int(get("attention.value_length_swa", 0) or head_dim_v),
+        "kv_lora_rank": int(get("attention.kv_lora_rank", 0) or 0),   # MLA: a compressed cache of its own shape
         "mtp_layers": int(get("nextn_predict_layers", 0) or 0),   # built-in draft layers (draft-mtp)
     }
 
@@ -323,6 +336,28 @@ def kv_bytes_per_token(info, kv_type="f16"):
     overestimates memory: the fit check errs on the safe side."""
     per = KV_BYTES.get(kv_type, 2.0)
     return sum(h * (info["head_dim_k"] + info["head_dim_v"]) * per for h in info["kv_heads_per_layer"])
+
+
+def kv_cache_split(info, kv_type="f16", ubatch=512):
+    """(bytes per token of context, fixed bytes) of llama.cpp's KV cache, counting sliding windows as
+    llama.cpp keeps them: a sliding-window layer holds its window (plus a batch) whatever the context,
+    so only full-attention layers grow with it. Checked on Gemma 4 31B: 0.076 GB per 1,000 tokens
+    against 0.078 measured, where kv_bytes_per_token says 1.6. None when the layout isn't known well
+    enough to say: a sliding window with no per-layer pattern, or MLA's compressed cache."""
+    if info.get("kv_lora_rank"):
+        return None
+    per = KV_BYTES.get(kv_type, 2.0)
+    heads = info["kv_heads_per_layer"]
+    full = (info["head_dim_k"] + info["head_dim_v"]) * per
+    if not info.get("sliding_window"):
+        return sum(h * full for h in heads), 0.0
+    swa = info.get("swa_layers")
+    if not swa or len(swa) != len(heads):
+        return None
+    windowed = (info.get("head_dim_k_swa", info["head_dim_k"]) + info.get("head_dim_v_swa", info["head_dim_v"])) * per
+    grows = sum(h * full for h, s in zip(heads, swa) if not s)
+    fixed = sum(h * windowed for h, s in zip(heads, swa) if s) * (info["sliding_window"] + ubatch)
+    return grows, fixed
 
 
 # ---------------------------------------------------------------- fit
