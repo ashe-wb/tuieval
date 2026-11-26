@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - `tuieval tune --ctx` starts where the model file says the limit is, instead of climbing from a small context: for a GGUF on a llama.cpp-style server it estimates the largest context that fits (weights, buffers, and the KV cache per token with sliding-window layers counted as llama.cpp keeps them), tries that first, and lets the first reading predict whether more fits. Typically 1 or 2 server starts, down from 3 to 6 (Gemma 4 31B: one, at its 262,144 limit, where it took five). The estimate is dropped when a try's memory is more than 25% off it; MLA models, models larger than memory and servers that size their own memory keep the doubling search. The saved measurement records where it started (`started_from`, `estimated_ctx`).
 - Sections: pack.toml `use_case` (default: the pack's `group`) is what a pack's verdict counts toward, so a section (`group`) can hold several use cases. The model list's verdict codes, the Readiness tab and Insights' best model per use case show use cases section by section in pack order, with a divider or heading per section (the Readiness tab was alphabetical).
