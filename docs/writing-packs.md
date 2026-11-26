@@ -27,7 +27,8 @@ Every pack has a fingerprint of what the model sees and what decides pass/fail (
 
 ```toml
 label = "Support bot"            # shown in the TUI
-group = "Customer support"       # the use case it counts toward (see below)
+group = "Customer support"       # the section it's listed under, and its use case unless use_case says otherwise
+use_case = "Refunds"             # optional: the use case its verdict counts toward (default: its group)
 description = "…"
 grader = "reply"                 # default grader for its tests (see Graders)
 system = "system.txt"            # system prompt file (optional)
@@ -50,7 +51,9 @@ max_truncation = 0.01            # share of answers cut off by max_tokens
 min_consistency = 0.95           # share of variant groups where every variant passes
 ```
 
-`group` doubles as the **use case** in the readiness verdicts: all packs in a group must PASS for the use case to PASS. For example, a "Coding" use case could be a `coding` pack plus a `coding-sql` pack.
+`group` is the **section** a pack is listed under, and its **use case** in the readiness verdicts unless `use_case` names another: all packs in a use case must PASS for the use case to PASS. For example, a "Coding" use case could be a `coding` pack plus a `coding-sql` pack.
+
+Give packs a `use_case` when a section should hold several separately judged use cases. With `group = "Coding"` on all of them, `coding` and `coding-sql` (use case Coding) and `agentic-coding` (`use_case = "Agentic coding"`) are listed together, but a model that has never run the agentic pack still gets a Coding verdict. The model list, the Readiness tab and the Insights panel show use cases section by section, in pack order.
 
 `stop_early` suits packs a weak model fails quickly, like a regression set of routine cases: a run stops the pack at the first critical failure, or once the accuracy or truncation bar is out of reach even if every remaining answer passes, saves what it has (the verdict is FAIL) and moves on. It asks first the questions models have failed most often. `tuieval run --stop-early` (or **Stop a pack once it fails** in Setup) does this for every pack in the run. A later Certify fills in the rest.
 

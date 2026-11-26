@@ -63,6 +63,11 @@ class Pack:
     agent: str = ""        # agent packs: the [agents.<name>] that runs them ("" = [defaults] agent)
     python: str = ""       # agent packs: the Python the tasks and their tests run with ("" = tuieval's)
     min_context: int = 0   # context the pack needs, when its prompts don't show it (agent packs)
+    use_case: str = ""     # what its verdict counts toward (pack.toml use_case; "" = its group). The group is
+                           # the section it's listed under: a section can hold several use cases.
+
+    def __post_init__(self):
+        self.use_case = self.use_case or self.group
 
     @property
     def modules(self):
@@ -238,7 +243,8 @@ def _load_agent_pack(name, path, meta, meta_path):
         raise PackError(f"{meta_path}: min_context must be a whole number above 0, not {min_context!r}")
     gate = {"min_accuracy": 0.8, **meta.get("gate", {})}
     return Pack(name=name, path=path, label=meta.get("label", name), group=meta.get("group", "Other"),
-                description=meta.get("description", ""), grader="agent", system="", needs=[], tools=[],
+                use_case=meta.get("use_case", ""), description=meta.get("description", ""), grader="agent",
+                system="", needs=[], tools=[],
                 tests=tests, fingerprint=_task_fingerprint(tests), gate=gate, screen=int(meta.get("screen", 10)),
                 certify_repeat=int(meta.get("certify", {}).get("repeat", 0)),
                 stop_early=bool(meta.get("stop_early", False)), kind="agent", agent=str(meta.get("agent", "")),
@@ -323,7 +329,8 @@ def load_pack(path):
     if "max_tokens" in meta and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1):
         raise PackError(f"{meta_path}: max_tokens must be a whole number above 0, not {max_tokens!r}")
     return Pack(name=name, path=path, label=meta.get("label", name), group=meta.get("group", "Other"),
-                description=meta.get("description", ""), grader=meta.get("grader", "answer"),
+                use_case=meta.get("use_case", ""), description=meta.get("description", ""),
+                grader=meta.get("grader", "answer"),
                 system=system, needs=list(needs), tools=tools, tests=tests,
                 fingerprint=_fingerprint(system, tools, meta.get("grader", "answer"), tests, images, max_tokens),
                 gate=gate, screen=int(meta.get("screen", 10)),

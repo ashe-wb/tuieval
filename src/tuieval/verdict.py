@@ -265,9 +265,27 @@ def latency_table(engine, labels=None, table=None, ran_on=None):
     return out
 
 
+def sections(packs):
+    """[(section, [use case, ...])] in pack order: a section is a pack.toml `group`, a use case is a pack's
+    `use_case` (its group when it has none), listed in the section of its first pack."""
+    out, seen = {}, set()
+    for p in packs.values():
+        uc = use_case_of(p)
+        if uc not in seen:
+            seen.add(uc)
+            out.setdefault(p.group, []).append(uc)
+    return list(out.items())
+
+
+def use_case_of(pack):
+    """A pack's use case: pack.toml use_case, or its group."""
+    return getattr(pack, "use_case", "") or pack.group
+
+
 def readiness(engine, labels=None, ran_on=None):
     """{label: {use_case: (verdict, {pack: verdict})}} for every model with results.
-    A use case is a pack group (pack.toml `group`), e.g. Coding = the coding and coding-advanced packs.
+    A use case is a pack's `use_case` (pack.toml; its `group` when it has none), e.g. Coding = the coding and
+    coding-advanced packs.
     ran_on: (machine, hosted_any) judges only the answers that ran on that machine (see records)."""
     out = {}
     for m in engine.cfg["models"]:
@@ -278,7 +296,7 @@ def readiness(engine, labels=None, ran_on=None):
             recs = records(engine, m["label"], name, ran_on)
             if engine.result_status(m["label"], name) not in ("certified", "screened"):
                 recs = []  # missing or outdated results don't count
-            by_group.setdefault(pack.group, {})[name] = evaluate(pack, recs, engine.certify_repeat(pack))
+            by_group.setdefault(pack.use_case, {})[name] = evaluate(pack, recs, engine.certify_repeat(pack))
         groups = {g: (combine(v), v) for g, v in by_group.items()
                   if any(x.status != "NO DATA" for x in v.values())}
         if groups:

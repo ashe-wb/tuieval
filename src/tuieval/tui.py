@@ -65,7 +65,7 @@ def model_verdicts(e):
     results (when = None) or, failing that, the last recorded one (when = its date)."""
     current = verdict.readiness(e)
     last = verdict.latest(verdict.load_history(e))
-    groups = list(dict.fromkeys(pk.group for pk in e.packs.values()))
+    groups = use_case_order(e)
     out = {}
     for m in e.cfg["models"]:
         label, rows = m["label"], []
@@ -82,10 +82,20 @@ def model_verdicts(e):
 VERDICT_MARK = {"PASS": "✓", "FAIL": "✗", "INCONCLUSIVE": "?"}
 
 
+def use_case_order(e):
+    """Every use case, section by section in pack order (see verdict.sections)."""
+    return [u for _, ucs in verdict.sections(e.packs) for u in ucs]
+
+
+def section_starts(e):
+    """The use cases that open a section after the first: the model list puts a divider before each."""
+    return {ucs[0] for _, ucs in verdict.sections(e.packs)[1:]}
+
+
 def group_codes(e):
     """{use case: short code}: its first letter, or its words' initials, or more letters, whichever
     is the shortest that keeps every code unique (Coding -> C; Demo answer, Demo code -> DA, DC)."""
-    groups = list(dict.fromkeys(pk.group for pk in e.packs.values()))
+    groups = use_case_order(e)
 
     def initials(g, extra=0):
         words = g.split() or [g]
@@ -98,12 +108,15 @@ def group_codes(e):
     return {g: f"{g[:1].upper()}{i + 1}" for i, g in enumerate(groups)}
 
 
-def verdict_codes(rows, codes):
-    """Compact markup, e.g. C✗ D? T✓ (colour = verdict, dim = from earlier results), one fixed
-    column per use case so rows line up; blank where a use case has no verdict."""
+def verdict_codes(rows, codes, starts=()):
+    """Compact markup, e.g. C✗ D? │ T✓ (colour = verdict, dim = from earlier results), one fixed
+    column per use case so rows line up; blank where a use case has no verdict. starts: use cases that
+    open a section (a divider goes before each)."""
     by_group = {g: (status, when) for g, status, when in rows}
     out = []
     for g in list(codes) + [g for g in by_group if g not in codes]:
+        if g in starts and out:
+            out.append("│")
         code = codes.get(g, g[:1].upper())
         if g not in by_group:
             out.append(" " * (len(code) + 1))
@@ -757,7 +770,7 @@ class SetupScreen(Screen):
         yield Header()
         yield Static(id="machine")
         with Horizontal(id="pickers"):
-            with Vertical(classes="picker"):
+            with Vertical(classes="picker", id="packs-picker"):
                 yield Label("[b]Eval packs[/b]  (space to toggle · e picks tests)")
                 yield SelectionList(id="suites")
             with Vertical(classes="picker"):
@@ -849,6 +862,21 @@ class SetupScreen(Screen):
         if not e.packs:
             for i, line in enumerate(NO_PACKS):
                 packs.add_option(Selection(line, f"\x00nopacks:{i}", disabled=True))
+        self.fit_packs_panel()
+
+    def fit_packs_panel(self):
+        """Eval packs gets the width its longest line needs (at most 45% of the screen); the models
+        panel, whose lines are longer, gets the rest."""
+        packs = self.query_one("#suites", SelectionList)
+        if not self.size.width or not packs.option_count:
+            return
+        widest = max(Text.from_markup(str(packs.get_option_at_index(i).prompt)).cell_len
+                     for i in range(packs.option_count))
+        need = max(widest, len("Eval packs  (space to toggle · e picks tests)")) + 10   # tick box, scrollbar, padding
+        self.query_one("#packs-picker").styles.width = max(30, min(need, int(self.size.width * 0.45)))
+
+    def on_resize(self, event):
+        self.fit_packs_panel()
 
     def refresh_models(self, select=None):
         """Local models, then each hosted API's models tried so far, best verdicts first. Hidden
@@ -870,7 +898,7 @@ class SetupScreen(Screen):
         except Exception as err:  # a broken results file must not hide the model list
             self.verdicts = {}
             self.app.log(f"verdicts failed: {err!r}")
-        codes = group_codes(e)
+        codes, starts = group_codes(e), section_starts(e)
         self.legend_codes = codes
         n_hidden = sum(m["label"] in hidden for m in e.cfg["models"])
         self.query_one("#show-hidden", Checkbox).label = f"Show hidden ({n_hidden})"
@@ -897,7 +925,8 @@ class SetupScreen(Screen):
                         ("  [dim italic]hidden[/dim italic]" if label in hidden else "")
                 where = "" if m.get("remote") else f"  [dim]{m['server']}[/dim]{serving_badge(e, m, newcomer)}"
                 rows = self.verdicts.get(label, [])
-                vcodes = verdict_codes(rows, codes) if rows else f"[dim]{'not run':<{len(verdict_codes([], codes))}}[/dim]"
+                vcodes = (verdict_codes(rows, codes, starts) if rows
+                          else f"[dim]{'not run':<{len(verdict_codes([], codes, starts))}}[/dim]")
                 # a Selection shows one line only: keep it short, the detail line has the rest
                 models.add_option(Selection(f"{label:<{width}}  {vcodes}{flags}{where}{extra}",
                                             label, label in self.selected_models))
@@ -3660,9 +3689,18 @@ class ResultsScreen(Screen):
             short.append("  [dim]To run Certify: in Setup tick the model and pack, choose Certify, press s.[/dim]")
         self.query_one("#readiness-short", Static).update("\n".join(short) if table else
                                                           "[dim]No verdicts yet: run something from Setup.[/dim]")
-        groups = sorted({g for t in table.values() for g in t})
-        matrix.add_columns("Model", *groups)
-        detail.add_columns("Model", "Use case", "Pack", "Verdict", "Answers right", "Answered", "Why")
+        present = {g for t in table.values() for g in t}
+        section_of = {u: sec for sec, ucs in verdict.sections(self.app.engine.packs) for u in ucs}
+        groups = [u for u in use_case_order(self.app.engine) if u in present] + sorted(present - set(section_of))
+        # two header lines: the section over its first use case, then the use case
+        matrix.header_height = 2
+        heads, prev = [], None
+        for g in groups:
+            sec = section_of.get(g, "")
+            heads.append(Text(f"{sec.upper() if sec != prev else ''}\n{g}", style="bold"))
+            prev = sec
+        matrix.add_columns(Text("\nModel", style="bold"), *heads)
+        detail.add_columns("Model", "Section", "Use case", "Pack", "Verdict", "Answers right", "Answered", "Why")
         right = collections.Counter((r["model"], r["suite"]) for r in self.rows if r["ok"])
         answered = collections.Counter((r["model"], r["suite"]) for r in self.rows)
         when = collections.defaultdict(list)
@@ -3681,11 +3719,12 @@ class ResultsScreen(Screen):
             for g in gs:
                 row = lat.get(label, {}).get(g, {})
                 lt.add_row(label, g, *[latency_cell(row.get(mid)) for mid in machine_ids])
-            for g, (_, packs) in gs.items():
+            for g in sorted(gs, key=lambda u: groups.index(u) if u in groups else len(groups)):
+                packs = gs[g][1]
                 for name, pv in packs.items():
                     if pv.status != "NO DATA":
                         n = answered[(label, name)]
-                        detail.add_row(label, g, name, f"[{style[pv.status]}]{pv.status}[/]",
+                        detail.add_row(label, section_of.get(g, ""), g, name, f"[{style[pv.status]}]{pv.status}[/]",
                                        f"{right[(label, name)]}/{n}" if n else "-", dates.span(when[(label, name)]),
                                        "; ".join(pv.reasons)[:160])
 

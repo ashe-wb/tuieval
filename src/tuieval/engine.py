@@ -2716,6 +2716,7 @@ class Engine:
             "model": {**{k: m.get(k) for k in ("label", "served_name", "server", "model", "tags", "vision", "mmproj")},
                       **{k: m[k] for k in ("tools", "max_context", "thinking") if k in m}},
             "pack": {"name": job.pack.name, "label": job.pack.label, "group": job.pack.group,
+                     "use_case": job.pack.use_case,
                      "fingerprint": job.pack.fingerprint, "tests": len(job.pack.tests),
                      **({"max_tokens": job.pack.max_tokens} if job.pack.max_tokens else {})},
             "settings": job.sampling,

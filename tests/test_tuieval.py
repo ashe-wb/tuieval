@@ -3766,6 +3766,56 @@ class Insights(unittest.TestCase):
             self.assertEqual(p.stdout.split(), ["True", "True", "True", "True", "bad"], p.stderr[-2000:])
 
 
+class UseCaseSections(unittest.TestCase):
+    """pack.toml `group` is the section a pack is listed under; `use_case` (default: the group) is what its
+    verdict counts toward, so one section can hold several use cases."""
+
+    def test_use_case_and_sections(self):
+        from tuieval import packs, verdict
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = [("coding", "Coding", None, 1), ("agentic", "Coding", "Agentic coding", 2),
+                    ("trading", "Data", "Trading", 3), ("coding-max", "Coding", "Coding", 4)]
+            for name, group, uc, order in spec:
+                d = os.path.join(tmp, name)
+                os.makedirs(d)
+                write(os.path.join(d, "pack.toml"), f'label = "{name}"\ngroup = "{group}"\norder = {order}\n'
+                                                    + (f'use_case = "{uc}"\n' if uc else ""))
+                write(os.path.join(d, "tests.yaml"), "- {input: hi, expected: 1}\n")
+            ps = packs.load_packs(tmp)
+        self.assertEqual({n: p.use_case for n, p in ps.items()},
+                         {"coding": "Coding", "agentic": "Agentic coding", "trading": "Trading", "coding-max": "Coding"})
+        # a section's use cases in pack order; a section split by `order` is still listed once
+        self.assertEqual(verdict.sections(ps), [("Coding", ["Coding", "Agentic coding"]), ("Data", ["Trading"])])
+
+    def test_verdict_codes_divide_sections(self):
+        from rich.text import Text
+        from tuieval import tui
+        codes = {"Coding": "C", "Agentic coding": "A", "Trading": "T"}
+        rows = [("Coding", "PASS", None), ("Trading", "FAIL", "2026-11-01")]
+        text = Text.from_markup(tui.verdict_codes(rows, codes, {"Trading"})).plain
+        self.assertEqual(text, "C✓    │ T✗")
+        # an empty row is as wide as a full one, so the "not run" padding lines up
+        self.assertEqual(len(tui.verdict_codes([], codes, {"Trading"})), len(text))
+
+    def test_use_case_panel_by_section(self):
+        from types import SimpleNamespace
+        from rich.text import Text
+        from tuieval import insights
+        rows = [{"model": m, "suite": s, "test": f"{s}{i}", "ok": ok, "tokens": 100, "secs": 1, "truncated": False,
+                 "reason": "", "severity": None, "raw": {}}
+                for s in ("coding", "agentic", "trading") for i in range(4)
+                for m, ok in (("a", True), ("b", i % 2 == 0))]
+        ps = {"coding": SimpleNamespace(group="Coding", use_case="Coding", label="Coding", tests=[{}] * 4),
+              "agentic": SimpleNamespace(group="Coding", use_case="Agentic coding", label="Agentic", tests=[{}] * 4),
+              "trading": SimpleNamespace(group="Data", use_case="Trading", label="Trading", tests=[{}] * 4)}
+        rows, models = insights.prepare(rows)
+        p = insights.use_cases(rows, models, ps)
+        lines = [Text.from_markup(l).plain for l in p["lines"]]
+        self.assertTrue(lines[0].strip().startswith("CODING"), lines[0])
+        self.assertIn("DATA", lines[0])
+        self.assertEqual([a.split(":")[0] for a in p["actions"]], ["Coding", "Agentic coding", "Trading"])
+
+
 class ServerCrash(unittest.TestCase):
     """A server that crashes mid-request (the stream just ends) never judges the model: the run says the
     server stopped and records no answer."""
