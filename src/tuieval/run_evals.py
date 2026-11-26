@@ -707,7 +707,8 @@ def cmd_tune(argv):
     p.add_argument("--max", type=int, default=None, metavar="N",
                    help="with --ctx: the largest context to try (default: the model's own limit)")
     p.add_argument("--start", type=int, default=None, metavar="N",
-                   help="with --ctx: the first context to try (default: half of what the model runs with now)")
+                   help="with --ctx: the first context to try (default: the largest the model file says fits, "
+                        "where tuieval can work that out; else half of what the model runs with now)")
     p.add_argument("--step", type=int, default=None, metavar="N",
                    help="with --ctx: how close to the true maximum to get (default 8192)")
     p.add_argument("--models", default=None, help="default: the workspace's models.toml")
