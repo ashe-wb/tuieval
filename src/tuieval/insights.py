@@ -25,7 +25,7 @@ import statistics
 
 from rich.markup import escape as rich_escape
 
-from . import compare
+from . import compare, verdict
 
 MIN_SHARE = 0.5      # like the PTA index: models with fewer answers than this share of the most-answered are left out
 HALF = 15            # half width of a diverging bar
@@ -140,20 +140,18 @@ def _heat(acc):
 
 
 def use_cases(rows, models, packs):
-    """packs: {name: Pack} (for groups and question counts)."""
+    """packs: {name: Pack} (for use cases, their sections and question counts)."""
     title = "Best model per use case"
-    groups = []
-    for name, p in packs.items():
-        if p.group not in groups:
-            groups.append(p.group)
-    groups = [g for g in groups if any(packs.get(r["suite"]) and packs[r["suite"]].group == g for r in rows)]
+    section_of = {u: sec for sec, ucs in verdict.sections(packs) for u in ucs}
+    uc = {name: verdict.use_case_of(p) for name, p in packs.items()}
+    groups = [u for u in section_of if any(uc.get(r["suite"]) == u for r in rows)]
     if not groups:
         return {"title": title, "lines": ["[dim]No results yet.[/dim]"], "actions": []}
-    size = {g: sum(len(p.tests) for p in packs.values() if p.group == g) for g in groups}
-    per = collections.defaultdict(lambda: collections.defaultdict(list))     # (model, group) -> test -> oks
+    size = {g: sum(len(p.tests) for name, p in packs.items() if uc[name] == g) for g in groups}
+    per = collections.defaultdict(lambda: collections.defaultdict(list))     # (model, use case) -> test -> oks
     for r in rows:
         if r["suite"] in packs:
-            per[r["model"], packs[r["suite"]].group][r["test"]].append(r["ok"])
+            per[r["model"], uc[r["suite"]]][r["test"]].append(r["ok"])
     cell = {}
     for m in models:
         for g in groups:
@@ -168,7 +166,18 @@ def use_cases(rows, models, packs):
             best[g] = (sorted((m for m, a in full.items() if a == top)), sorted(full.items(), key=lambda x: -x[1]))
     w = max(len(m) for m in models)
     short = {g: (g if len(g) <= CELL - 1 else f"{groups.index(g) + 1} {g[:CELL - 4]}…") for g in groups}
-    lines = [" " * (w + 2) + "".join(f"[b]{short[g]:<{CELL}}[/b]" for g in groups)]
+    spans, prev = [], None          # the section names over their use cases' columns
+    for g in groups:
+        if section_of[g] != prev:
+            spans.append([section_of[g], 0])
+            prev = section_of[g]
+        spans[-1][1] += 1
+    heading = ""
+    for sec, n in spans:
+        name = sec.upper()[:n * CELL - 2]
+        heading += f"[b underline]{_esc(name)}[/]" + " " * (n * CELL - len(name))
+    lines = [" " * (w + 2) + heading]
+    lines.append(" " * (w + 2) + "".join(f"[b]{short[g]:<{CELL}}[/b]" for g in groups))
     for m in models:
         cells = []
         for g in groups:
