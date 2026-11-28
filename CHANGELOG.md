@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0
+
 - Built-in pi agents for agent packs: `agent = "pi"` runs bare pi on the served model (sandboxed on macOS, with none of your pi setup), and `agent = "pi-scouts"` adds pi's subagent tool and a read-only `scout` agent on the same model, which the lead may send in parallel. Agent commands can use `{tuieval_python}`, the Python tuieval runs with. Agents can report `subagent_*` stats, and `tuieval compare` shows a **subagent tasks** column when they do. See docs/agent-packs.md.
 
 ## 0.2.0
