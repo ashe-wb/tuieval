@@ -76,6 +76,33 @@ agent = "my-agent"
 
 The agent's name and command are part of an agent pack's settings, so changing the command reruns the pack. The agent's version isn't: each answer records it, and `tuieval compare` marks a pack that ran on more than one version as MIXED.
 
+### Built in: pi
+
+Two agents come built in, for [pi](https://github.com/earendil-works/pi). Name one in a pack (`agent = "pi"`) or in `[defaults]`; pi must be on your PATH. An `[agents.pi]` or `[agents.pi-scouts]` of your own replaces the built-in one.
+
+| Agent | What it runs |
+|---|---|
+| `pi` | bare pi on the model tuieval serves |
+| `pi-scouts` | the same, plus pi's subagent tool and a read-only `scout` agent on the same model |
+
+```toml
+# what they are (builtin.toml); {tuieval_python} is the Python tuieval runs with
+[agents.pi]
+cmd = ["{tuieval_python}", "-m", "tuieval.adapters.pi"]
+
+[agents.pi-scouts]
+cmd = ["{tuieval_python}", "-m", "tuieval.adapters.pi", "--scouts"]
+```
+
+- **Bare:** pi gets a scratch config folder with one provider, the model tuieval serves, using its context size and sampling. It runs with no extensions, skills, context files, prompt templates, themes, MCP or saved session, so your own pi setup never changes a result. The model's `reasoning_effort` becomes pi's thinking level.
+- **Sandboxed on macOS:** pi and everything it runs can't read your home folder or the temp folders, apart from the task's work folder, the adapter's scratch folder and the pack's Python. They can write only the work folder and the scratch folder. So the model can't look up hidden tests or reference fixes, or leave notes for the next model. `TUIEVAL_NO_SANDBOX=1` turns this off, and the run line then says `sandbox OFF`. Other systems have no sandbox.
+- **Scouts:** `pi-scouts` adds pi's example subagent extension, found next to the pi on your PATH, and one agent, `scout`, with read-only tools (`read`, `grep`, `find`, `ls`) on the same model at thinking `low`.
+  - The lead gets one line saying the tool exists; the task text is unchanged, and whether to delegate is the lead's own choice.
+  - Scouts run inside the same sandbox.
+  - Their turns and tokens are counted in the task's totals and reported as `subagent_*` stats.
+  - The turn limit counts the lead's turns only.
+- **Comparing:** a pack whose `tasks/` is a link to another pack's tasks runs the same tasks with another agent. So `agentic-coding` with `agent = "pi"` beside `agentic-coding-scouts` with `agent = "pi-scouts"` shows each model with and without scouts.
+
 Most agents need a small **adapter**: a script that reads what tuieval provides, starts the agent with it, and writes the stats file. pi, Aider, Codex CLI, OpenCode and similar agents can all be wrapped this way. The adapter gets everything from its environment:
 
 | Variable | Contents |
@@ -105,6 +132,7 @@ Most agents need a small **adapter**: a script that reads what tuieval provides,
 - **`tool_errors`:** count failed edits and malformed tool calls, not commands that exit nonzero.
 - **`stop`:** `done`, `turn limit` or `error`.
 - **`server_error`:** if the model's server failed rather than the model, write this key with the error text. The task isn't counted and is asked again.
+- **`subagent_calls`, `subagent_tasks`, `subagent_failed`, `subagent_turns`, `subagent_input_tokens`, `subagent_output_tokens`:** work the agent handed to subagents. Count those tokens in `input_tokens` and `output_tokens` too.
 
 A minimal adapter:
 
@@ -133,10 +161,10 @@ Agent tasks appear wherever other answers do: Per question, Failures, the scorec
   - its final message and its changes as a diff;
   - the full transcript, with the test output;
   - under **What's checked**, the visible and hidden tests.
-- **`tuieval compare`:** adds an **Agent tasks** table per model and pack. It shows tasks passed, median minutes and turns, output tokens, tool errors, how often the tests were run, limits hit, tests edited, and the agent version.
+- **`tuieval compare`:** adds an **Agent tasks** table per model and pack. It shows tasks passed, median minutes and turns, output tokens, tool errors, how often the tests were run, limits hit, tests edited, and the agent version. When an agent reports subagent stats, a **subagent tasks** column shows how many tasks it handed out, in how many calls.
 
 `tuieval regrade` leaves agent results alone: they're graded when they run, so retest the pack instead.
 
 ## Safety
 
-⚠️ The agent runs commands as you, with your permissions. It works in a scratch folder, but nothing stops it from reaching outside that folder. Run agent packs in a container or VM with no credentials in the environment. The hidden tests and reference fixes live in your pack folder, so an agent that searched your disk could find them. The transcript would show it.
+⚠️ The agent runs commands as you, with your permissions. It works in a scratch folder, but apart from the built-in pi agents' macOS sandbox, nothing stops it from reaching outside that folder. Run agent packs in a container or VM with no credentials in the environment. The hidden tests and reference fixes live in your pack folder, so an agent that searched your disk could find them. The transcript would show it.

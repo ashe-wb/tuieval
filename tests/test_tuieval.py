@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -3877,6 +3878,11 @@ elif mode == "loop":
         time.sleep(0.3)
 elif mode == "crash":
     sys.exit(3)
+elif mode == "subagents":    # fixes it, reporting work handed to two subagents
+    src = open("calc.py").read()
+    open("calc.py", "w").write(src.replace("a - b", "a + b").replace("a + a", "a * b"))
+    save(turns=2, ran_tests=True, stop="done", final_message="Fixed with help", subagent_calls=1, subagent_tasks=2,
+         subagent_failed=0, subagent_turns=6, subagent_input_tokens=900, subagent_output_tokens=120)
 elif mode == "flaky":    # the model's server fails once per task, then the agent fixes it
     mark = os.path.join(here, "failed-" + os.environ["TUIEVAL_TASK"])
     if not os.path.exists(mark):
@@ -4110,6 +4116,157 @@ class AgentPacks(unittest.TestCase):
         self.run_pack()
         p = tuieval(self.ws, "regrade")
         self.assertIn("agent pack is graded by its tests when it runs", p.stdout)
+
+    def test_tuieval_python_placeholder_and_subagent_stats(self):
+        text = read(os.path.join(self.ws, "models.toml")).replace(json.dumps(sys.executable) + ', "{root}',
+                                                                   '"{tuieval_python}", "{root}')
+        write(os.path.join(self.ws, "models.toml"), text)
+        self.mode("subagents")
+        p = self.run_pack()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        data, rows = self.rows()
+        self.assertEqual(data["agent"]["cmd"], ["{tuieval_python}", "{root}/agents/fake_agent.py"])   # as written
+        a = rows["add"]["agent"]
+        self.assertTrue(rows["add"]["pass"], rows["add"]["reason"])
+        self.assertEqual((a["subagent_calls"], a["subagent_tasks"], a["subagent_turns"], a["subagent_output_tokens"]),
+                         (1, 2, 6, 120))
+        out = tuieval(self.ws, "compare").stdout
+        self.assertIn("subagent tasks", out)
+        self.assertRegex(out, r"\nm\s+agentic\s+2/2\s.*\s4 in 2 calls\s+fake 1.0\n")
+
+    def test_builtin_pi_agents(self):
+        from tuieval import engine
+        cfg = engine.load_config(os.path.join(self.ws, "models.toml"))
+        self.assertEqual(cfg["agents"]["pi"]["cmd"], ["{tuieval_python}", "-m", "tuieval.adapters.pi"])
+        self.assertEqual(cfg["agents"]["pi-scouts"]["cmd"][-1], "--scouts")
+        self.assertIn("fake", cfg["agents"])                                         # the workspace's own stay
+        with open(os.path.join(self.ws, "models.toml"), "a") as f:
+            f.write('\n[agents.pi]\ncmd = ["my-pi"]\n')
+        self.assertEqual(engine.load_config(os.path.join(self.ws, "models.toml"))["agents"]["pi"]["cmd"], ["my-pi"])
+
+
+FAKE_PI = r'''
+"""A fake pi for the adapter tests: records how it was started, then prints a scripted --mode json session."""
+import json, os, sys
+
+if sys.argv[1:] == ["--version"]:
+    print("9.9.9")
+    sys.exit(0)
+cfg = os.environ["PI_CODING_AGENT_DIR"]
+scout = os.path.join(cfg, "agents", "scout.md")
+with open(os.environ["FAKE_PI_LOG"], "w") as f:
+    json.dump({"argv": sys.argv[1:], "models": json.load(open(os.path.join(cfg, "models.json"))),
+               "scout": open(scout).read() if os.path.exists(scout) else None}, f)
+
+
+def emit(ev):
+    print(json.dumps(ev), flush=True)
+
+
+emit({"type": "tool_execution_start", "toolName": "read", "args": {"path": "calc.py"}})
+emit({"type": "tool_execution_end", "toolName": "read"})
+if "-e" in sys.argv:
+    emit({"type": "tool_execution_start", "toolName": "subagent", "args": {"tasks": [{"agent": "scout"}] * 2}})
+    emit({"type": "tool_execution_end", "toolName": "subagent", "result": {"details": {"mode": "parallel", "results": [
+        {"exitCode": 0, "usage": {"turns": 3, "input": 100, "cacheRead": 50, "output": 40}},
+        {"exitCode": 1, "usage": {"turns": 2, "input": 80, "output": 30}}]}}})
+emit({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "python -m pytest -q"}})
+emit({"type": "tool_execution_end", "toolName": "bash"})
+emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop",
+                                          "usage": {"input": 1000, "cacheRead": 200, "output": 70},
+                                          "content": [{"type": "text", "text": "Fixed calc.py"}]}})
+emit({"type": "agent_settled"})
+'''
+
+
+class PiAdapter(unittest.TestCase):
+    """The built-in pi adapter (tuieval.adapters.pi): bare pi on the served model, and with --scouts the
+    subagent extension plus a read-only scout agent on the same model, its work counted as subagent_* stats.
+    Runs against a fake pi in a fake pi install (package.json + examples/extensions/subagent/index.ts)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = self.tmp.name
+        self.pkg = os.path.join(t, "lib", "pi-coding-agent")
+        for d in ("bin", os.path.join("examples", "extensions", "subagent")):
+            os.makedirs(os.path.join(self.pkg, d))
+        write(os.path.join(self.pkg, "package.json"), '{"name": "@example/pi-coding-agent"}')
+        write(os.path.join(self.pkg, "examples", "extensions", "subagent", "index.ts"), "// fake")
+        pi = os.path.join(self.pkg, "bin", "pi")
+        write(pi, f"#!{sys.executable}\n" + FAKE_PI)
+        os.chmod(pi, 0o755)
+        self.work = os.path.join(t, "work")
+        os.makedirs(self.work)
+        write(os.path.join(t, "task.md"), "Fix calc.py.\n")
+        self.env = dict(os.environ, PATH=os.path.join(self.pkg, "bin") + os.pathsep + os.environ.get("PATH", ""),
+                        TUIEVAL_BASE_URL="http://127.0.0.1:9/v1", TUIEVAL_MODEL_ID="m", TUIEVAL_API_KEY="",
+                        TUIEVAL_PROMPT_FILE=os.path.join(t, "task.md"), TUIEVAL_STATS_FILE=os.path.join(t, "stats.json"),
+                        TUIEVAL_SAMPLING=json.dumps({"temperature": 0.6, "reasoning_effort": "high", "max_tokens": 8192}),
+                        TUIEVAL_CONTEXT="65536", TUIEVAL_MAX_TURNS="40", TUIEVAL_NO_SANDBOX="1",
+                        FAKE_PI_LOG=os.path.join(t, "pi.json"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_adapter(self, *args):
+        p = subprocess.run([sys.executable, "-m", "tuieval.adapters.pi", *args], cwd=self.work, env=self.env,
+                           capture_output=True, text=True, timeout=120)
+        return (p, json.loads(read(self.env["TUIEVAL_STATS_FILE"])), json.loads(read(self.env["FAKE_PI_LOG"])))
+
+    def test_bare_pi(self):
+        p, stats, seen = self.run_adapter()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        argv = seen["argv"]
+        for flag in ("--no-extensions", "--no-skills", "--no-context-files", "--no-mcp", "--no-session"):
+            self.assertIn(flag, argv)
+        self.assertNotIn("-e", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "tuieval/m")
+        self.assertEqual(argv[argv.index("--thinking") + 1], "high")
+        self.assertEqual(argv[-2:], ["--", "Fix calc.py.\n"])
+        model = seen["models"]["providers"]["tuieval"]["models"][0]
+        self.assertEqual((model["contextWindow"], model["maxTokens"], model["samplingParams"]["temperature"]),
+                         (65536, 8192, 0.6))
+        self.assertIsNone(seen["scout"])
+        self.assertEqual((stats["agent"], stats["turns"], stats["input_tokens"], stats["output_tokens"]),
+                         ("pi 9.9.9", 1, 1200, 70))
+        self.assertEqual((stats["tool_calls"], stats["ran_tests"], stats["stop"], stats["final_message"]),
+                         (2, True, "done", "Fixed calc.py"))
+        self.assertNotIn("subagent_tasks", stats)
+        self.assertIn("sandbox OFF", p.stdout)
+
+    def test_scouts(self):
+        p, stats, seen = self.run_adapter("--scouts")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        argv = seen["argv"]
+        self.assertEqual(argv[argv.index("-e") + 1],
+                         os.path.realpath(os.path.join(self.pkg, "examples", "extensions", "subagent", "index.ts")))
+        self.assertIn("--no-extensions", argv)                    # still bare apart from the one extension
+        self.assertIn("scout", argv[argv.index("--append-system-prompt") + 1])
+        self.assertIn("model: tuieval/m:low", seen["scout"])
+        self.assertIn("tools: read, grep, find, ls", seen["scout"])
+        self.assertEqual(stats["agent"], "pi 9.9.9 + scouts")
+        self.assertEqual({k: stats[k] for k in stats if k.startswith("subagent_")},
+                         {"subagent_calls": 1, "subagent_tasks": 2, "subagent_failed": 1, "subagent_turns": 5,
+                          "subagent_input_tokens": 230, "subagent_output_tokens": 70})
+        self.assertEqual((stats["input_tokens"], stats["output_tokens"]), (1200 + 230, 70 + 70))   # included
+        self.assertEqual(stats["tool_calls"], 3)
+        self.assertIn("subagents: 2 task(s), 5 turns, 70 output tokens", p.stdout)
+
+    def test_scouts_without_the_extension_is_an_error(self):
+        os.remove(os.path.join(self.pkg, "examples", "extensions", "subagent", "index.ts"))
+        p = subprocess.run([sys.executable, "-m", "tuieval.adapters.pi", "--scouts"], cwd=self.work, env=self.env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("subagent/index.ts wasn't found", p.stdout)
+        self.assertEqual(json.loads(read(self.env["TUIEVAL_STATS_FILE"]))["stop"], "error")
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "macOS sandbox")
+    def test_sandbox_profile_hides_home_but_not_the_work_folder(self):
+        from tuieval.adapters import pi
+        prof = pi.sandbox_profile(self.work, self.tmp.name, [])
+        self.assertIn(json.dumps(os.path.realpath(os.path.expanduser("~"))), prof)
+        self.assertIn(json.dumps(os.path.realpath(self.work)), prof)
+        self.assertIn("(deny appleevent-send)", prof)
 
 
 class ContextBench(unittest.TestCase):

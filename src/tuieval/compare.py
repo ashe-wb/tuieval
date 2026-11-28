@@ -639,7 +639,9 @@ def items(rows):
 
 def agent_table(rows):
     """(header, table) summing up agent-pack tasks per model and pack, or None without any. A pack run
-    by more than one agent version is marked, since a new version can change how models do."""
+    by more than one agent version is marked, since a new version can change how models do. A
+    "subagent tasks" column (tasks handed to subagents, out of the agent's calls) appears only when
+    some agent reported subagent stats."""
     groups = collections.defaultdict(list)
     for r in rows:
         if r.get("agent"):
@@ -648,6 +650,9 @@ def agent_table(rows):
         return None
     header = ["model", "pack", "passed", "med min", "med turns", "out tokens", "tool errors", "ran tests",
               "limits hit", "tests edited", "agent"]
+    subagents = any("subagent_tasks" in r["agent"] for rs in groups.values() for r in rs)
+    if subagents:
+        header.insert(-1, "subagent tasks")
     table = []
     for (model, suite), rs in sorted(groups.items()):
         a = [r["agent"] for r in rs]
@@ -662,6 +667,10 @@ def agent_table(rows):
                       str(sum(x.get("stop") in ("time limit", "turn limit") for x in a)),
                       str(sum(bool(x.get("tests_edited")) for x in a)),
                       " + ".join(versions) + (" (MIXED)" if len(versions) > 1 else "")])
+        if subagents:
+            sub = [x for x in a if "subagent_tasks" in x]
+            table[-1].insert(-1, f"{sum(x['subagent_tasks'] for x in sub)} in "
+                                 f"{sum(x.get('subagent_calls') or 0 for x in sub)} calls" if sub else "-")
     return header, table
 
 
