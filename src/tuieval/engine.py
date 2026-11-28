@@ -45,6 +45,7 @@ import socket
 import statistics
 import string
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -105,7 +106,7 @@ def hosted(cfg, m):
 def load_config(path):
     """Read models.toml, fill in the built-ins it leaves out (builtin.toml) and each model's defaults.
     [defaults] are filled key by key; [sampling] only when models.toml has none (sampling is part of
-    every result's fingerprint, so a workspace's own keys are never added to); servers by name."""
+    every result's fingerprint, so a workspace's own keys are never added to); servers and agents by name."""
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
     builtin = builtin_config()
@@ -117,6 +118,7 @@ def load_config(path):
     own = cfg.get("servers", {})
     cfg["servers"] = {**builtin["servers"], **own}
     cfg["builtin_servers"] = sorted(set(builtin["servers"]) - set(own))   # not defined in models.toml
+    cfg["agents"] = {**builtin.get("agents", {}), **cfg.get("agents", {})}
     cfg.setdefault("models", [])
     seen = set()
     for m in cfg["models"]:
@@ -2310,7 +2312,7 @@ class Engine:
         python = agents.python_for(job.pack, self.root)
         m, s = job.model, job.sampling
         key_env = self.cfg["servers"][m["server"]].get("api_key_env")
-        cmd = [expand(str(a), root=self.root) for a in agent["cmd"]]
+        cmd = [expand(str(a), root=self.root, tuieval_python=sys.executable) for a in agent["cmd"]]
         live = os.path.join(self.log_dir, "live")
         os.makedirs(live, exist_ok=True)
         waits = list(self.SERVER_RETRY_WAITS_S)
@@ -2377,7 +2379,7 @@ class Engine:
                 "agent": {"name": name, "version": stats.get("agent"), "stop": stop if stop != "exited" else
                           stats.get("stop") or "exited",
                           **{k: stats[k] for k in ("turns", "input_tokens", "output_tokens", "tool_calls",
-                                                   "tool_errors", "ran_tests") if k in stats},
+                                                   "tool_errors", "ran_tests", *agents.SUBAGENT_KEYS) if k in stats},
                           "exit_code": code, "tests_edited": edited, "visible": g["visible"],
                           "hidden": g["hidden"], "failed": g["failed"], "diff": patch[:agents.DIFF_KEEP],
                           "diff_cut": len(patch) > agents.DIFF_KEEP}}

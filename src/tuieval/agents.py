@@ -1,9 +1,13 @@
 """Agent packs: coding tasks a command-line agent works on, graded by tests.
 
-models.toml says how to start each agent (any program; {root} is the workspace):
+models.toml says how to start each agent (any program; {root} is the workspace, {tuieval_python} the Python
+tuieval runs with):
 
     [agents.my-agent]
     cmd = ["python3", "{root}/agents/my_agent.py"]
+
+Built in (builtin.toml, replaced by an [agents.<name>] of the same name): "pi" and "pi-scouts", pi through
+tuieval/adapters/pi.py.
 
     [defaults]
     agent = "my-agent"      # for agent packs that don't name one (pack.toml agent = "...")
@@ -28,9 +32,11 @@ The agent learns the rest from its environment:
   TUIEVAL_STATS_FILE   where it may write its stats as JSON when it finishes (all optional):
                          agent ("name version"), turns, input_tokens, output_tokens, tool_calls,
                          tool_errors (failed edits, bad tool calls; not commands that exit nonzero),
-                         ran_tests, stop ("done", "turn limit" or "error"), final_message, and
+                         ran_tests, stop ("done", "turn limit" or "error"), final_message,
                          server_error: the model's server failed, not the model (the task isn't counted
-                         and is asked again)
+                         and is asked again), and subagent_calls, subagent_tasks, subagent_failed,
+                         subagent_turns, subagent_input_tokens, subagent_output_tokens for work handed to
+                         subagents (also counted in input_tokens and output_tokens)
 
 PATH starts with the pack's Python (pack.toml python, else tuieval's), so `python` runs the tasks'
 code and tests. The agent's exit code decides nothing; the tests do.
@@ -55,8 +61,12 @@ PROMPT_TAIL = "\n\nYou're working in a project in the current directory. Run Pyt
 GRADE_TIMEOUT_S = 300
 DIFF_KEEP = 20_000      # characters of the diff kept in the result (the whole diff is in the log)
 HIDDEN_RE = re.compile(r"\.?_hidden\b")   # junit names of the hidden tests (a collection error starts with ".")
+# subagent_*: work the agent handed to subagents (counted in its own input/output tokens too), e.g. the
+# built-in pi-scouts agent's scouts
+SUBAGENT_KEYS = ("subagent_calls", "subagent_tasks", "subagent_failed", "subagent_turns", "subagent_input_tokens",
+                 "subagent_output_tokens")
 STATS_KEYS = ("agent", "turns", "input_tokens", "output_tokens", "tool_calls", "tool_errors", "ran_tests", "stop",
-              "final_message", "server_error")
+              "final_message", "server_error", *SUBAGENT_KEYS)
 
 
 class AgentError(Exception):

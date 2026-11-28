@@ -1,6 +1,6 @@
-# Built-in defaults and servers, used when a workspace's models.toml doesn't define them.
+# Built-in defaults, servers and agents, used when a workspace's models.toml doesn't define them.
 # [defaults] fill in key by key; [sampling] only when models.toml has no [sampling] at all (it's part of
-# every result's fingerprint); a server here is replaced whole by one of the same name in models.toml.
+# every result's fingerprint); a server or agent here is replaced whole by one of the same name in models.toml.
 
 [defaults]
 repeat = 3
@@ -85,3 +85,13 @@ pin_endpoint = true
 api_key_env = "OPENROUTER_API_KEY"
 thinking_param = "reasoning"     # [sampling] enable_thinking -> OpenRouter's reasoning.enabled
 headers = { "X-Title" = "tuieval" }
+
+# pi (https://github.com/earendil-works/pi) for agent packs, through the built-in adapter (tuieval/adapters/pi.py):
+# bare pi on the served model, sandboxed on macOS. pi-scouts adds pi's subagent extension and a read-only "scout"
+# agent on the same model, which the lead may send in parallel. pi must be on PATH. {tuieval_python} is the
+# Python tuieval runs with. Use one in a pack with  agent = "pi"  (pack.toml) or  [defaults] agent = "pi".
+[agents.pi]
+cmd = ["{tuieval_python}", "-m", "tuieval.adapters.pi"]
+
+[agents.pi-scouts]
+cmd = ["{tuieval_python}", "-m", "tuieval.adapters.pi", "--scouts"]

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Built-in pi agents for agent packs: `agent = "pi"` runs bare pi on the served model (sandboxed on macOS, with none of your pi setup), and `agent = "pi-scouts"` adds pi's subagent tool and a read-only `scout` agent on the same model, which the lead may send in parallel. Agent commands can use `{tuieval_python}`, the Python tuieval runs with. Agents can report `subagent_*` stats, and `tuieval compare` shows a **subagent tasks** column when they do. See docs/agent-packs.md.
+
 ## 0.2.0
 
 - `tuieval tune --ctx` starts where the model file says the limit is, instead of climbing from a small context: for a GGUF on a llama.cpp-style server it estimates the largest context that fits (weights, buffers, and the KV cache per token with sliding-window layers counted as llama.cpp keeps them), tries that first, and lets the first reading predict whether more fits. Typically 1 or 2 server starts, down from 3 to 6 (Gemma 4 31B: one, at its 262,144 limit, where it took five). The estimate is dropped when a try's memory is more than 25% off it; MLA models, models larger than memory and servers that size their own memory keep the doubling search. The saved measurement records where it started (`started_from`, `estimated_ctx`).
